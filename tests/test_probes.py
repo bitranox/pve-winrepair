@@ -129,7 +129,7 @@ class FakeHost:
         return self.docker
 
     def computer_name(self) -> str:
-        return "VM-TEST"
+        return "GUEST-TEST"
 
 
 def _run(host: FakeHost, *argv: str) -> tuple[int, dict[str, object]]:
@@ -184,7 +184,7 @@ def test_lp_defect_matches_language_pack_absent_events_case_insensitively() -> N
     assert data["codes"] == ["0x800736B3", "0x80071a2d"]
     assert data["last"] == new.isoformat()
     assert (data["host"], data["build"], data["display_version"], data["install_language"]) == (
-        "VM-TEST",
+        "GUEST-TEST",
         "26200.9711",
         "25H2",
         "0407",
