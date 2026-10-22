@@ -18,14 +18,23 @@ the gitignored one in the checkout and the maintainer's tracked canonical copy k
 repository.
 
 What is scanned: every entry ``git ls-files`` lists, as the bytes a commit stores (the index blob,
-so a symlink's target too, never the worktree), in every rendering (UTF-8, else latin-1; plus
-UTF-16-LE at both byte alignments whenever the bytes hold a NUL), and every listed path name.
-``uv.lock``'s content is skipped (machine-written hashes and sizes; a size can equal a VM id) but
-its name is scanned. A gitlink's content is another repository; only its name is scanned here. The
-packed guest tool is scanned without its base64 payload, which can spell a token by chance and
-changes on every repack; the payload is scanned DECODED, member by member. A finding names the
-file, the line and the pattern or the token's list position (``token words[2]``), never the matched
-text, so a failing log does not publish what it found. The list object prints only its counts.
+so a symlink's target too, never the worktree), then every untracked file that is not ignored
+(``git ls-files -o --exclude-standard``, read from the worktree, a symlink as its target): bmk's
+``make push`` runs the tests and THEN ``git add -A``, which commits those too. Each is scanned in
+every rendering (UTF-8, else latin-1; plus UTF-16-LE at both byte alignments whenever the bytes
+hold a NUL), and every listed path name. ``uv.lock``'s content is skipped (machine-written hashes
+and sizes; a size can equal a VM id) but its name is scanned. A gitlink's content is another
+repository; only its name is scanned here. The packed guest tool is scanned without its base64
+payload, which can spell a token by chance and changes on every repack; the payload is scanned
+DECODED, member by member.
+
+A finding names the file, the line and the pattern or the token's list position
+(``token words[2]``), never the matched text, so a failing log does not publish what it found; a
+path finding names the path's index (``path[7]``): the tracked entries in ``git ls-files`` order
+first, then the untracked ones in ``git ls-files -o`` order. The list object prints only its counts.
+pytest's long tracebacks print every shown frame's arguments, and ``-l`` its locals: every helper
+holding scanned text or list content hides its frame (``__tracebackhide__``), and a refused payload
+is re-raised as a message-only :class:`PayloadError` with its chain dropped.
 """
 
 from __future__ import annotations
@@ -77,6 +86,10 @@ class PrivacyListError(ValueError):
     """The private token list is unreadable or malformed: an error, never a reason to skip."""
 
 
+class PayloadError(ValueError):
+    """The packed tool's payload is refused; the message names the reason, never the text."""
+
+
 @dataclass(frozen=True, repr=False)
 class PrivateList:
     """The private tokens, each with the label a finding prints in its place."""
@@ -96,7 +109,9 @@ class PrivateList:
 
 def _parse(path: Path) -> object:
     # "from None" for the decode errors: a chained traceback ends in json's own frame, whose
-    # argument is the whole list text, and pytest prints that argument.
+    # argument is the whole list text, and pytest prints that argument. Hidden: with -l pytest
+    # prints this frame's locals, and a UnicodeDecodeError's repr carries the list's bytes.
+    __tracebackhide__ = True
     try:
         return json.loads(path.read_bytes().decode("utf-8"))
     except OSError as exc:
@@ -133,6 +148,7 @@ def load_private_list(path: Path) -> PrivateList:
         PrivacyListError: The file is unreadable, not JSON, not an object, has an unknown key, a
             non-list value, a non-string or empty entry, or holds no token under any key.
     """
+    __tracebackhide__ = True  # with -l pytest prints locals: ``data`` holds every token
     data = _parse(path)
     if not isinstance(data, dict):
         raise PrivacyListError(f"{path}: the list must be a JSON object with keys from {', '.join(sorted(KEYS))}")
@@ -178,6 +194,7 @@ def renderings(data: bytes) -> list[str]:
     Returns:
         UTF-8 (else latin-1), plus UTF-16-LE at both byte alignments when ``data`` holds a NUL.
     """
+    __tracebackhide__ = True
     try:
         found = [data.decode("utf-8")]
     except UnicodeDecodeError:
@@ -198,6 +215,7 @@ def _token_patterns(private: PrivateList) -> tuple[tuple[str, re.Pattern[str]], 
 
 
 def _occurrences(text: str, needle: str) -> Iterator[int]:
+    __tracebackhide__ = True
     start = text.find(needle)
     while start >= 0:
         yield start
@@ -205,10 +223,12 @@ def _occurrences(text: str, needle: str) -> Iterator[int]:
 
 
 def _line(text: str, offset: int) -> int:
+    __tracebackhide__ = True
     return text.count("\n", 0, offset) + 1
 
 
 def _hits(text: str, private: PrivateList | None) -> list[tuple[int, str]]:
+    __tracebackhide__ = True
     found = [(_line(text, m.start()), f"pattern {p.pattern}") for p in GENERIC for m in p.finditer(text)]
     if private is None:
         return found
@@ -237,6 +257,7 @@ def findings(name: str, text: str, private: PrivateList | None) -> list[str]:
     Returns:
         ``<name>:<line>: pattern <regex>`` and ``<name>:<line>: token <key>[<n>]`` lines, by line.
     """
+    __tracebackhide__ = True
     return [f"{name}:{line}: {what}" for line, what in sorted(set(_hits(text, private)))]
 
 
@@ -251,6 +272,7 @@ def file_findings(name: str, data: bytes, private: PrivateList | None) -> list[s
     Returns:
         The findings of :func:`findings` over each of :func:`renderings`, first occurrence kept.
     """
+    __tracebackhide__ = True
     return list(dict.fromkeys(f for text in renderings(data) for f in findings(name, text, private)))
 
 
@@ -265,6 +287,7 @@ def path_findings(index: int, name: str, private: PrivateList | None) -> list[st
     Returns:
         ``path[<index>]: pattern <regex>`` and ``path[<index>]: token <key>[<n>]`` lines.
     """
+    __tracebackhide__ = True
     return list(dict.fromkeys(f"path[{index}]: {what}" for _, what in sorted(_hits(name, private))))
 
 
@@ -277,9 +300,37 @@ def payload_findings(text: str, private: PrivateList | None) -> list[str]:
 
     Returns:
         The :func:`file_findings` of every member, labelled by the member name.
+
+    Raises:
+        PayloadError: The payload is refused (see :func:`pack_guest.decode_payload`).
     """
-    members = pack_guest.decode_payload(text)
+    __tracebackhide__ = True
+    members = decoded_payload(text)
     return [f for name, data in members.items() for f in file_findings(name, data, private)]
+
+
+def decoded_payload(text: str) -> dict[str, bytes]:
+    """The members of a packed script's payload, refused with a message that never quotes ``text``.
+
+    pytest's long traceback prints each shown frame's arguments, ``-l`` its locals: here and in
+    ``decode_payload`` that is the whole artefact, which saferepr cuts to its head and tail, so a
+    refused block appended at the end would print. This frame is hidden and the chain dropped.
+
+    Args:
+        text: The packed script.
+
+    Returns:
+        Each archive member name mapped to its bytes.
+
+    Raises:
+        PayloadError: Not exactly one payload and one sha line, malformed base64 or zip, or a sha
+            mismatch; the message is ``decode_payload``'s, which names the reason only.
+    """
+    __tracebackhide__ = True
+    try:
+        return pack_guest.decode_payload(text)
+    except ValueError as exc:
+        raise PayloadError(str(exc)) from None
 
 
 def _git() -> str:
@@ -290,6 +341,7 @@ def _git() -> str:
 
 
 def _git_run(project: Path, *args: str, stdin: bytes = b"") -> bytes:
+    __tracebackhide__ = True  # ``stdin`` can hold file content (a staged test blob)
     # Inherited GIT_* variables (a hook's GIT_DIR, a pathspec mode) would make git answer for
     # another repository or another pathspec rule; LC_ALL=C keeps its output unlocalised.
     env = {k: v for k, v in os.environ.items() if not k.upper().startswith("GIT_")}
@@ -305,6 +357,7 @@ def _git_run(project: Path, *args: str, stdin: bytes = b"") -> bytes:
 
 def _index(project: Path) -> list[tuple[str, str, str]]:
     """Every index entry as (mode, object id, name), in ``git ls-files`` order, unmerged stages included."""
+    __tracebackhide__ = True
     listing = _git_run(project, "ls-files", "-z", "-s").decode("utf-8", "surrogateescape")
     entries: list[tuple[str, str, str]] = []
     for record in filter(None, listing.split("\0")):
@@ -316,6 +369,7 @@ def _index(project: Path) -> list[tuple[str, str, str]]:
 
 def _blobs(project: Path, object_ids: Sequence[str]) -> dict[str, bytes]:
     """The bytes of each blob, read from git's object store in one ``git cat-file --batch``."""
+    __tracebackhide__ = True
     out = _git_run(project, "cat-file", "--batch", stdin="".join(f"{i}\n" for i in object_ids).encode("ascii"))
     found: dict[str, bytes] = {}
     at = 0
@@ -330,8 +384,27 @@ def _blobs(project: Path, object_ids: Sequence[str]) -> dict[str, bytes]:
     return found
 
 
+def _untracked(project: Path) -> list[tuple[str, bytes]]:
+    """Every untracked, not-ignored path as (name, worktree bytes), in ``git ls-files -o`` order."""
+    __tracebackhide__ = True
+    listing = _git_run(project, "ls-files", "-z", "-o", "--exclude-standard").decode("utf-8", "surrogateescape")
+    found: list[tuple[str, bytes]] = []
+    for name in filter(None, listing.split("\0")):
+        path = project / name
+        if name in CONTENT_EXCLUDED:
+            data = b""
+        elif path.is_symlink():
+            data = os.fsencode(path.readlink())  # git stores a symlink as its target
+        elif path.is_file():
+            data = path.read_bytes()
+        else:
+            data = b""  # "<dir>/": a nested repository, which its own scan covers
+        found.append((name, data))
+    return found
+
+
 def _tracked(project: Path = pack_guest.PROJECT) -> list[tuple[str, bytes]]:
-    """Every index entry as (name, bytes to scan), in ``git ls-files`` order.
+    """Every index entry, then every untracked, not-ignored path, as (name, bytes to scan).
 
     The bytes are what a commit stores, read from the INDEX, never the worktree: a staged file
     deleted or restored in the worktree, a dangling symlink and a symlink's target (the blob of a
@@ -340,7 +413,14 @@ def _tracked(project: Path = pack_guest.PROJECT) -> list[tuple[str, bytes]]:
     another repository, which its own scan covers; its name is still scanned. ``uv.lock`` comes with
     empty bytes too (its content is excluded, its name is not); the packed tool comes as its wrapper
     without the payload, whose base64 is never scanned as text.
+
+    The untracked, not-ignored paths follow (``git ls-files -o --exclude-standard`` order, read from
+    the worktree): bmk's ``make push`` runs the tests and then ``git add -A``, which commits them. So
+    positions ``0..n-1`` are the ``git ls-files`` positions of the n index entries and position
+    ``n + k`` is the k-th untracked path. An untracked file is scanned as it is, the packed tool
+    included (its payload is decoded only from the index), and ``uv.lock``'s content stays excluded.
     """
+    __tracebackhide__ = True
     entries = _index(project)
     readable = [i for mode, i, name in entries if mode != GITLINK and name not in CONTENT_EXCLUDED]
     blobs = _blobs(project, list(dict.fromkeys(readable)))
@@ -354,15 +434,17 @@ def _tracked(project: Path = pack_guest.PROJECT) -> list[tuple[str, bytes]]:
             tracked.append((name, wrapper.encode("utf-8")))
         else:
             tracked.append((name, blobs[object_id]))
-    return tracked
+    return tracked + _untracked(project)
 
 
 def _artefact_text() -> str:
     """The packed tool as the index stores it, the same bytes :func:`_tracked` scans."""
+    __tracebackhide__ = True
     return _git_run(pack_guest.PROJECT, "cat-file", "blob", f":{pack_guest.ARTEFACT.as_posix()}").decode("utf-8")
 
 
 def _tree_findings(private: PrivateList | None, project: Path = pack_guest.PROJECT) -> list[str]:
+    __tracebackhide__ = True
     tracked = _tracked(project)
     assert tracked, "the scan listed no tracked file: it examined nothing"
     return [
@@ -409,7 +491,7 @@ def _packed(members: dict[str, bytes]) -> str:
 def test_the_scan_examines_the_tree_and_the_payload() -> None:
     # Counted into locals: a failing assert on len(...) would print the scanned contents.
     entries = len(_tracked())
-    members = len(pack_guest.decode_payload(_artefact_text()))
+    members = len(decoded_payload(_artefact_text()))
     assert entries >= 100
     assert members == 10
 
@@ -426,24 +508,32 @@ def test_no_tracked_file_or_path_carries_a_private_token(private: PrivateList) -
 
 @pytest.mark.os_agnostic
 def test_the_packed_payload_matches_no_generic_pattern() -> None:
-    assert payload_findings(_artefact_text(), None) == []
+    # Into a local: a failing assert over the call would print its argument, the artefact text.
+    found = payload_findings(_artefact_text(), None)
+    assert found == []
 
 
 @pytest.mark.os_agnostic
 def test_the_packed_payload_carries_no_private_token(private: PrivateList) -> None:
-    assert payload_findings(_artefact_text(), private) == []
+    found = payload_findings(_artefact_text(), private)
+    assert found == []
+
+
+def _scanned_artefact_shape() -> tuple[bool, bool, bool]:
+    """(holds the payload here-string, holds the sha line, is non-empty) of the scanned artefact."""
+    __tracebackhide__ = True  # its locals hold the scanned wrapper text
+    scanned = dict(_tracked())[pack_guest.ARTEFACT.as_posix()].decode("utf-8")
+    return "$PwshPyPayload = @'" in scanned, "$PwshPySha = '" in scanned, bool(scanned.strip())
 
 
 @pytest.mark.os_agnostic
 def test_the_artefact_is_scanned_without_its_base64_payload() -> None:
-    scanned = dict(_tracked())[pack_guest.ARTEFACT.as_posix()].decode("utf-8")
     # The wrapper still names the variables; their definitions (the here-string, the sha) are gone.
-    # Booleans, not "x not in scanned": a failing assert would print the scanned text.
-    has_payload = "$PwshPyPayload = @'" in scanned
-    has_sha = "$PwshPySha = '" in scanned
+    # Booleans from a hidden helper: a failing assert, or -l, would print the scanned text.
+    has_payload, has_sha, has_wrapper = _scanned_artefact_shape()
     assert not has_payload
     assert not has_sha
-    assert scanned.strip(), "the wrapper of the packed tool was not scanned"
+    assert has_wrapper, "the wrapper of the packed tool was not scanned"
 
 
 # --- planted positives (a tmp_path list, so these run in CI too) ---------------------------
@@ -510,8 +600,11 @@ def test_a_second_payload_block_is_refused_not_skipped(tmp_path: Path) -> None:
     # The wrapper scan strips EVERY payload block; a decode of only the first would let a second
     # block escape both checks.
     packed = _packed({"pkg/clean.py": b"x = 1\n"}) + "$PwshPyPayload = @'\nAAAA\n'@\n"
-    with pytest.raises(ValueError, match="exactly one"):
+    with pytest.raises(PayloadError, match="exactly one") as raised:
         payload_findings(packed, _planted(tmp_path))
+    # The chain is dropped: a chained traceback would print decode_payload's text argument.
+    assert raised.value.__cause__ is None
+    assert raised.value.__suppress_context__
 
 
 # --- what a commit stores: the index, not the worktree (a scratch repository) ---------------
@@ -579,6 +672,38 @@ def test_positions_are_those_of_git_ls_files(repo: Path) -> None:
     assert [name for name, _ in _tracked(repo)] == listed == ["a-dangling-link", "clean.txt", "z.txt"]
 
 
+# --- what `git add -A` adds: untracked, not-ignored files (bmk's push stages them after the tests) ---
+
+
+@pytest.mark.os_agnostic
+def test_an_untracked_file_is_scanned(repo: Path, tmp_path: Path) -> None:
+    (repo / "notes.txt").write_bytes(b"host planted-host7\n")
+    assert _tree_findings(_planted(tmp_path), repo) == ["notes.txt:1: token hosts[1]"]
+
+
+@pytest.mark.os_agnostic
+def test_an_ignored_untracked_file_is_not_scanned(repo: Path, tmp_path: Path) -> None:
+    (repo / ".gitignore").write_bytes(b"notes.txt\n")
+    (repo / "notes.txt").write_bytes(b"host planted-host7\n")
+    assert _tree_findings(_planted(tmp_path), repo) == []
+
+
+@pytest.mark.os_agnostic
+def test_untracked_paths_are_indexed_after_the_tracked_ones(repo: Path, tmp_path: Path) -> None:
+    (repo / "b.txt").write_bytes(b"b\n")
+    (repo / "a-plantedword.txt").write_bytes(b"a\n")
+    listed = _git_run(repo, "ls-files", "-z", "-o", "--exclude-standard").decode("utf-8").split("\0")[:-1]
+    assert [name for name, _ in _tracked(repo)] == ["clean.txt", *listed] == ["clean.txt", "a-plantedword.txt", "b.txt"]
+    assert _tree_findings(_planted(tmp_path), repo) == ["path[1]: token words[1]"]
+
+
+@pytest.mark.os_posix
+def test_an_untracked_symlink_is_scanned_as_its_target(repo: Path, tmp_path: Path) -> None:
+    # git stores a symlink as its target text, which is what `git add -A` would commit.
+    (repo / "link").symlink_to("/planted/dir/x")
+    assert _tree_findings(_planted(tmp_path), repo) == ["link:1: token paths[1]"]
+
+
 # --- a failing privacy test prints no token -------------------------------------------------
 
 
@@ -589,38 +714,76 @@ def test_a_private_list_prints_counts_never_tokens(tmp_path: Path) -> None:
     assert str(planted) == repr(planted)
 
 
+# Each probe models a real test: the tree scan, the payload scan, and a direct decode_payload call
+# (test_pack_guest and test_artefact make one on the committed artefact). Results go into locals
+# first, as the real tests do: an assert over a call would print the call's text argument.
 _PROBE = """
 import os
 from pathlib import Path
 
+import pack_guest
 import test_privacy_gate as gate
 from test_privacy_gate import private
 
 
-def test_probe(private):
-    assert gate._tree_findings(private, Path(os.environ["PROBE_REPO"])) == []
+def _text():
+    return Path(os.environ["PROBE_TEXT"]).read_bytes().decode("utf-8")
+
+
+def test_tree(private):
+    found = gate._tree_findings(private, Path(os.environ["PROBE_REPO"]))
+    assert found == []
+
+
+def test_payload(private):
+    found = gate.payload_findings(_text(), private)
+    assert found == []
+
+
+def test_packer():
+    members = len(pack_guest.decode_payload(_text()))
+    assert members == 1
 """
 _PLANTED_TOKENS = ("planted-host7", "98765", "plantedword", "/planted/dir/")
-
-
-@pytest.mark.os_agnostic
-@pytest.mark.parametrize(
-    ("tokens_json", "outcome"),
-    [
-        (
-            '{"hosts": ["planted-host7"], "vmids": ["98765"], "words": ["plantedword"], "paths": ["/planted/dir/"]}',
-            "1 failed",
-        ),
-        ('{"hosts": ["planted-host7"], "vmids": ["98765"], "words": ["plantedword", ""]}', "1 error"),
-        ('{"hosts": ["planted-host7"], "vmids": ["98765"], "words": ["plantedword"]', "1 error"),
-    ],
-    ids=["a-finding", "a-malformed-list", "invalid-json"],
+_PLANTED_JSON = json.dumps(
+    {"hosts": ["planted-host7"], "vmids": ["98765"], "words": ["plantedword"], "paths": ["/planted/dir/"]}
 )
-def test_a_failing_run_prints_no_token(repo: Path, tmp_path: Path, tokens_json: str, outcome: str) -> None:
-    """Run a failing privacy test in a child pytest, the strictest tracebacks on, and read its output."""
-    (repo / "leak.txt").write_bytes(" ".join(_PLANTED_TOKENS).encode("utf-8") + b"x\n")
+_LEAK = " ".join(_PLANTED_TOKENS)
+# A refused block at the END: saferepr keeps a long argument's head and tail, so the tail prints.
+_SECOND_BLOCK = _packed({"pkg/clean.py": b"x = 1\n"}) + f"$PwshPyPayload = @'\n{_LEAK}\n'@\n"
+# One block and one sha line, but "-" is not base64: the older "not base64" refusal.
+_NOT_BASE64 = f"$PwshPySha = '{'0' * 64}'\n$PwshPyPayload = @'\n{_LEAK}\n'@\nInvoke-It\n"
+
+
+@dataclass(frozen=True)
+class _LeakCase:
+    probe: str  # the probe test to run
+    tokens_json: str  # the list the child reads
+    text: str  # the packed script the payload probes read
+    outcome: str  # pytest's summary for the run
+
+
+_LEAK_CASES = {
+    "a-finding": _LeakCase("test_tree", _PLANTED_JSON, "", "1 failed"),
+    "a-malformed-list": _LeakCase(
+        "test_tree", '{"hosts": ["planted-host7"], "vmids": ["98765"], "words": ["plantedword", ""]}', "", "1 error"
+    ),
+    "invalid-json": _LeakCase(
+        "test_tree", '{"hosts": ["planted-host7"], "vmids": ["98765"], "words": ["plantedword"]', "", "1 error"
+    ),
+    "a-second-payload-block": _LeakCase("test_payload", _PLANTED_JSON, _SECOND_BLOCK, "1 failed"),
+    "a-second-payload-block-decoded-directly": _LeakCase("test_packer", _PLANTED_JSON, _SECOND_BLOCK, "1 failed"),
+    "a-payload-not-base64": _LeakCase("test_payload", _PLANTED_JSON, _NOT_BASE64, "1 failed"),
+    "a-payload-not-base64-decoded-directly": _LeakCase("test_packer", _PLANTED_JSON, _NOT_BASE64, "1 failed"),
+}
+
+
+def _run_probe(repo: Path, tmp_path: Path, case: _LeakCase, options: Sequence[str]) -> str:
+    """Run one probe test in a child pytest and return its whole output, lower-cased."""
+    (repo / "leak.txt").write_bytes(_LEAK.encode("utf-8") + b"x\n")
     _git_run(repo, "add", "leak.txt")
-    (tmp_path / "tokens.json").write_text(tokens_json, encoding="utf-8")
+    (tmp_path / "tokens.json").write_text(case.tokens_json, encoding="utf-8")
+    (tmp_path / "packed.ps1").write_bytes(case.text.encode("utf-8"))
     (tmp_path / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
     (tmp_path / "test_probe.py").write_text(_PROBE, encoding="utf-8")
     here = Path(__file__).resolve().parent
@@ -631,27 +794,26 @@ def test_a_failing_run_prints_no_token(repo: Path, tmp_path: Path, tokens_json: 
         ),
         TOKENS_VARIABLE: str(tmp_path / "tokens.json"),
         "PROBE_REPO": str(repo),
+        "PROBE_TEXT": str(tmp_path / "packed.ps1"),
     }
+    argv = [sys.executable, "-m", "pytest", "-c", str(tmp_path / "pytest.ini"), "-p", "no:cacheprovider", *options]
     run = subprocess.run(  # noqa: S603 - fixed argv: this interpreter running pytest on a generated probe
-        [
-            sys.executable,
-            "-m",
-            "pytest",
-            "-c",
-            str(tmp_path / "pytest.ini"),
-            "-p",
-            "no:cacheprovider",
-            "-vv",
-            "--tb=long",
-            str(tmp_path / "test_probe.py"),
-        ],
+        [*argv, f"{tmp_path / 'test_probe.py'}::{case.probe}"],
         capture_output=True,
         env=env,
         cwd=tmp_path,
         check=False,
     )
-    output = (run.stdout + run.stderr).decode("utf-8", "replace").lower()
-    assert outcome in output, "the probe did not run to the expected outcome"
+    return (run.stdout + run.stderr).decode("utf-8", "replace").lower()
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("options", [("-vv", "--tb=long"), ("-vv", "--tb=long", "-l")], ids=["tb-long", "showlocals"])
+@pytest.mark.parametrize("case", list(_LEAK_CASES.values()), ids=list(_LEAK_CASES))
+def test_a_failing_run_prints_no_token(repo: Path, tmp_path: Path, case: _LeakCase, options: tuple[str, ...]) -> None:
+    """A failing privacy test, run with the strictest tracebacks (frame arguments; with -l, locals)."""
+    output = _run_probe(repo, tmp_path, case, options)
+    assert case.outcome in output, "the probe did not run to the expected outcome"
     leaked = [n for n, token in enumerate(_PLANTED_TOKENS, start=1) if token in output]
     assert leaked == [], "planted token number(s) printed by the failing run"
 

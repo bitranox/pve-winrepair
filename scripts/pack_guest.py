@@ -105,8 +105,13 @@ def decode_payload(text: str) -> dict[str, bytes]:
 
     Raises:
         ValueError: There is not exactly one payload and one sha line, the base64 or zip is
-            malformed, or the sha256 of the payload does not match ``$PwshPySha``.
+            malformed, or the sha256 of the payload does not match ``$PwshPySha``. The message
+            names the reason only, never the text, and carries no chained exception.
     """
+    # pytest's long traceback prints a shown frame's arguments (and with -l its locals): ``text`` is
+    # the whole artefact, cut to head and tail, so a refused block at its end would land in a test
+    # log. The frame is hidden and every refusal raised "from None", which drops the chained frame.
+    __tracebackhide__ = True
     # Exactly one of each: wrapper_without_payload strips EVERY block, so a second block decoded by
     # nobody would escape both the freshness check and the privacy scan of the decoded members.
     blobs = list(_PAYLOAD.finditer(text))
@@ -121,14 +126,14 @@ def decode_payload(text: str) -> dict[str, bytes]:
     try:
         raw = base64.b64decode("".join(blob.group(1).split()), validate=True)
     except binascii.Error as exc:
-        raise ValueError(f"the payload is not base64: {exc}") from exc
+        raise ValueError(f"the payload is not base64: {exc}") from None
     if hashlib.sha256(raw).hexdigest() != sha.group(1):
         raise ValueError("the payload's sha256 does not match $PwshPySha")
     try:
         with zipfile.ZipFile(io.BytesIO(raw)) as archive:
             return {name: archive.read(name) for name in archive.namelist()}
     except zipfile.BadZipFile as exc:
-        raise ValueError(f"the payload is not a zip archive: {exc}") from exc
+        raise ValueError(f"the payload is not a zip archive: {exc}") from None
 
 
 def wrapper_without_payload(text: str) -> str:
@@ -154,6 +159,7 @@ def same_pack(a: str, b: str) -> bool:
         True when both decode to equal members and equal wrappers; False otherwise, including when
         either does not decode.
     """
+    __tracebackhide__ = True  # ``a`` and ``b`` are whole artefacts: see decode_payload
     try:
         members_a, members_b = decode_payload(a), decode_payload(b)
     except ValueError:

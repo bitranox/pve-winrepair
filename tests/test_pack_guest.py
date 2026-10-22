@@ -29,6 +29,7 @@ def project(tmp_path: Path) -> Path:
 
 
 def _artefact_text(project: Path) -> str:
+    __tracebackhide__ = True  # a pack of the real guest sources: see _committed
     return (project / pack_guest.ARTEFACT).read_bytes().decode("utf-8")
 
 
@@ -46,8 +47,10 @@ def test_write_repacks_a_stale_artefact(project: Path, tmp_path: Path) -> None:
     assert pack_guest.main([], project=project) == 0
     expected = tmp_path / "expected.ps1"
     pack_guest.pack(project, expected)
-    assert pack_guest.same_pack(_artefact_text(project), expected.read_bytes().decode("utf-8"))
-    assert b"# a change" in pack_guest.decode_payload(_artefact_text(project))["pve_winrepair_guest/wim.py"]
+    is_fresh = pack_guest.same_pack(_artefact_text(project), expected.read_bytes().decode("utf-8"))
+    has_change = b"# a change" in pack_guest.decode_payload(_artefact_text(project))["pve_winrepair_guest/wim.py"]
+    assert is_fresh
+    assert has_change
 
 
 @pytest.mark.os_agnostic
@@ -155,20 +158,59 @@ def test_a_missing_pwshpy_is_an_error_not_drift() -> None:
 
 
 def _committed() -> str:
+    """The real checkout's packed tool.
+
+    Never kept in a test's local nor asserted on whole: pytest prints a failing assert's operands
+    and, with ``-l``, a test's locals; the artefact's tail can carry a private token (a refused
+    block appended at its end). Tests assert on booleans, counts and member names instead.
+    """
+    __tracebackhide__ = True
     return (PROJECT / pack_guest.ARTEFACT).read_bytes().decode("utf-8")
+
+
+def _member_summary(text: str) -> tuple[list[str], bool]:
+    """(sorted member names, whether the package's __init__ is empty) of a packed script."""
+    __tracebackhide__ = True  # ``text`` and the decoded members
+    members = pack_guest.decode_payload(text)
+    return sorted(members), members.get("pve_winrepair_guest/__init__.py") == b""
+
+
+def _wrapper_summary() -> tuple[bool, bool, bool]:
+    """(holds the payload here-string, holds the sha line, under a quarter of the whole) of the wrapper."""
+    __tracebackhide__ = True  # its locals hold the wrapper text
+    wrapper = pack_guest.wrapper_without_payload(_committed())
+    return "$PwshPyPayload = @'" in wrapper, "$PwshPySha = '" in wrapper, len(wrapper) < len(_committed()) // 4
+
+
+def _with_a_flipped_sha() -> str:
+    """The committed tool with one hex digit of its $PwshPySha changed."""
+    __tracebackhide__ = True
+    text = _committed()
+    marker = "$PwshPySha = '"
+    at = text.index(marker) + len(marker)
+    flipped = "1" if text[at] != "1" else "2"
+    return text[:at] + flipped + text[at + 1 :]
+
+
+def _with_a_second_payload() -> str:
+    """The committed tool with a second payload block appended, no newline after it."""
+    __tracebackhide__ = True
+    return _committed() + "$PwshPyPayload = @'\nAAAA\n'@"
 
 
 @pytest.mark.os_agnostic
 def test_the_committed_artefact_decodes_to_the_shim_and_the_guest_package() -> None:
-    members = pack_guest.decode_payload(_committed())
+    names, empty_init = _member_summary(_committed())
     guest = sorted(p.name for p in (PROJECT / GUEST).glob("*.py"))
-    assert sorted(members) == ["__pwshpy_pack_main__.py", *(f"pve_winrepair_guest/{name}" for name in guest)]
-    assert members["pve_winrepair_guest/__init__.py"] == b""
+    assert names == ["__pwshpy_pack_main__.py", *(f"pve_winrepair_guest/{name}" for name in guest)]
+    assert empty_init
 
 
 @pytest.mark.os_agnostic
 def test_same_pack_holds_for_identical_text() -> None:
-    assert pack_guest.same_pack(_committed(), _committed())
+    # Booleans in locals: an assert over the call would print both texts.
+    same = pack_guest.same_pack(_committed(), _committed())
+    assert same
 
 
 @pytest.mark.os_agnostic
@@ -176,35 +218,34 @@ def test_same_pack_sees_a_member_edit(project: Path, tmp_path: Path) -> None:
     _append(project / GUEST / "wim.py", "# a member edit\n")
     edited = tmp_path / "edited.ps1"
     pack_guest.pack(project, edited)
-    assert not pack_guest.same_pack(_artefact_text(project), edited.read_bytes().decode("utf-8"))
+    same = pack_guest.same_pack(_artefact_text(project), edited.read_bytes().decode("utf-8"))
+    assert not same
 
 
 @pytest.mark.os_agnostic
 def test_same_pack_sees_a_wrapper_edit() -> None:
-    assert not pack_guest.same_pack(_committed(), _committed() + "# x\n")
+    same = pack_guest.same_pack(_committed(), _committed() + "# x\n")
+    assert not same
 
 
 @pytest.mark.os_agnostic
 def test_same_pack_is_false_when_a_side_does_not_decode() -> None:
-    assert not pack_guest.same_pack(_committed(), "no payload here\n")
+    same = pack_guest.same_pack(_committed(), "no payload here\n")
+    assert not same
 
 
 @pytest.mark.os_agnostic
 def test_wrapper_without_payload_drops_the_payload_and_the_sha_line() -> None:
-    wrapper = pack_guest.wrapper_without_payload(_committed())
-    assert "$PwshPyPayload = @'" not in wrapper
-    assert "$PwshPySha = '" not in wrapper
-    assert len(wrapper) < len(_committed()) // 4
+    has_payload, has_sha, is_small = _wrapper_summary()
+    assert not has_payload
+    assert not has_sha
+    assert is_small
 
 
 @pytest.mark.os_agnostic
 def test_decode_payload_refuses_a_wrong_sha() -> None:
-    text = _committed()
-    marker = "$PwshPySha = '"
-    at = text.index(marker) + len(marker)
-    flipped = "1" if text[at] != "1" else "2"
     with pytest.raises(ValueError, match="sha256"):
-        pack_guest.decode_payload(text[:at] + flipped + text[at + 1 :])
+        pack_guest.decode_payload(_with_a_flipped_sha())
 
 
 @pytest.mark.os_agnostic
@@ -217,9 +258,12 @@ def test_decode_payload_refuses_a_second_payload_or_sha_line(extra: str) -> None
 @pytest.mark.os_agnostic
 def test_same_pack_sees_an_appended_second_payload() -> None:
     # No newline after the block: both wrappers are then equal, so only the decode can tell them apart.
-    second = _committed() + "$PwshPyPayload = @'\nAAAA\n'@"
-    assert pack_guest.wrapper_without_payload(second) == pack_guest.wrapper_without_payload(_committed())
-    assert not pack_guest.same_pack(_committed(), second)
+    same_wrapper = pack_guest.wrapper_without_payload(_with_a_second_payload()) == pack_guest.wrapper_without_payload(
+        _committed()
+    )
+    same = pack_guest.same_pack(_committed(), _with_a_second_payload())
+    assert same_wrapper
+    assert not same
 
 
 @pytest.mark.os_agnostic
