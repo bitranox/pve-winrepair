@@ -26,9 +26,11 @@ content finding says which version hit, ``(index)`` or ``(worktree)``. Each is s
 every rendering (UTF-8, else latin-1; plus UTF-16-LE at both byte alignments whenever the bytes
 hold a NUL), and every listed path name. ``uv.lock``'s content is skipped (machine-written hashes
 and sizes; a size can equal a VM id) but its name is scanned. A gitlink's content is another
-repository; only its name is scanned here. The packed guest tool is scanned without its base64
-payload, which can spell a token by chance and changes on every repack; the payload is scanned
-DECODED, member by member (the index copy by its own tests, a worktree copy with the tree).
+repository; only its name is scanned here. ANY file carrying a pwshpy payload block or
+``$PwshPySha`` line (the packed guest tool, or another script in its runner layout) is scanned
+without its base64, which can spell a token by chance and changes on every repack; the payload is
+scanned DECODED, member by member (the packed tool's index copy by its own tests, every other copy
+with the tree). A payload that cannot be decoded is an error, never a skip.
 
 A finding never prints the matched text, nor a file or member NAME (a name can hold the token its
 content also holds): it names the path's index, the version, the line and the pattern or the
@@ -271,16 +273,31 @@ def findings(name: str, text: str, private: PrivateList | None) -> list[str]:
 def file_findings(name: str, data: bytes, private: PrivateList | None) -> list[str]:
     """The findings in every rendering of a file's bytes, deduplicated.
 
+    A rendering that carries a pwshpy payload block or ``$PwshPySha`` line, in ANY file (the packed
+    guest tool or another script in pwshpy's runner layout), is scanned as its wrapper plus its
+    DECODED payload: the base64 can spell a token by chance, and a deflated member hides one.
+
     Args:
         name: The label printed before each finding (see :func:`findings`).
         data: The file's bytes.
         private: The private tokens, or None for the generic patterns alone.
 
     Returns:
-        The findings of :func:`findings` over each of :func:`renderings`, first occurrence kept.
+        The findings of :func:`findings` over each of :func:`renderings` without its payload, then
+        ``<name>: member[<j>]...`` for its decoded payload (:func:`payload_findings`), first
+        occurrence kept.
+
+    Raises:
+        PayloadError: A rendering carries a payload that is refused, never skipped.
     """
     __tracebackhide__ = True
-    return list(dict.fromkeys(f for text in renderings(data) for f in findings(name, text, private)))
+    found: list[str] = []
+    for text in renderings(data):
+        wrapper = pack_guest.wrapper_without_payload(text)
+        found += findings(name, wrapper, private)
+        if wrapper != text:  # a payload block or a sha line was stripped: decode what it carries
+            found += [f"{name}: {finding}" for finding in payload_findings(text, private)]
+    return list(dict.fromkeys(found))
 
 
 def path_findings(index: int, name: str, private: PrivateList | None) -> list[str]:
@@ -450,8 +467,8 @@ def _tracked(project: Path = pack_guest.PROJECT) -> list[tuple[str, bytes]]:
     The untracked, not-ignored paths follow (``git ls-files -o --exclude-standard`` order, read from
     the worktree): bmk's ``make push`` runs the tests and then ``git add -A``, which commits them. So
     positions ``0..n-1`` are the ``git ls-files`` positions of the n index entries and position
-    ``n + k`` is the k-th untracked path. An untracked file comes as it is (:func:`_tree_findings`
-    scans an untracked packed tool as its wrapper plus its decoded payload), and ``uv.lock``'s
+    ``n + k`` is the k-th untracked path. An untracked file comes as it is (:func:`file_findings`
+    scans any file carrying a payload as its wrapper plus its decoded payload), and ``uv.lock``'s
     content stays excluded. The worktree copies of modified tracked files (:func:`_modified`) are
     not listed here: they keep their index entry's position.
     """
@@ -493,19 +510,15 @@ def _artefact_text() -> str:
     return _git_run(pack_guest.PROJECT, "cat-file", "blob", f":{pack_guest.ARTEFACT.as_posix()}").decode("utf-8")
 
 
-def _worktree_findings(index: int, name: str, data: bytes, private: PrivateList | None) -> list[str]:
+def _worktree_findings(index: int, data: bytes, private: PrivateList | None) -> list[str]:
     """The findings in the worktree copy of path ``index``, each labelled ``path[<index>] (worktree)``.
 
-    The packed tool is scanned as its wrapper plus its DECODED payload (a repack not yet staged is
-    what ``git add -A`` commits); a refused payload raises :class:`PayloadError`, never a skip.
+    A copy carrying a payload (an unstaged repack of the packed tool, or any other script in
+    pwshpy's runner layout) is scanned as its wrapper plus its DECODED payload (:func:`file_findings`);
+    a refused payload raises :class:`PayloadError`, never a skip.
     """
     __tracebackhide__ = True
-    label = f"path[{index}] (worktree)"
-    if name != pack_guest.ARTEFACT.as_posix():
-        return file_findings(label, data, private)
-    text = data.decode("utf-8")
-    wrapper = pack_guest.wrapper_without_payload(text).encode("utf-8")
-    return [*file_findings(label, wrapper, private), *(f"{label}: {f}" for f in payload_findings(text, private))]
+    return file_findings(f"path[{index}] (worktree)", data, private)
 
 
 def _tree_findings(private: PrivateList | None, project: Path = pack_guest.PROJECT) -> list[str]:
@@ -523,9 +536,9 @@ def _tree_findings(private: PrivateList | None, project: Path = pack_guest.PROJE
     for i, (name, data) in enumerate(staged):
         found += [*path_findings(i, name, private), *file_findings(f"path[{i}] (index)", data, private)]
         if name in modified:
-            found += _worktree_findings(i, name, modified.pop(name), private)
+            found += _worktree_findings(i, modified.pop(name), private)
     for i, (name, data) in enumerate(untracked, start=len(staged)):
-        found += [*path_findings(i, name, private), *_worktree_findings(i, name, data, private)]
+        found += [*path_findings(i, name, private), *_worktree_findings(i, data, private)]
     return found
 
 
@@ -567,15 +580,39 @@ def _planted(tmp_path: Path) -> PrivateList:
     return load_private_list(path)
 
 
-def _packed(members: dict[str, bytes]) -> str:
-    """A minimal script in pwshpy's runner layout carrying ``members`` as its payload."""
+def _zipped(members: dict[str, bytes], *, compression: int = zipfile.ZIP_STORED) -> bytes:
     buffer = io.BytesIO()
-    with zipfile.ZipFile(buffer, "w") as archive:
+    with zipfile.ZipFile(buffer, "w", compression=compression) as archive:
         for name, data in members.items():
             archive.writestr(name, data)
-    raw = buffer.getvalue()
+    return buffer.getvalue()
+
+
+def _wrapped(raw: bytes) -> str:
+    """A minimal script in pwshpy's runner layout carrying the zip bytes ``raw``, its sha256 matching."""
     blob = base64.b64encode(raw).decode("ascii")
     return f"$PwshPySha = '{hashlib.sha256(raw).hexdigest()}'\n$PwshPyPayload = @'\n{blob}\n'@\nInvoke-It\n"
+
+
+def _packed(members: dict[str, bytes], *, compression: int = zipfile.ZIP_STORED) -> str:
+    """A minimal script in pwshpy's runner layout carrying ``members`` as its payload."""
+    return _wrapped(_zipped(members, compression=compression))
+
+
+def _encrypted(name: str, data: bytes) -> bytes:
+    """A one-member zip whose member is flagged encrypted (general purpose bit 0) in both headers."""
+    raw = bytearray(_zipped({name: data}))
+    raw[raw.find(b"PK\x03\x04") + 6] |= 0x01  # the local header's flags
+    raw[raw.find(b"PK\x01\x02") + 8] |= 0x01  # the central directory header's flags
+    return bytes(raw)
+
+
+def _bad_crc(name: str, data: bytes) -> bytes:
+    """A one-member zip whose recorded CRC-32 is wrong in both headers: reading the member fails."""
+    raw = bytearray(_zipped({name: data}))
+    raw[raw.find(b"PK\x03\x04") + 14] ^= 0xFF  # the local header's CRC-32
+    raw[raw.find(b"PK\x01\x02") + 16] ^= 0xFF  # the central directory header's CRC-32
+    return bytes(raw)
 
 
 # --- the real tree --------------------------------------------------------------------------
@@ -707,6 +744,37 @@ def test_a_second_payload_block_is_refused_not_skipped(tmp_path: Path) -> None:
     # The chain is dropped: a chained traceback would print decode_payload's text argument.
     assert raised.value.__cause__ is None
     assert raised.value.__suppress_context__
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(
+    "raw",
+    [_encrypted("pkg/plantedword.py", b"x = 1\n"), _bad_crc("pkg/plantedword.py", b"x = 1\n")],
+    ids=["encrypted", "bad-crc"],
+)
+def test_an_unreadable_member_is_refused_with_a_fixed_message(raw: bytes) -> None:
+    # zipfile names the member in these errors (RuntimeError "File '<name>' is encrypted", BadZipFile
+    # "Bad CRC-32 for file '<name>'"), and a member name can hold a token: no message may carry it.
+    with pytest.raises(ValueError, match="not a readable zip archive") as raised:
+        pack_guest.decode_payload(_wrapped(raw))
+    assert "plantedword" not in str(raised.value)
+    assert raised.value.__cause__ is None
+    assert raised.value.__suppress_context__
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(("version", "label"), [("untracked", "worktree"), ("staged", "index")])
+def test_any_script_carrying_a_payload_is_scanned_decoded(repo: Path, tmp_path: Path, version: str, label: str) -> None:
+    # Not only the packed guest tool: any script in pwshpy's runner layout. A deflated member hides
+    # its token from a text scan of the script, so only a decode finds it.
+    text = _packed({"pkg/leak.py": b"# one\nHOST = 'planted-host7'\n"}, compression=zipfile.ZIP_DEFLATED)
+    assert findings("x.ps1", text, _planted(tmp_path)) == []  # the precondition: unreadable as text
+    script = repo / "tools" / "x.ps1"
+    script.parent.mkdir()
+    script.write_bytes(text.encode("utf-8"))
+    if version == "staged":
+        _git_run(repo, "add", "tools/x.ps1")
+    assert _tree_findings(_planted(tmp_path), repo) == [f"path[1] ({label}): member[0]:2: token hosts[1]"]
 
 
 # --- what a commit stores: the index, not the worktree (a scratch repository) ---------------
@@ -893,6 +961,10 @@ _SECOND_BLOCK = _packed({"pkg/clean.py": b"x = 1\n"}) + f"$PwshPyPayload = @'\n{
 _LEAK_NAME = "plantedword/planted/dir/planted-host7-98765.txt"
 _NAMED_MEMBER = _packed({"pkg/" + _LEAK_NAME: _LEAK.encode("utf-8") + b"\n"})
 _NOT_BASE64 = f"$PwshPySha = '{'0' * 64}'\n$PwshPyPayload = @'\n{_LEAK}\n'@\nInvoke-It\n"
+# A valid block and sha whose one member, named with every planted token, cannot be read: zipfile
+# names the member in its error, and its own frames carry the name as an argument and a local.
+_ENCRYPTED_MEMBER = _wrapped(_encrypted("pkg/" + _LEAK_NAME, _LEAK.encode("utf-8")))
+_BAD_CRC_MEMBER = _wrapped(_bad_crc("pkg/" + _LEAK_NAME, _LEAK.encode("utf-8")))
 
 
 @dataclass(frozen=True)
@@ -918,6 +990,10 @@ _LEAK_CASES = {
     "a-payload-not-base64-decoded-directly": _LeakCase("test_packer", _PLANTED_JSON, _NOT_BASE64, "1 failed"),
     "a-token-named-file-whose-content-hits": _LeakCase("test_tree", _PLANTED_JSON, "", "1 failed", _LEAK_NAME),
     "a-token-named-member-whose-content-hits": _LeakCase("test_payload", _PLANTED_JSON, _NAMED_MEMBER, "1 failed"),
+    "an-encrypted-member": _LeakCase("test_payload", _PLANTED_JSON, _ENCRYPTED_MEMBER, "1 failed"),
+    "an-encrypted-member-decoded-directly": _LeakCase("test_packer", _PLANTED_JSON, _ENCRYPTED_MEMBER, "1 failed"),
+    "a-member-with-a-bad-crc": _LeakCase("test_payload", _PLANTED_JSON, _BAD_CRC_MEMBER, "1 failed"),
+    "a-member-with-a-bad-crc-decoded-directly": _LeakCase("test_packer", _PLANTED_JSON, _BAD_CRC_MEMBER, "1 failed"),
 }
 
 

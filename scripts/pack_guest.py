@@ -104,9 +104,10 @@ def decode_payload(text: str) -> dict[str, bytes]:
         Each archive member name mapped to its bytes.
 
     Raises:
-        ValueError: There is not exactly one payload and one sha line, the base64 or zip is
-            malformed, or the sha256 of the payload does not match ``$PwshPySha``. The message
-            names the reason only, never the text, and carries no chained exception.
+        ValueError: There is not exactly one payload and one sha line, the base64 is malformed,
+            the sha256 of the payload does not match ``$PwshPySha``, or opening or reading the
+            archive raised anything at all (not a zip, an encrypted member, a bad CRC). The message
+            names the reason only, never the text or a member name, and carries no chained exception.
     """
     # pytest's long traceback prints a shown frame's arguments (and with -l its locals): ``text`` is
     # the whole artefact, cut to head and tail, so a refused block at its end would land in a test
@@ -132,8 +133,12 @@ def decode_payload(text: str) -> dict[str, bytes]:
     try:
         with zipfile.ZipFile(io.BytesIO(raw)) as archive:
             return {name: archive.read(name) for name in archive.namelist()}
-    except zipfile.BadZipFile as exc:
-        raise ValueError(f"the payload is not a zip archive: {exc}") from None
+    except Exception:
+        # Any exception, not only BadZipFile: an encrypted member raises RuntimeError, an unknown
+        # method NotImplementedError, corrupt data zlib.error or EOFError. zipfile's messages name the
+        # member ("Bad CRC-32 for file %r") and a name can hold a token, so the message is fixed and
+        # the chain is dropped: zipfile's own frames, unhidden, would print the name as an argument.
+        raise ValueError("the payload is not a readable zip archive") from None
 
 
 def wrapper_without_payload(text: str) -> str:
