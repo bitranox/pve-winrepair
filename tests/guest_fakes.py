@@ -15,13 +15,22 @@ import subprocess
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
+from pve_winrepair.adapters.guest_ssh import Guest
+from pve_winrepair.domain.settings import SshSettings
 from pve_winrepair_guest.envelope import Outcome, build, internal_error, render
 from pve_winrepair_guest.probes import StateLog, state_verdict
 from pve_winrepair_guest.upgrade import DirectoryLock, LockDirsReport
 
+if TYPE_CHECKING:
+    from pve_winrepair.domain.envelope import Runner
+
 #: The account the fakes expect ssh and scp to log in as (``SshSettings.user``).
 USER = "admin"
+#: The guest key the fakes' ssh and scp name; never read, the runner is fake.
+KEY = "/keys/test.key"
+SSH = SshSettings(key=KEY, user=USER)
 GUEST_IP = "192.0.2.10"
 LAN_IP = "192.0.2.50"
 # What would stop, restart or reconfigure the VM, or take a snapshot of it.
@@ -40,6 +49,11 @@ def expected_guest_path(source: Path) -> str:
 
 
 TOOL_PATH = expected_guest_path(TOOL_DIR / "winrepair_guest.ps1")
+
+
+def make_guest(runner: Runner, tool_dir: Path | None = None) -> Guest:
+    """The guest at :data:`GUEST_IP`, reached with :data:`SSH` through ``runner``."""
+    return Guest(GUEST_IP, ssh_settings=SSH, tool_dir=tool_dir or TOOL_DIR, runner=runner)
 
 
 def locked(*, present: bool, stage_root: str | None = None) -> LockDirsReport:
