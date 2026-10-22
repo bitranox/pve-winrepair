@@ -1,8 +1,10 @@
-"""Application ports - callable Protocol definitions for adapter functions.
+"""Application ports - Protocol definitions the adapters satisfy structurally (PEP 544).
 
-Each Protocol class defines a ``__call__`` method whose signature exactly
-matches the corresponding adapter function.  Existing module-level functions
-satisfy these protocols automatically via structural subtyping (PEP 544).
+Each function port defines a ``__call__`` method whose signature exactly matches the
+corresponding adapter function. :class:`GuestPort` and :class:`NodePort` describe the guest and
+the node the drivers reach (the ssh adapter's ``Guest`` and the node adapter's ``Node``); their data
+members are read-only properties, because those adapters are frozen dataclasses and a read-only
+field does not satisfy a plain (mutable) Protocol attribute.
 
 System Role:
     Sits between domain and adapters.  Infrastructure types (``Config``)
@@ -15,12 +17,17 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Callable, Mapping, Sequence
     from pathlib import Path
+
+    # The finished process is only a type here; nothing in this module runs one.
+    from subprocess import CompletedProcess  # nosec B404
 
     from lib_layered_config import Config
 
     from ..domain.enums import DeployTarget, OutputFormat
+    from ..domain.envelope import Envelope, Fields
+    from ..domain.guest_tool import PackedTool, Pushed
 
 
 class GetConfig(Protocol):
@@ -83,11 +90,82 @@ class CheckLoggingConfig(Protocol):
     def __call__(self, config: Config) -> None: ...
 
 
+class GuestPort(Protocol):
+    """One guest as the drivers reach it: push or stage the packed tool, run it, run raw commands."""
+
+    @property
+    def ip(self) -> str:
+        """The guest's address."""
+        ...
+
+    @property
+    def tool_path(self) -> str:
+        """The tool copy this guest's calls run: its content address, or the verified profile copy."""
+        ...
+
+    @property
+    def packed(self) -> PackedTool:
+        """The packed tool on this node and its content address on the guest."""
+        ...
+
+    def push_tool(self) -> Pushed:
+        """Put the packed tool at its content address on the guest."""
+        ...
+
+    def stage_tool(self) -> GuestPort:
+        """Copy the tool to the ssh user's profile, verify it, and return a guest whose calls run that copy."""
+        ...
+
+    def remove_profile_copy(self) -> str | None:
+        """Delete the profile copy; None once done, else why not (never raises)."""
+        ...
+
+    def tool(self, command: str, *args: str, timeout: float) -> Envelope:
+        """Run one subcommand of the tool and return its envelope (ok or refused)."""
+        ...
+
+    def probe(self, command: str, *args: str, timeout: float) -> Fields:
+        """Run a subcommand that never refuses and return its data."""
+        ...
+
+    def ssh(self, *remote: str, timeout: float) -> CompletedProcess[str]:
+        """Run a raw remote command; the caller checks the result."""
+        ...
+
+    def copy_to(self, sources: Sequence[str], dest: str, *, timeout: float) -> CompletedProcess[str]:
+        """Copy ``sources`` recursively into the guest directory ``dest``; the caller checks the result."""
+        ...
+
+
+class NodePort(Protocol):
+    """The PVE node a driver runs on: how it runs ``qm``, waits, and reaches a guest."""
+
+    @property
+    def clock(self) -> Callable[[], float]:
+        """The wall clock, in seconds."""
+        ...
+
+    @property
+    def sleep(self) -> Callable[[float], None]:
+        """Wait the given number of seconds."""
+        ...
+
+    def qm(self, *args: str, timeout: int = 600) -> CompletedProcess[str]:
+        """Run ``qm`` on this node."""
+        ...
+
+    def guest(self, ip: str) -> GuestPort:
+        """The guest at ``ip``."""
+        ...
+
+
 __all__ = [
     "CheckLoggingConfig",
     "DeployConfiguration",
     "DisplayConfig",
     "GetConfig",
     "GetDefaultConfigPath",
+    "GuestPort",
     "InitLogging",
+    "NodePort",
 ]

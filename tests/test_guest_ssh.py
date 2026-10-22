@@ -1,7 +1,8 @@
-"""Tests for the guest ssh adapter: the argv it builds, the arguments it refuses, and how it reads an answer.
+"""Tests for the guest ssh adapter: the argv it builds, the push and its hashes, the profile copy.
 
 Every call goes through the injected runner (``guest_fakes.FakeRunner``); nothing reaches ssh.
-The envelopes come from the guest tool's own ``envelope`` module and data models.
+The envelopes come from the guest tool's own ``envelope`` module and data models. How an answer is
+read is tested in ``test_envelope.py``, the node bundle in ``test_node.py``.
 """
 
 from __future__ import annotations
@@ -33,18 +34,20 @@ from guest_fakes import (
 from pve_winrepair.adapters import guest_ssh
 from pve_winrepair.adapters.config.loader import get_config
 from pve_winrepair.adapters.config.settings import load_settings
-from pve_winrepair.adapters.guest_ssh import (
-    Guest,
+from pve_winrepair.adapters.guest_ssh import Guest, ssh_options
+from pve_winrepair.adapters.node import Node
+from pve_winrepair.application.guest_state import read_run_state
+from pve_winrepair.domain.envelope import (
+    POWERSHELL,
     GuestInternalError,
     GuestNoAnswerError,
     GuestProtocolError,
     GuestPushError,
-    UnsafeArgumentError,
-    ssh_options,
+    guest_stderr,
 )
 from pve_winrepair.domain.settings import SshSettings
 from pve_winrepair_guest import lockdown
-from pve_winrepair_guest.probes import BuildInfo, SetupReport, StagedOs
+from pve_winrepair_guest.probes import BuildInfo, SetupReport
 from pve_winrepair_guest.upgrade import LockDirsReport
 
 if TYPE_CHECKING:
@@ -127,7 +130,7 @@ def _staged(dest: str) -> str:
 
 
 def _lock_dirs_call(dest: str) -> list[str]:
-    return _ssh(*guest_ssh.POWERSHELL, _staged(dest), "lock-dirs", "--tool", dest, "--json")
+    return _ssh(*POWERSHELL, _staged(dest), "lock-dirs", "--tool", dest, "--json")
 
 
 def _hash_call(path: str) -> list[str]:
@@ -318,7 +321,7 @@ def test_push_tool_carries_the_guest_traceback_of_a_crashed_lock_dirs(tmp_path: 
     runner.replies["lock-dirs"] = [crashed("lock-dirs", OSError("pywin32 unavailable"))]
     with pytest.raises(GuestPushError, match="pywin32 unavailable") as caught:
         _guest(runner, tmp_path).push_tool()
-    assert guest_ssh.guest_stderr(caught.value) == ("Traceback ...",)
+    assert guest_stderr(caught.value) == ("Traceback ...",)
     assert _writes_into_the_tool_dir(runner) == []
     assert _routes(runner)[-1] == "del"
 
@@ -401,7 +404,7 @@ def test_the_key_override_variable_reaches_the_ssh_argv(isolated_layers: Path, m
     monkeypatch.setenv("PVE_WINREPAIR___SSH__KEY", "/env/guest.key")
     monkeypatch.setenv("PVE_WINREPAIR___SSH__USER", USER)
     runner = FakeRunner().on("hostname", Reply(0))
-    node = guest_ssh.Node(ssh=load_settings(get_config()).ssh, runner=runner)
+    node = Node(ssh=load_settings(get_config()).ssh, runner=runner)
     node.guest(GUEST_IP).ssh("hostname", timeout=5.0)
     assert runner.calls[0][:3] == ["ssh", "-i", "/env/guest.key"]
     assert f"{USER}@{GUEST_IP}" in runner.calls[0]
@@ -410,208 +413,6 @@ def test_the_key_override_variable_reaches_the_ssh_argv(isolated_layers: Path, m
 def test_the_tool_dir_is_the_guest_tool_shipped_in_the_package() -> None:
     assert guest_ssh.TOOL_DIR.name == "guest_tool"
     assert (guest_ssh.TOOL_DIR / guest_ssh.TOOL_NAME).is_file()
-
-
-def test_a_node_reaches_its_guests_and_qm_through_one_runner() -> None:
-    runner = FakeRunner().on("hostname", Reply(0)).on("qm", Reply(0, "status: running\n"))
-    node = guest_ssh.Node(ssh=SSH, runner=runner)
-    node.guest(GUEST_IP).ssh("hostname", timeout=5.0)
-    node.qm("status", "100", timeout=30)
-    assert runner.calls == [_ssh("hostname"), ["qm", "status", "100"]]
-    assert runner.timeouts == [5.0, 30]
-
-
-# --- argument refusal -----------------------------------------------------------------------
-
-REFUSED = [
-    *(f"D:\\up{c}grade" for c in '&|<>^"%!()'),
-    "D:\\up\ngrade",
-    "D:\\up\rgrade",
-    "D:\\up grade",
-    "D:\\up\tgrade",
-    "D:\\up'grade",
-    "D:\\up`grade",
-    "D:\\up;grade",
-    "D:\\up,grade",
-    "D:\\up=grade",
-    "D:\\up*grade",
-    "D:\\up?grade",
-    "D:\\up$grade",
-    "D:\\up" + chr(0xE4) + "grade",
-    "",
-    "-PwshPyClean",
-    "-pwshpyelevate",
-    "-x:D",
-    "--",
-]
-
-
-@pytest.mark.parametrize("bad", REFUSED)
-def test_an_unsafe_argument_is_refused_before_ssh(bad: str) -> None:
-    runner = FakeRunner()
-    with pytest.raises(UnsafeArgumentError):
-        _guest(runner).tool("prepare", "--stage-root", bad, timeout=60)
-    assert runner.calls == []
-
-
-def test_an_unsafe_subcommand_is_refused_before_ssh() -> None:
-    runner = FakeRunner()
-    with pytest.raises(UnsafeArgumentError):
-        _guest(runner).tool("build&calc", timeout=60)
-    assert runner.calls == []
-
-
-@pytest.mark.parametrize("good", ["D:\\upgrade", "C:\\upgrade-state.log", "18", "--stage-root", "C:/x_y.z"])
-def test_a_plain_argument_passes(good: str) -> None:
-    runner = FakeRunner().on("state", answer("state", {"verdict": None}))
-    _guest(runner).tool("state", "--log", good, timeout=60)
-    assert runner.calls[0][-2] == good
-
-
-# --- reading the answer ---------------------------------------------------------------------
-
-
-def test_a_valid_envelope_is_returned_with_typed_fields() -> None:
-    runner = FakeRunner().on("build", answer("build", BUILD))
-    env = _guest(runner).tool("build", timeout=60)
-    assert (env.ok, env.command, env.exit_code) == (True, "build", 0)
-    assert env.data.text("current_build") == "26200"
-    assert env.data.integer("ubr") == 8973
-
-
-def test_a_refused_envelope_is_returned_not_raised() -> None:
-    runner = FakeRunner().on("restore-wu", answer("restore-wu", {"verdict": "STILL_DISABLED"}, ok=False))
-    env = _guest(runner).tool("restore-wu", timeout=60)
-    assert (env.ok, env.exit_code) == (False, 1)
-    assert env.data.text("verdict") == "STILL_DISABLED"
-
-
-def test_bootstrap_noise_around_the_envelope_is_ignored() -> None:
-    reply = answer("setup-alive", SetupReport(count=1, alive=True))
-    noisy = Reply(0, "uv was not found; installing it ...\r\n" + reply.stdout + "\r\n")
-    runner = FakeRunner().on("setup-alive", noisy)
-    assert _guest(runner).probe("setup-alive", timeout=60).flag("alive") is True
-
-
-@pytest.mark.parametrize(
-    ("reply", "fragment"),
-    [
-        (Reply(0, ""), "no envelope"),
-        (Reply(0, "\r\n  \r\n"), "no envelope"),
-        (Reply(0, "Das System kann den angegebenen Pfad nicht finden.\r\n"), "no envelope"),
-        (Reply(0, '{"ok": true, "command": "build", "data": {'), "no envelope"),
-        (Reply(0, '{"ok": true}'), "no envelope"),
-        (Reply(255, "", "ssh: connect to host 192.0.2.10 port 22: Connection timed out"), "exit 255"),
-        (Reply(1, "", "Die Benennung powershell wurde nicht erkannt"), "exit 1"),
-        (Reply(127, "", "uv is not installed"), "exit 127"),
-    ],
-)
-def test_no_valid_envelope_raises_no_answer(reply: Reply, fragment: str) -> None:
-    runner = FakeRunner().on("build", reply)
-    with pytest.raises(GuestNoAnswerError, match=fragment):
-        _guest(runner).tool("build", timeout=60)
-
-
-def test_a_valid_envelope_under_a_foreign_exit_code_is_no_answer() -> None:
-    reply = answer("build", BUILD)
-    runner = FakeRunner().on("build", Reply(255, reply.stdout, "Connection reset"))
-    with pytest.raises(GuestNoAnswerError, match="exit 255"):
-        _guest(runner).tool("build", timeout=60)
-
-
-def test_a_timeout_raises_no_answer() -> None:
-    runner = FakeRunner().on("build", subprocess.TimeoutExpired(["ssh"], 60))
-    with pytest.raises(GuestNoAnswerError, match="timed out"):
-        _guest(runner).tool("build", timeout=60)
-
-
-def test_ssh_that_cannot_start_raises_no_answer() -> None:
-    runner = FakeRunner().on("build", FileNotFoundError(2, "No such file or directory", "ssh"))
-    with pytest.raises(GuestNoAnswerError, match="could not run"):
-        _guest(runner).tool("build", timeout=60)
-
-
-def test_an_internal_error_envelope_raises_with_the_guest_error() -> None:
-    runner = FakeRunner().on("staged-os", crashed("staged-os", PermissionError("Zugriff verweigert")))
-    with pytest.raises(GuestInternalError, match="Zugriff verweigert") as caught:
-        _guest(runner).tool("staged-os", timeout=60)
-    assert caught.value.envelope.data.text("error_type") == "PermissionError"
-
-
-def test_a_usage_error_envelope_raises_internal() -> None:
-    # An older packed tool that does not know the command answers with command "" and exit 2.
-    runner = FakeRunner().on("setup-alive", crashed("", ValueError("invalid choice: 'setup-alive'")))
-    with pytest.raises(GuestInternalError, match="invalid choice"):
-        _guest(runner).tool("setup-alive", timeout=60)
-
-
-@pytest.mark.parametrize(
-    "reply",
-    [
-        Reply(0, answer("build", BUILD).stdout * 2),
-        Reply(0, answer("drives", BUILD).stdout),
-        Reply(0, answer("build", BUILD, ok=False).stdout),
-        Reply(1, answer("build", BUILD).stdout),
-        Reply(0, '{"ok": "yes", "command": "build", "data": {}, "skipped": []}'),
-        Reply(0, '{"ok": true, "command": "build", "data": [], "skipped": []}'),
-    ],
-)
-def test_an_inconsistent_envelope_raises_protocol_error(reply: Reply) -> None:
-    runner = FakeRunner().on("build", reply)
-    with pytest.raises(GuestProtocolError):
-        _guest(runner).tool("build", timeout=60)
-
-
-def test_probe_treats_a_refusal_as_a_protocol_breach() -> None:
-    runner = FakeRunner().on("staged-os", answer("staged-os", StagedOs("x", False, "RERUN"), ok=False))
-    with pytest.raises(GuestProtocolError, match="refused"):
-        _guest(runner).probe("staged-os", timeout=60)
-
-
-# --- typed fields ---------------------------------------------------------------------------
-
-
-def _fields(data: object) -> guest_ssh.Fields:
-    runner = FakeRunner().on("build", answer("build", data))
-    return _guest(runner).probe("build", timeout=60)
-
-
-def test_a_missing_field_is_a_protocol_error_not_a_default() -> None:
-    with pytest.raises(GuestProtocolError, match="schtasks_exit"):
-        _fields({"registered": True}).integer("schtasks_exit")
-
-
-@pytest.mark.parametrize(
-    ("data", "getter"),
-    [
-        ({"x": True}, "integer"),
-        ({"x": 1}, "flag"),
-        ({"x": 1}, "text"),
-        ({"x": "1"}, "number"),
-        ({"x": None}, "text"),
-        ({"x": [1]}, "section"),
-    ],
-)
-def test_a_mistyped_field_is_a_protocol_error(data: object, getter: str) -> None:
-    with pytest.raises(GuestProtocolError, match="'x'"):
-        getattr(_fields(data), getter)("x")
-
-
-def test_optional_getters_accept_null_and_nested_sections_read() -> None:
-    fields = _fields({"a": None, "b": {"c": ["x", "y"], "d": [{"e": 1.5}]}, "n": 3})
-    assert fields.text_or_none("a") is None
-    assert fields.integer_or_none("a") is None
-    assert fields.flag_or_none("a") is None
-    assert fields.section("b").texts("c") == ("x", "y")
-    assert fields.section("b").sections("d")[0].number("e") == 1.5
-    assert fields.number("n") == 3.0
-
-
-def test_gate_returns_the_field_and_checks_it_agrees_with_ok() -> None:
-    runner = FakeRunner().on("restore-wu", answer("restore-wu", {"verdict": "RESTORED"}, ok=False))
-    env = _guest(runner).tool("restore-wu", timeout=60)
-    with pytest.raises(GuestProtocolError, match="RESTORED"):
-        env.gate("verdict", "RESTORED")
 
 
 # --- the upgrade run's state: one reading shared by both drivers ------------------------------
@@ -635,7 +436,7 @@ DONE_FAIL_LINES = ("launching: setup.exe", "STATE=DONE-FAIL setup exit=0xC190020
 def test_run_state_reads_live_and_marker(alive: bool, log: object, live: bool, marker: str | None) -> None:
     runner = FakeRunner().on("setup-alive", answer("setup-alive", SetupReport(int(alive), alive)))
     runner.on("state", answer("state", log))
-    state = guest_ssh.read_run_state(_guest(runner), timeout=300)
+    state = read_run_state(_guest(runner), timeout=300)
     assert (state.live, state.marker, state.alive) == (live, marker, alive)
     assert state.log_path == r"C:\upgrade-state.log"
 
@@ -644,56 +445,14 @@ def test_run_state_with_an_unknown_marker_is_a_protocol_error() -> None:
     runner = FakeRunner().on("setup-alive", answer("setup-alive", SetupReport(0, False)))
     runner.on("state", answer("state", {"path": "C:\\x.log", "present": True, "verdict": "DONE-MAYBE"}))
     with pytest.raises(GuestProtocolError, match="DONE-MAYBE"):
-        guest_ssh.read_run_state(_guest(runner), timeout=300)
+        read_run_state(_guest(runner), timeout=300)
 
 
 @pytest.mark.parametrize("reply", [Reply(255, "", "reset"), crashed("setup-alive", OSError("wmi"))])
 def test_run_state_that_cannot_be_read_raises_instead_of_reading_as_idle(reply: Reply) -> None:
     runner = FakeRunner().on("setup-alive", reply)
     with pytest.raises((GuestNoAnswerError, GuestInternalError)):
-        guest_ssh.read_run_state(_guest(runner), timeout=300)
-
-
-# --- shared helpers the drivers gate on -------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    ("verdict", "marker"), [(None, None), ("DONE-OK", "STATE=DONE-OK"), ("DONE-FAIL", "STATE=DONE-FAIL")]
-)
-def test_state_marker_maps_the_verdict_to_its_marker_line(verdict: str | None, marker: str | None) -> None:
-    fields = guest_ssh.Fields({"verdict": verdict}, "state.data")
-    assert guest_ssh.state_marker(fields) == marker
-
-
-def test_state_marker_refuses_an_unknown_verdict() -> None:
-    with pytest.raises(GuestProtocolError, match="DONE-MAYBE"):
-        guest_ssh.state_marker(guest_ssh.Fields({"verdict": "DONE-MAYBE"}, "state.data"))
-
-
-def test_a_crash_keeps_the_tail_of_the_guest_traceback() -> None:
-    traceback = "\n".join(
-        ["Traceback (most recent call last):", *(f'  File "x.py", line {i}' for i in range(30)),
-         "PermissionError: [WinError 5] Zugriff verweigert"]
-    )  # fmt: skip
-    reply = Reply(2, crashed("quiesce-wu", PermissionError("denied")).stdout, traceback)
-    runner = FakeRunner().on("quiesce-wu", reply)
-    with pytest.raises(GuestInternalError) as caught:
-        _guest(runner).tool("quiesce-wu", timeout=60)
-    assert "PermissionError: [WinError 5] Zugriff verweigert" in str(caught.value)
-    assert len(caught.value.stderr_tail) == guest_ssh.STDERR_TAIL_LINES
-    assert caught.value.stderr_tail[-1] == "PermissionError: [WinError 5] Zugriff verweigert"
-    assert guest_ssh.guest_stderr(RuntimeError("no guest call behind it")) is None
-
-
-def test_guest_stderr_is_found_through_the_cause_chain() -> None:
-    runner = FakeRunner().on("build", crashed("build", OSError("x")))
-    try:
-        _guest(runner).tool("build", timeout=60)
-    except GuestInternalError as exc:
-        try:
-            raise RuntimeError("driver refusal") from exc
-        except RuntimeError as wrapped:
-            assert guest_ssh.guest_stderr(wrapped) == ("Traceback ...",)
+        read_run_state(_guest(runner), timeout=300)
 
 
 @pytest.mark.parametrize("error", [subprocess.TimeoutExpired(["scp"], 5400), OSError("no scp")])
@@ -704,7 +463,7 @@ def test_copy_to_that_times_out_or_cannot_start_is_a_failed_process(error: BaseE
     assert "media transfer" in proc.stderr
 
 
-# --- the content address both deploy units agree on (from the lockdown tests) ----------------
+# --- the content address both deploy units agree on ------------------------------------------
 
 
 def test_the_content_address_agrees_with_the_name_the_ssh_adapter_pushes(tmp_path: Path) -> None:
