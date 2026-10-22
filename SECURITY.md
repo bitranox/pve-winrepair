@@ -12,7 +12,7 @@ If you discover a security vulnerability in this project, please report it
 responsibly:
 
 1. **Do not** open a public GitHub issue for security vulnerabilities.
-2. Email the maintainer directly or use
+2. Contact the maintainer directly or use
    [GitHub's private vulnerability reporting](https://github.com/bitranox/pve-winrepair/security/advisories/new).
 3. Include a description of the vulnerability, steps to reproduce, and any
    relevant logs or screenshots.

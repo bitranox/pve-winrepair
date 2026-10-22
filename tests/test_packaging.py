@@ -47,7 +47,6 @@ REQUIRED_WHEEL_DATA = (
     f"{PACKAGE}/py.typed",
     f"{PACKAGE}/adapters/config/defaultconfig.toml",
     f"{PACKAGE}/adapters/config/defaultconfig.d/40-layered-config.toml",
-    f"{PACKAGE}/adapters/config/defaultconfig.d/50-mail.toml",
     f"{PACKAGE}/adapters/config/defaultconfig.d/90-logging.toml",
 )
 

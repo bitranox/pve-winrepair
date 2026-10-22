@@ -38,42 +38,9 @@ The targets used day to day:
 | CI                     | All tests EXCEPT those marked `local_only` (`-m "not local_only"`) |
 | `pytest tests/`        | ALL tests (no marker filter)                                       |
 
-A test that needs external resources (a real SMTP server, a database) carries both
+A test that needs external resources (a real Windows guest, a database) carries both
 `@pytest.mark.integration` (so `make test` skips it and `make testintegration` runs it) and
 `@pytest.mark.local_only` (so CI skips it).
-
-### Email Integration Tests
-
-To run email tests that actually send messages:
-
-1. **Create a `.env` file** in the project root with your SMTP settings:
-
-```bash
-# .env (copy from .env.example)
-EMAIL__SMTP_HOSTS=["smtp.example.com:587"]
-EMAIL__FROM_ADDRESS=sender@example.com
-EMAIL__RECIPIENTS=["recipient@example.com"]
-EMAIL__SMTP_USERNAME=your_username
-EMAIL__SMTP_PASSWORD=your_password
-```
-
-   Alternatively, use `--env-file` to point at an existing `.env` file:
-
-```bash
-pve-winrepair --env-file /path/to/my/.env send-notification --subject "Test" --message "Hello"
-```
-
-2. **Run the integration tests**:
-
-```bash
-make testintegration
-```
-
-3. **Or run the email tests directly**:
-
-```bash
-pytest tests/test_mail.py -m integration -v
-```
 
 ### Adding New Integration Tests
 
@@ -89,22 +56,6 @@ def test_real_external_service(...):
 ```
 
 These tests are skipped by `make test` and in CI, and run with `make testintegration`.
-
-### SMTP Test Seam
-
-`send_email()` and `send_notification()` accept an optional `transport` argument, forwarded
-to `btx_lib_mail`'s `Transport` port. Unit tests inject a double (`RecordingTransport` in
-`tests/test_mail.py`) rather than patching `smtplib.SMTP`, and assert on delivery intent:
-envelope sender, recipients, host failover order, credentials, and the composed payload.
-
-Do not go back to monkeypatching `smtplib`. btx_lib_mail streams the message over the wire
-protocol itself (MAIL/RCPT plus DATA or BDAT), so a `MagicMock` does not honour the contract
-and breaks whenever the library changes delivery strategy.
-
-The `SendEmail` / `SendNotification` ports in `application/ports.py` deliberately omit
-`transport`: a delivery mechanism is an adapter concern, not something the application layer
-should see. The adapter still satisfies the Protocol because an extra keyword parameter with
-a default is structurally compatible. Do not add `transport` to the port.
 
 ## Versioning & Metadata
 

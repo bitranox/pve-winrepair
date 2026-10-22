@@ -89,19 +89,19 @@ def test_when_config_is_invoked_with_json_format_and_section_it_shows_section(
     """Verify JSON format displays specific section content."""
     factory = config_cli_context(
         {
-            "email": {
-                "smtp_hosts": ["smtp.test.com:587"],
-                "from_address": "test@example.com",
+            "remote": {
+                "hosts": ["host.test.com:22"],
+                "owner": "test@example.com",
             }
         }
     )
 
-    result: Result = cli_runner.invoke(cli_mod.cli, ["config", "--format", "json", "--section", "email"], obj=factory)
+    result: Result = cli_runner.invoke(cli_mod.cli, ["config", "--format", "json", "--section", "remote"], obj=factory)
 
     assert result.exit_code == 0
-    assert "email" in result.output
-    assert "smtp_hosts" in result.output
-    assert "smtp.test.com:587" in result.output
+    assert "remote" in result.output
+    assert "hosts" in result.output
+    assert "host.test.com:22" in result.output
 
 
 @pytest.mark.os_agnostic
@@ -112,8 +112,8 @@ def test_when_config_is_invoked_with_json_format_and_nonexistent_section_it_fail
     """Verify JSON format with nonexistent section returns error."""
     factory = config_cli_context(
         {
-            "email": {
-                "smtp_hosts": ["smtp.test.com:587"],
+            "remote": {
+                "hosts": ["host.test.com:22"],
             }
         }
     )
@@ -134,22 +134,22 @@ def test_when_config_is_invoked_with_section_showing_complex_values(
     """Verify human format with section containing lists and dicts."""
     factory = config_cli_context(
         {
-            "email": {
-                "smtp_hosts": ["smtp1.test.com:587", "smtp2.test.com:587"],
-                "from_address": "test@example.com",
+            "remote": {
+                "hosts": ["host1.test.com:22", "host2.test.com:22"],
+                "owner": "test@example.com",
                 "metadata": {"key1": "value1", "key2": "value2"},
                 "timeout": 60.0,
             }
         }
     )
 
-    result: Result = cli_runner.invoke(cli_mod.cli, ["config", "--section", "email"], obj=factory)
+    result: Result = cli_runner.invoke(cli_mod.cli, ["config", "--section", "remote"], obj=factory)
 
     assert result.exit_code == 0
-    assert "[email]" in result.output
-    assert "smtp_hosts" in result.output
-    assert "smtp1.test.com:587" in result.output
-    assert "smtp2.test.com:587" in result.output
+    assert "[remote]" in result.output
+    assert "hosts" in result.output
+    assert "host1.test.com:22" in result.output
+    assert "host2.test.com:22" in result.output
     assert "metadata" in result.output
     assert '"test@example.com"' in result.output
     assert "60.0" in result.output
@@ -163,8 +163,8 @@ def test_when_config_shows_all_sections_with_complex_values(
     """Verify human format showing all sections with lists and dicts."""
     factory = config_cli_context(
         {
-            "email": {
-                "smtp_hosts": ["smtp.test.com:587"],
+            "remote": {
+                "hosts": ["host.test.com:22"],
                 "tags": {"environment": "test", "version": "1.0"},
             },
             "logging": {
@@ -177,9 +177,9 @@ def test_when_config_shows_all_sections_with_complex_values(
     result: Result = cli_runner.invoke(cli_mod.cli, ["config"], obj=factory)
 
     assert result.exit_code == 0
-    assert "[email]" in result.output
+    assert "[remote]" in result.output
     assert "[logging]" in result.output
-    assert "smtp_hosts" in result.output
+    assert "hosts" in result.output
     assert "handlers" in result.output
     assert "tags" in result.output
 
@@ -437,12 +437,12 @@ def test_when_config_displays_human_format_it_redacts_password(
     cli_runner: CliRunner,
     config_cli_context: Callable[[dict[str, Any]], Callable[[], Any]],
 ) -> None:
-    """Human-readable output must redact sensitive keys like smtp_password."""
+    """Human-readable output must redact sensitive keys like a password."""
     factory = config_cli_context(
         {
-            "email": {
-                "smtp_password": "super_secret_123",
-                "from_address": "test@example.com",
+            "remote": {
+                "password": "super_secret_123",
+                "owner": "test@example.com",
             }
         }
     )
@@ -452,7 +452,7 @@ def test_when_config_displays_human_format_it_redacts_password(
     assert result.exit_code == 0
     assert "super_secret_123" not in result.output
     assert "***REDACTED***" in result.output
-    assert "from_address" in result.output
+    assert "owner" in result.output
     assert "test@example.com" in result.output
 
 
@@ -461,12 +461,12 @@ def test_when_config_displays_json_format_it_redacts_password(
     cli_runner: CliRunner,
     config_cli_context: Callable[[dict[str, Any]], Callable[[], Any]],
 ) -> None:
-    """JSON output must redact sensitive keys like smtp_password."""
+    """JSON output must redact sensitive keys like a password."""
     factory = config_cli_context(
         {
-            "email": {
-                "smtp_password": "super_secret_123",
-                "from_address": "test@example.com",
+            "remote": {
+                "password": "super_secret_123",
+                "owner": "test@example.com",
             }
         }
     )
@@ -476,7 +476,7 @@ def test_when_config_displays_json_format_it_redacts_password(
     assert result.exit_code == 0
     assert "super_secret_123" not in result.stdout
     assert "***REDACTED***" in result.stdout
-    assert "from_address" in result.stdout
+    assert "owner" in result.stdout
 
 
 @pytest.mark.os_agnostic
@@ -536,7 +536,7 @@ def test_when_config_displays_password_in_list_of_dicts_it_redacts(
         {
             "connections": {
                 "servers": [
-                    {"host": "smtp.example.com", "password": "secret123"},
+                    {"host": "primary.example.com", "password": "secret123"},
                     {"host": "backup.example.com", "password": "secret456"},
                 ],
                 "name": "production",
@@ -549,7 +549,7 @@ def test_when_config_displays_password_in_list_of_dicts_it_redacts(
     assert result.exit_code == 0
     assert "secret123" not in result.stdout
     assert "secret456" not in result.stdout
-    assert "smtp.example.com" in result.stdout
+    assert "primary.example.com" in result.stdout
     assert "REDACTED" in result.stdout
 
 
@@ -752,7 +752,7 @@ def test_when_config_generate_examples_creates_multiple_files_it_lists_all(
 ) -> None:
     """Verify config-generate-examples lists all created files."""
     file1 = tmp_path / "config.toml"
-    file2 = tmp_path / "config.d" / "50-email.toml"
+    file2 = tmp_path / "config.d" / "50-extra.toml"
     file1.touch()
     file2.parent.mkdir(parents=True)
     file2.touch()
@@ -865,7 +865,7 @@ def unreadable_user_config(
     sys.platform == "win32" or os.geteuid() == 0,
     reason="chmod 000 binds only a non-root POSIX user: root reads any file, Windows has no POSIX modes",
 )
-@pytest.mark.parametrize("command", [["config"], ["send-notification", "--subject", "s", "--message", "m"]])
+@pytest.mark.parametrize("command", [["config"]])
 def test_when_the_user_config_file_is_unreadable_a_config_reading_command_exits_78_and_names_it(
     cli_runner: CliRunner,
     production_factory: Callable[[], Any],

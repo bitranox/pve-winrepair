@@ -72,7 +72,7 @@ def log_variables() -> Iterator[list[str]]:
 def test_only_log_variables_from_the_dotenv_reach_the_environment(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, log_variables: list[str]
 ) -> None:
-    app_key = f"{PREFIX}___EMAIL__FROM_ADDRESS"
+    app_key = f"{PREFIX}___PROBE__VALUE"
     log_variables.extend(["LOG_DOTENV_PROBE", app_key])
     (tmp_path / ".env").write_text(f"{app_key}=leaked@example.com\nLOG_DOTENV_PROBE=from-dotenv\n", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
@@ -133,12 +133,12 @@ def test_a_dotenv_that_is_not_utf8_does_not_stop_logging(
 
 @pytest.mark.os_agnostic
 def test_a_prefixed_line_in_the_cwd_dotenv_does_not_reach_a_profile_reload(tmp_path: Path) -> None:
-    (tmp_path / ".env").write_text(f"{PREFIX}___EMAIL__FROM_ADDRESS=leaked@example.com\n", encoding="utf-8")
+    (tmp_path / ".env").write_text(f"{PREFIX}___LIB_LOG_RICH__SERVICE=leaked-service\n", encoding="utf-8")
 
-    result = _run(tmp_path, "config", "--profile", "production", "--format", "json", "--section", "email")
+    result = _run(tmp_path, "config", "--profile", "production", "--format", "json", "--section", "lib_log_rich")
 
     assert result.returncode == 0, result.stderr
-    assert "leaked@example.com" not in result.stdout
+    assert "leaked-service" not in result.stdout
 
 
 @pytest.mark.os_agnostic
@@ -347,7 +347,7 @@ def test_a_refused_entry_of_a_union_setting_names_the_entry_and_no_tag() -> None
 
 @pytest.mark.os_agnostic
 def test_a_value_a_validator_refuses_reads_as_the_validator_wrote_it() -> None:
-    """pydantic prefixes a validator's ValueError with ``Value error, ``; the [email] refusal does not."""
+    """pydantic prefixes a validator's ValueError with ``Value error, ``; this refusal does not."""
     with pytest.raises(InvalidLoggingConfigError) as caught:
         check_logging_config(Config({"lib_log_rich": {"queue_maxsize": 0}}, {}))
 

@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 import re
 import sys
-from dataclasses import dataclass, fields
+from dataclasses import fields
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -27,7 +27,6 @@ if TYPE_CHECKING:
 
     from lib_layered_config.domain.config import SourceInfo
 
-    from pve_winrepair.adapters.memory.email import EmailSpy
     from pve_winrepair.composition import AppServices
 
 #: Which platforms each ``os_*`` marker lets a test run on. Registering a marker in pyproject only
@@ -281,9 +280,9 @@ def config_factory() -> Callable[[dict[str, Any]], Config]:
         Callable[[dict[str, Any]], Config]: Factory that creates Config from dict.
 
     Example:
-        def test_email_section(config_factory: Callable[[dict[str, Any]], Config]) -> None:
-            config = config_factory({"email": {"smtp_hosts": ["smtp.test.com:587"]}})
-            assert config.get("email.smtp_hosts") == ["smtp.test.com:587"]
+        def test_section(config_factory: Callable[[dict[str, Any]], Config]) -> None:
+            config = config_factory({"section": {"hosts": ["host.example.com"]}})
+            assert config.get("section.hosts") == ["host.example.com"]
     """
 
     def _factory(data: dict[str, Any]) -> Config:
@@ -305,7 +304,7 @@ def source_info_factory() -> Callable[[str, str, str | None], SourceInfo]:
 
     Example:
         def test_provenance(source_info_factory: Callable[..., SourceInfo]) -> None:
-            info = source_info_factory("email.smtp_hosts", "user", "/home/user/.config/...")
+            info = source_info_factory("section.hosts", "user", "/home/user/.config/...")
             assert info["layer"] == "user"
     """
 
@@ -313,34 +312,6 @@ def source_info_factory() -> Callable[[str, str, str | None], SourceInfo]:
         return {"layer": layer, "path": path, "key": key}
 
     return _factory
-
-
-@pytest.fixture
-def email_ready_config(config_factory: Callable[[dict[str, Any]], Config]) -> Config:
-    """Create a Config pre-loaded with standard email settings for tests.
-
-    Provides a reusable email configuration with smtp_hosts, from_address,
-    and recipients so email tests do not repeat the same setup boilerplate.
-    Combine with ``inject_config`` to wire into the CLI path.
-
-    Returns:
-        Config: Pre-configured Config with valid email settings.
-
-    Example:
-        def test_email(inject_config, email_ready_config: Config) -> None:
-            factory = inject_config(email_ready_config)
-            result = cli_runner.invoke(cli, ["send-notification", ...], obj=factory)
-    """
-    return config_factory(
-        {
-            "email": {
-                "smtp_hosts": ["smtp.test.com:587"],
-                "from_address": "sender@test.com",
-                "recipients": ["recipient@test.com"],
-                "subject_prefix": "[TEST] ",
-            }
-        }
-    )
 
 
 @pytest.fixture
@@ -384,9 +355,6 @@ def inject_config(
             get_default_config_path=prod.get_default_config_path,
             deploy_configuration=prod.deploy_configuration,
             display_config=prod.display_config,
-            send_email=prod.send_email,
-            send_notification=prod.send_notification,
-            load_email_config_from_dict=prod.load_email_config_from_dict,
             # The quiet runtime: production init_logging queues INFO lines that race into
             # CliRunner's stderr, so a stderr assertion would depend on timing.
             init_logging=init_logging_in_memory,
@@ -440,9 +408,6 @@ def inject_config_with_profile_capture(
             get_default_config_path=prod.get_default_config_path,
             deploy_configuration=prod.deploy_configuration,
             display_config=prod.display_config,
-            send_email=prod.send_email,
-            send_notification=prod.send_notification,
-            load_email_config_from_dict=prod.load_email_config_from_dict,
             # The quiet runtime: production init_logging queues INFO lines that race into
             # CliRunner's stderr, so a stderr assertion would depend on timing.
             init_logging=init_logging_in_memory,
@@ -505,9 +470,6 @@ def inject_deploy_with_profile_capture(
             get_default_config_path=prod.get_default_config_path,
             deploy_configuration=_capturing_deploy,
             display_config=prod.display_config,
-            send_email=prod.send_email,
-            send_notification=prod.send_notification,
-            load_email_config_from_dict=prod.load_email_config_from_dict,
             # The quiet runtime: production init_logging queues INFO lines that race into
             # CliRunner's stderr, so a stderr assertion would depend on timing.
             init_logging=init_logging_in_memory,
@@ -553,9 +515,6 @@ def inject_deploy_configuration() -> Callable[[Callable[..., list[Path]]], Calla
             get_default_config_path=prod.get_default_config_path,
             deploy_configuration=deploy_fn,
             display_config=prod.display_config,
-            send_email=prod.send_email,
-            send_notification=prod.send_notification,
-            load_email_config_from_dict=prod.load_email_config_from_dict,
             # The quiet runtime: production init_logging queues INFO lines that race into
             # CliRunner's stderr, so a stderr assertion would depend on timing.
             init_logging=init_logging_in_memory,
@@ -571,7 +530,7 @@ def inject_test_services() -> Callable[[], Callable[[], AppServices]]:
     """Return the build_testing factory for full in-memory testing.
 
     For full service replacement with in-memory adapters. Use
-    ``inject_config`` or ``email_cli_context`` for more granular control.
+    ``inject_config`` or ``config_cli_context`` for more granular control.
 
     Returns:
         Callable[[], Callable[[], AppServices]]: Function that returns the
@@ -592,87 +551,6 @@ def inject_test_services() -> Callable[[], Callable[[], AppServices]]:
         return build_testing
 
     return _inject
-
-
-@dataclass
-class EmailCliContext:
-    """Container for email CLI test setup.
-
-    Bundles the services factory and email spy together for tests that need
-    both email configuration and email capture assertions.
-
-    Attributes:
-        factory: Callable that returns wired AppServices for CLI invocation.
-        spy: EmailSpy instance for asserting on sent emails/notifications.
-    """
-
-    factory: Callable[[], Any]
-    spy: EmailSpy
-
-
-@pytest.fixture
-def email_cli_context(
-    clear_config_cache: None,
-) -> Callable[[dict[str, Any]], EmailCliContext]:
-    """Create email CLI test context with configured factory and spy.
-
-    Combines config creation, injection, and email service replacement
-    into a single fixture. Returns a function that takes email config
-    dict (the "email" section contents) and returns a context with
-    the wired factory and spy for asserting on sent emails.
-
-    Args:
-        clear_config_cache: Implicit fixture dependency ensuring cache is cleared.
-
-    Returns:
-        Callable[[dict[str, Any]], EmailCliContext]: Function that takes email
-            config dict and returns EmailCliContext with factory and spy.
-
-    Example:
-        def test_send_email(
-            cli_runner: CliRunner,
-            email_cli_context: Callable[[dict[str, Any]], EmailCliContext],
-        ) -> None:
-            ctx = email_cli_context({
-                "smtp_hosts": ["smtp.test.com:587"],
-                "from_address": "test@example.com",
-            })
-            result = cli_runner.invoke(
-                cli, ["send-notification", "--subject", "Hi", "--message", "Test", "--to", "a@b.com"],
-                obj=ctx.factory,
-            )
-            assert result.exit_code == 0
-            assert ctx.spy.sent_notifications[0].subject == "Hi"
-    """
-    from pve_winrepair.adapters.email.config import load_email_config_from_dict
-    from pve_winrepair.adapters.memory import check_logging_config_in_memory, init_logging_in_memory
-    from pve_winrepair.adapters.memory.email import EmailSpy as EmailSpyImpl
-    from pve_winrepair.composition import AppServices, build_production
-
-    def _create(email_data: dict[str, Any]) -> EmailCliContext:
-        spy = EmailSpyImpl()
-        config = Config({"email": email_data}, {})
-        prod = build_production()
-
-        def _fake_get_config(**_kwargs: Any) -> Config:
-            return config
-
-        test_services = AppServices(
-            get_config=_fake_get_config,
-            get_default_config_path=prod.get_default_config_path,
-            deploy_configuration=prod.deploy_configuration,
-            display_config=prod.display_config,
-            send_email=spy.send_email,
-            send_notification=spy.send_notification,
-            load_email_config_from_dict=load_email_config_from_dict,
-            # The quiet runtime: production init_logging queues INFO lines that race into
-            # CliRunner's stderr, so a stderr assertion would depend on timing.
-            init_logging=init_logging_in_memory,
-            check_logging_config=check_logging_config_in_memory,
-        )
-        return EmailCliContext(factory=lambda: test_services, spy=spy)
-
-    return _create
 
 
 @pytest.fixture
@@ -715,9 +593,6 @@ def config_cli_context(
             get_default_config_path=prod.get_default_config_path,
             deploy_configuration=prod.deploy_configuration,
             display_config=prod.display_config,
-            send_email=prod.send_email,
-            send_notification=prod.send_notification,
-            load_email_config_from_dict=prod.load_email_config_from_dict,
             # The quiet runtime: production init_logging queues INFO lines that race into
             # CliRunner's stderr, so a stderr assertion would depend on timing.
             init_logging=init_logging_in_memory,

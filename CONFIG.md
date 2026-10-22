@@ -95,11 +95,11 @@ pve-winrepair --profile production config
 
 # Override settings at runtime (repeatable)
 pve-winrepair --set lib_log_rich.console_level=DEBUG config
-pve-winrepair --set email.from_address=test@example.com --set email.smtp_hosts='["smtp.example.com:587"]' send-email ...
+pve-winrepair --set lib_log_rich.console_level=DEBUG --set lib_log_rich.service=pve-winrepair config
 
 # Load configuration from an explicit .env file
 pve-winrepair --env-file /etc/myapp/.env config
-pve-winrepair --env-file ./environments/production.env send-notification ...
+pve-winrepair --env-file ./environments/production.env config
 
 # Show full traceback for debugging
 pve-winrepair --traceback config-deploy --target user
@@ -116,7 +116,7 @@ Display the merged configuration from all sources (defaults -> app -> host -> us
 | Option           | Required | Description                                                   |
 |------------------|:--------:|---------------------------------------------------------------|
 | `--format`       | No       | Output format: `human` (default) or `json`.                   |
-| `--section NAME` | No       | Show only a specific section (e.g., `lib_log_rich`, `email`). |
+| `--section NAME` | No       | Show only a specific section (e.g., `lib_log_rich`).          |
 | `--profile NAME` | No       | Load configuration for a specific profile.                    |
 
 #### Examples
@@ -135,7 +135,7 @@ pve-winrepair config --section lib_log_rich
 pve-winrepair config --profile production
 
 # Combine options
-pve-winrepair config --profile staging --format json --section email
+pve-winrepair config --profile staging --format json --section lib_log_rich
 ```
 
 ### Deploy Configuration Files
@@ -179,7 +179,7 @@ pve-winrepair config-deploy --target user --profile production
 pve-winrepair config-deploy --target user --profile production --force
 ```
 
-Every target receives `config.toml` plus `config.d/40-layered-config.toml`, `config.d/50-mail.toml`
+Every target receives `config.toml` plus `config.d/40-layered-config.toml`
 and `config.d/90-logging.toml` (the host target writes `hosts/{hostname}.toml` and
 `hosts/{hostname}.d/`). With `--force`, a file whose content differs from the bundled one is
 replaced and the old file is kept as `<name>.bak` (numbered, `<name>.bak.1` and so on, when a
@@ -368,11 +368,10 @@ pve-winrepair --set lib_log_rich.console_level=DEBUG config
 pve-winrepair --set lib_log_rich.console_level=DEBUG --set lib_log_rich.console_format_preset=short config
 
 # Override nested values
-pve-winrepair --set email.attachments.max_size_bytes=10485760 config
+pve-winrepair --set lib_log_rich.payload_limits.context_max_keys=30 config
 
 # Override with JSON arrays/objects (use single quotes around the value)
-pve-winrepair --set email.smtp_hosts='["smtp.example.com:587"]' config
-pve-winrepair --set email.recipients='["admin@example.com", "ops@example.com"]' config
+pve-winrepair --set lib_log_rich.scrub_patterns='{"api_key": ".+"}' config
 
 # Combine with profile
 pve-winrepair --profile production --set lib_log_rich.console_level=DEBUG config
@@ -468,7 +467,7 @@ For any configuration section, use the format: `<PREFIX>___<SECTION>__<KEY>=valu
 
 ```bash
 PVE_WINREPAIR___LIB_LOG_RICH__CONSOLE_LEVEL=DEBUG pve-winrepair hello
-PVE_WINREPAIR___EMAIL__SMTP_HOSTS='["smtp.example.com:587"]' pve-winrepair hello
+PVE_WINREPAIR___LIB_LOG_RICH__SERVICE=pve-winrepair pve-winrepair hello
 ```
 
 **Separator reference:**
@@ -503,7 +502,7 @@ To load a specific `.env` file instead, use `--env-file`:
 ```bash
 # Load from an explicit path (skips upward directory search)
 pve-winrepair --env-file /opt/myapp/config/.env config
-pve-winrepair --env-file ./environments/staging.env send-notification ...
+pve-winrepair --env-file ./environments/staging.env config
 ```
 
 The file must exist and be readable; Click validates this before the command runs.
@@ -558,8 +557,8 @@ only `config.toml` plus its `config.d/` files.
 [lib_log_rich]
 console_level = "DEBUG"
 
-[email]
-smtp_hosts = ["smtp.mycompany.com:587"]
+[lib_log_rich.payload_limits]
+context_max_keys = 30
 ```
 
 This approach keeps your customizations separate and safe from updates while still benefiting from new default values added in future versions.
@@ -579,5 +578,5 @@ print(config.as_dict())
 
 # Access specific sections
 log_config = config.get("lib_log_rich", default={})
-email_config = config.get("email", default={})
+layered_config = config.get("lib_layered_config", default={})
 ```

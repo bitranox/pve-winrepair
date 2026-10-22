@@ -38,7 +38,6 @@
 #     MY_SECTION__SOME_KEY=some_value
 #     MY_SECTION__TIMEOUT=60.0
 #     LIB_LOG_RICH__CONSOLE_LEVEL=DEBUG
-#     EMAIL__SMTP_USERNAME=user@example.com
 #
 # ENVIRONMENT VARIABLES (require prefix):
 #   Format: PREFIX___SECTION__KEY=value
@@ -48,7 +47,6 @@
 #   Examples as environment variables:
 #     PVE_WINREPAIR___MY_SECTION__SOME_KEY=some_value
 #     PVE_WINREPAIR___LIB_LOG_RICH__CONSOLE_LEVEL=DEBUG
-#     PVE_WINREPAIR___EMAIL__SMTP_PASSWORD=secret
 #
 # Value conversion (.env and environment alike): an unquoted value converts - true/false
 # become booleans, null/none become None (except for secret keys such as passwords), a JSON

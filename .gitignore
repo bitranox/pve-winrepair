@@ -204,3 +204,9 @@ CLAUDE.local.md
 
 # Autonomous-execution decision log (never committed)
 EXECUTION-USER-REVIEW.md
+
+# Development ledger and task reports (local only, never committed)
+.bitranox/
+
+# Private token list read by the privacy scanner and tests (local only, never committed)
+.privacy-tokens.json

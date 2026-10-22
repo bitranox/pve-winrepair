@@ -48,7 +48,7 @@ def test_when_print_info_runs_it_outputs_metadata(capsys: pytest.CaptureFixture[
     print_info()
 
     captured = capsys.readouterr().out
-    assert "pve-winrepair" in captured
+    assert "Info for pve-winrepair:" in captured
     assert "version" in captured
 
 

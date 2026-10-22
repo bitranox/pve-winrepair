@@ -13,7 +13,6 @@ dependencies = [
     "lib_log_rich>=6.5.7",
     "python-dotenv>=1.2.4",
     "lib_layered_config>=7.3.0",
-    "btx_lib_mail>=4.5.0",
     "pydantic>=2.14.1",
     "orjson>=3.13.0",
 ]
@@ -102,6 +101,7 @@ include = [
     "src/pve_winrepair/py.typed",
     "src/pve_winrepair/adapters/config/defaultconfig.toml",
     "src/pve_winrepair/adapters/config/defaultconfig.d/*.toml",
+    "src/pve_winrepair/adapters/guest_tool/*.ps1",
 ]
 
 # An allowlist, never a denylist: hatchling reads only the root .gitignore, so tracked working
@@ -153,7 +153,7 @@ select = [
 convention = "google"
 
 [tool.ruff.lint.flake8-type-checking]
-# The Pydantic models (EmailConfig, LoggingConfigModel)
+# The Pydantic models (LoggingConfigModel)
 # resolve their field annotations at model-build time, so their field-type imports
 # must stay at runtime even though the file uses ``from __future__ import annotations``.
 # Telling ruff about the Pydantic base keeps TC001/TC002/TC003 from moving those
@@ -172,7 +172,6 @@ runtime-evaluated-base-classes = ["pydantic.BaseModel"]
 # Protocols/adapters: many-param signatures by design
 "src/pve_winrepair/application/*.py" = ["PLR0913"]
 "src/pve_winrepair/adapters/config/*.py" = ["PLR0913"]
-"src/pve_winrepair/adapters/email/*.py" = ["PLR0913"]
 "src/pve_winrepair/adapters/memory/*.py" = ["PLR0913"]
 
 [tool.pyright]
@@ -192,7 +191,7 @@ markers = [
   "os_posix: test exercises behavior requiring POSIX semantics",
   "os_linux: test exercises Linux-only behavior",
   "local_only: tests that require the local dev environment (external resources, script composition); skipped in CI",
-  "integration: tests requiring external resources (SMTP, databases, APIs); run via 'bmk ti' or 'mktesti.sh'",
+  "integration: tests requiring external resources (a real guest, databases, APIs); run via 'bmk ti' or 'mktesti.sh'",
 ]
 
 [tool.coverage.run]
@@ -205,7 +204,7 @@ parallel = false
 # when a run ends. bmk and CI each point COVERAGE_FILE at a directory of their
 # own; set it the same way before running pytest --cov beside another run.
 data_file = "/tmp/.coverage.pve_winrepair"
-source = ["src/pve_winrepair"]
+source = ["src/pve_winrepair", "src/pve_winrepair_guest"]
 
 [tool.coverage.report]
 omit = [
@@ -254,7 +253,7 @@ coverage-report-file = "coverage.xml"
 src-path = "src"
 
 [tool.importlinter]
-root_package = "pve_winrepair"
+root_packages = ["pve_winrepair", "pve_winrepair_guest"]
 exclude_type_checking_imports = true
 
 [[tool.importlinter.contracts]]
@@ -282,6 +281,11 @@ layers = [
   "pve_winrepair.domain",
 ]
 
+[[tool.importlinter.contracts]]
+name = "Guest tool is independent"
+type = "independence"
+modules = ["pve_winrepair", "pve_winrepair_guest"]
+
 [tool.pip-audit]
 # Known vulnerabilities to ignore (environment-level packages, not project dependencies)
 # PYSEC-2022-42969: py library ReDoS - py 1.11.0 is installed in the development
@@ -300,4 +304,4 @@ ignores = ["E003"]
 
 [tool.uv]
 exclude-newer = "7 days"
-exclude-newer-package = {btx-lib-mail = false, lib-cli-exit-tools = false, lib-layered-config = false, lib-log-rich = false, virtualenv = "2026-10-17T16:09:43Z", certifi = "2026-10-20T02:24:17Z"}
+exclude-newer-package = {lib-cli-exit-tools = false, lib-layered-config = false, lib-log-rich = false, virtualenv = "2026-10-17T16:09:43Z", certifi = "2026-10-20T02:24:17Z"}

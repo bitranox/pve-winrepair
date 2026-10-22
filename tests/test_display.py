@@ -168,12 +168,12 @@ def _value(shown: dict[str, Any], dotted: str) -> object:
 def test_config_shows_the_logging_key_counts_and_still_redacts_the_password(
     tmp_path: Path, options: tuple[str, ...]
 ) -> None:
-    """``*_max_keys`` are counts whose names only look secret; the SMTP password stays hidden."""
-    shown = _config_json(tmp_path, *options)
+    """``*_max_keys`` are counts whose names only look secret; a password stays hidden."""
+    shown = _config_json(tmp_path, "--set", "remote.password=hunter2", *options)
 
     assert _value(shown, "lib_log_rich.payload_limits.context_max_keys") == (30 if options else 20)
     assert _value(shown, "lib_log_rich.payload_limits.extra_max_keys") == 25
-    assert _value(shown, "email.smtp_password") == "***REDACTED***"
+    assert _value(shown, "remote.password") == "***REDACTED***"
 
 
 @pytest.mark.os_agnostic

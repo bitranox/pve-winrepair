@@ -1,12 +1,11 @@
 """In-memory adapter implementations for testing.
 
 Provides lightweight implementations of all application ports that operate
-entirely in memory -- no filesystem, no SMTP, and logging to a quiet lib_log_rich
+entirely in memory -- no filesystem, and logging to a quiet lib_log_rich
 runtime with no system sinks (the commands bind against a live runtime).
 
 Contents:
     * :mod:`.config` - In-memory configuration adapters
-    * :mod:`.email` - In-memory email adapters (EmailSpy class)
     * :mod:`.logging` - In-memory logging adapter
 """
 
@@ -20,7 +19,6 @@ from .config import (
     get_config_in_memory,
     get_default_config_path_in_memory,
 )
-from .email import EmailSpy
 from .logging import check_logging_config_in_memory, init_logging_in_memory
 
 # Static conformance assertions
@@ -38,7 +36,6 @@ if TYPE_CHECKING:
     _assert_check_logging_config: CheckLoggingConfig = check_logging_config_in_memory
 
 __all__ = [
-    "EmailSpy",
     "check_logging_config_in_memory",
     "deploy_configuration_in_memory",
     "display_config_in_memory",

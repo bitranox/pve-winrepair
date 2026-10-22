@@ -22,9 +22,8 @@ is the human's, start to finish. They set the problem and made every call.
   instead of patching internals; layered configuration through `lib_layered_config` (defaults,
   app, host, user, `.env` and environment, with named profiles, `--set` overrides and the source
   of every value shown by `config`); structured logging through `lib_log_rich` with its secret
-  scrubber; email through `btx_lib_mail`, with the configuration model built on the library's own
-  so that passwords stay secret values; POSIX `sysexits` exit codes, so a script can tell a bad
-  configuration (78) from a refused attachment (77); console output that survives a Windows
+  scrubber; POSIX `sysexits` exit codes, so a script can tell a bad configuration (78) from a
+  refused permission (13); console output that survives a Windows
   codepage; and the whole lint, type, test and release pipeline driven through bmk behind a
   single `make` command. Where there were options, the human picked.
 - The human reviewed and corrected the work at each step; what ships is what they signed off on.
@@ -63,7 +62,7 @@ If something does not line up, open an issue. That is what they are for.
 ## What this isn't
 
 It is a starting point, not a framework. The shipped domain is deliberately tiny (a greeting, an
-intentional failure, a metadata printout, plus the configuration, logging and email commands) and
+intentional failure, a metadata printout, plus the configuration and logging commands) and
 exists to prove that the layering, configuration, packaging and error handling work end to end.
 A project copied from this template inherits this page with its name swapped; it should describe
 its own work here instead.
