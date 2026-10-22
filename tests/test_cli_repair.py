@@ -22,6 +22,8 @@ from guest_fakes import (
     GUEST_IP,
     KEY,
     NO_LOG,
+    NODE_LOGGING,
+    CliRun,
     FakePve,
     Reply,
     agent_runner,
@@ -36,9 +38,10 @@ from guest_fakes import (
 )
 from lib_layered_config import Config
 
-from pve_winrepair.adapters.cli.commands.runs import operator_progress
+from pve_winrepair.adapters.cli.commands.runs import PreflightError, resolve_snapshot_name
 from pve_winrepair.adapters.cli.main import main
 from pve_winrepair.composition import AppServices, build_testing
+from pve_winrepair.domain.settings import RepairSettings
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -112,6 +115,23 @@ def test_a_bad_snapshot_name_option_is_refused_naming_it_before_any_call(tmp_pat
     assert message.startswith("--snapshot-name: String should match pattern ")
     assert "1-starts-with-a-digit" not in message
     assert runner.calls == []
+
+
+def test_a_snapshot_name_override_labels_only_its_own_error_with_the_option() -> None:
+    """Re-validating ``[repair]`` with the override reports every field; only one is the option's fault.
+
+    ``model_construct`` builds the settings without validation, the one way an invalid floor reaches
+    the re-validation (a loaded ``RepairSettings`` is always valid).
+    """
+    unchecked = RepairSettings.model_construct(
+        media_dir="", snapshot_name="pre_ok", stage_free_gb=-1.0, system_free_gb=25.0
+    )
+    with pytest.raises(PreflightError) as refused:
+        resolve_snapshot_name(unchecked, "1-starts-with-a-digit")
+    parts = str(refused.value).split("; ")
+    assert len(parts) == 2
+    assert parts[0].startswith("--snapshot-name: String should match pattern ")
+    assert parts[1] == "[repair] stage_free_gb: Input should be greater than 0"
 
 
 def test_a_refusal_exits_1_with_verdict_error_naming_the_reason(tmp_path: Path) -> None:
@@ -194,13 +214,6 @@ def test_a_state_dir_below_a_regular_file_is_refused_naming_the_file(tmp_path: P
     assert runner.calls == []
 
 
-def test_a_waiting_poll_reports_its_progress_on_stderr_never_on_stdout(tmp_path: Path) -> None:
-    run = run_cli(["repair", "--vmid", "1", "--json"], cli_config(tmp_path), _waiting_poll_runner())
-    assert run.exit_code == 0
-    assert "    ... waiting, SetupHost running=True" in run.stderr.splitlines()
-    assert json_envelope(run.stdout)["verdict"] == "STATE=DONE-OK"
-
-
 def _waiting_poll_runner() -> FakeRunner:
     """The agent-path guest, whose poll finds setup running once before its marker."""
     runner = agent_runner(FakePve())
@@ -210,17 +223,69 @@ def _waiting_poll_runner() -> FakeRunner:
     return runner
 
 
-def test_progress_lines_never_reach_a_root_handler_and_the_logger_is_restored(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
+PROGRESS = "waiting, SetupHost running=True"
+
+
+def _node_logging_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, argv: list[str], runner: FakeRunner, **logging_overrides: object
+) -> CliRun:
+    """``main()`` with logging started as on a node, from ``[lib_log_rich]`` alone.
+
+    The shell's ``LOG_*`` variables and any ``.env`` would decide the console level, so they are
+    removed and an empty ``--env-file`` is named.
+    """
+    for name in list(os.environ):
+        if name.upper().startswith("LOG_"):
+            monkeypatch.delenv(name)
+    env_file = tmp_path / "empty.env"
+    env_file.write_text("", encoding="utf-8")
+    config: dict[str, object] = {**cli_config(tmp_path), "lib_log_rich": {**NODE_LOGGING, **logging_overrides}}
+    return run_cli(["--env-file", str(env_file), *argv], config, runner, production_logging=True)
+
+
+def test_a_waiting_poll_reports_its_progress_on_stderr_through_lib_log_rich_never_on_stdout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A handler on the root logger (production's lib_log_rich bridge) would print each line again."""
+    run = _node_logging_run(tmp_path, monkeypatch, ["repair", "--vmid", "1", "--json"], _waiting_poll_runner())
+    assert run.exit_code == 0
+    progress = [line for line in run.stderr.splitlines() if PROGRESS in line]
+    # Exactly once, in lib_log_rich's console layout: nothing else prints the line.
+    assert len(progress) == 1
+    assert "[INFO]" in progress[0]
+    assert json_envelope(run.stdout)["verdict"] == "STATE=DONE-OK"
+
+
+def test_each_progress_record_reaches_the_root_bridge_once_and_no_handler_of_ours(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Production bridges the ROOT logger into lib_log_rich: its scrubber, console and backends."""
     application = logging.getLogger("pve_winrepair.application")
-    before = (application.level, application.propagate, list(application.handlers))
+    seen: list[tuple[bool, int]] = []
+    runner = _waiting_poll_runner()
+    replies = list(runner.replies["setup-alive"])
+
+    def watching(_cmd: list[str]) -> Reply:
+        # Read mid-run, while the use case is logging: how the application logger is wired.
+        seen.append((application.propagate, len(application.handlers)))
+        reply = replies.pop(0) if len(replies) > 1 else replies[0]
+        assert isinstance(reply, Reply)
+        return reply
+
+    runner.replies["setup-alive"] = [watching]
     with caplog.at_level(logging.INFO):
-        run = run_cli(["repair", "--vmid", "1"], cli_config(tmp_path), _waiting_poll_runner())
-    assert "    ... waiting, SetupHost running=True" in run.stderr.splitlines()
-    assert [record.getMessage() for record in caplog.records if record.name.startswith(application.name)] == []
-    assert (application.level, application.propagate, list(application.handlers)) == before
+        run = _node_logging_run(tmp_path, monkeypatch, ["repair", "--vmid", "1"], runner)
+    assert run.exit_code == 0
+    assert seen and set(seen) == {(True, 0)}
+    assert [record.getMessage() for record in caplog.records].count(PROGRESS) == 1
+    assert any(type(handler).__name__ == "StdlibLoggingHandler" for handler in logging.getLogger().handlers)
+
+
+def test_a_console_at_warning_shows_no_progress_line(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    run = _node_logging_run(
+        tmp_path, monkeypatch, ["repair", "--vmid", "1"], _waiting_poll_runner(), console_level="WARNING"
+    )
+    assert run.exit_code == 0
+    assert PROGRESS not in run.stderr
 
 
 def test_stage_only_stops_after_staging(tmp_path: Path) -> None:
@@ -308,9 +373,3 @@ def test_a_state_dir_below_an_unsearchable_directory_is_refused_naming_it(tmp_pa
     assert run.exit_code == 1
     assert f"cannot be a directory: {locked / 'state'} cannot be checked: Permission denied" in run.stderr
     assert runner.calls == []
-
-
-def test_a_progress_line_that_cannot_be_formatted_never_breaks_the_run(capsys: pytest.CaptureFixture[str]) -> None:
-    with operator_progress():
-        logging.getLogger("pve_winrepair.application.repair").info("%d processes", "not a number")
-    assert "--- Logging error ---" in capsys.readouterr().err

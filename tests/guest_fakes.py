@@ -24,7 +24,7 @@ from lib_layered_config import Config
 from pve_winrepair.adapters.cli.main import main
 from pve_winrepair.adapters.guest_ssh import Guest
 from pve_winrepair.adapters.node import Node
-from pve_winrepair.composition import AppServices, build_testing
+from pve_winrepair.composition import AppServices, build_production, build_testing
 from pve_winrepair.domain.settings import SshSettings
 from pve_winrepair_guest.envelope import Outcome, build, internal_error, render
 from pve_winrepair_guest.probes import (
@@ -449,12 +449,16 @@ def cli_config(tmp_path: Path) -> dict[str, dict[str, object]]:
     }
 
 
-def run_cli(argv: Sequence[str], config: Mapping[str, object], runner: Runner) -> CliRun:
+def run_cli(
+    argv: Sequence[str], config: Mapping[str, object], runner: Runner, *, production_logging: bool = False
+) -> CliRun:
     """Run ``pve-winrepair <argv>`` through the real ``main()`` with ``config`` and a node on ``runner``.
 
     The configuration is injected as the template's CLI tests inject it (``get_config``), the node
     through ``build_testing(make_node=...)``: it gets the ``[ssh]`` settings the command read, the
-    fake runner, a fake clock and the 83-byte stand-in tool.
+    fake runner, a fake clock and the 83-byte stand-in tool. ``production_logging`` starts logging
+    as a node does (lib_log_rich with its stdlib bridge on the root logger) from ``config``'s
+    ``[lib_log_rich]`` section, instead of the testing composition's quiet runtime.
     """
     loaded = Config(dict(config), {})
     clock = FakeClock()
@@ -466,7 +470,13 @@ def run_cli(argv: Sequence[str], config: Mapping[str, object], runner: Runner) -
         return Node(ssh=ssh, runner=runner, clock=clock.time, sleep=clock.sleep, tool_dir=TOOL_DIR)
 
     def services() -> AppServices:
-        return dataclasses.replace(build_testing(make_node=make_node), get_config=get_config)
+        testing = dataclasses.replace(build_testing(make_node=make_node), get_config=get_config)
+        if not production_logging:
+            return testing
+        production = build_production()
+        return dataclasses.replace(
+            testing, init_logging=production.init_logging, check_logging_config=production.check_logging_config
+        )
 
     with CliRunner().isolation() as (stdout, stderr, _output):
         exit_code = main(list(argv), services_factory=services)
@@ -485,3 +495,19 @@ def envelope_steps(envelope: dict[str, object]) -> list[dict[str, object]]:
     steps = envelope["steps"]
     assert isinstance(steps, list)
     return cast("list[dict[str, object]]", steps)
+
+
+#: A ``[lib_log_rich]`` section that logs as a node does at the default verbosity (console INFO on
+#: stderr), with no system sink and no queue, so the console lines are written before ``main()``
+#: returns and nothing reaches the machine's journal.
+NODE_LOGGING: dict[str, object] = {
+    "service": "pve-winrepair-test",
+    "environment": "test",
+    "console_level": "INFO",
+    "console_stream": "stderr",
+    "backend_level": "WARNING",
+    "enable_journald": False,
+    "enable_eventlog": False,
+    "enable_graylog": False,
+    "queue_enabled": False,
+}

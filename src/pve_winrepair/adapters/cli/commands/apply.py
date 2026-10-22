@@ -19,7 +19,7 @@ from pve_winrepair.application.apply import ApplyRequest, run_apply
 from ..constants import CLICK_CONTEXT_SETTINGS
 from ..context import get_cli_context
 from ..typed_click import option
-from .runs import PreflightError, check_node, echo_step, finish, load_run_settings, operator_progress, refused
+from .runs import PreflightError, check_node, echo_step, finish, load_run_settings, refused
 
 __all__ = ["cli_apply"]
 
@@ -52,11 +52,10 @@ def cli_apply(ctx: click.Context, *, vmid: int, ip: str, apply_minutes: float, a
         except PreflightError as refusal:
             # The repair run held Windows Update and only a verified apply lifts it.
             finish(ctx, refused(vmid, refusal, wu_held=True), command="apply", vmid=vmid, as_json=as_json)
-        with operator_progress():
-            result = run_apply(
-                ApplyRequest(vmid=vmid, ip=ip, apply_minutes=apply_minutes),
-                cli_ctx.services.make_node(settings.ssh),
-                receipts=cli_ctx.services.make_receipts(settings.node.state_dir),
-                on_step=echo_step,
-            )
+        result = run_apply(
+            ApplyRequest(vmid=vmid, ip=ip, apply_minutes=apply_minutes),
+            cli_ctx.services.make_node(settings.ssh),
+            receipts=cli_ctx.services.make_receipts(settings.node.state_dir),
+            on_step=echo_step,
+        )
         finish(ctx, result, command="apply", vmid=vmid, as_json=as_json)

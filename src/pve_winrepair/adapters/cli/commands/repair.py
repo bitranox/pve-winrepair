@@ -25,7 +25,6 @@ from .runs import (
     echo_step,
     finish,
     load_run_settings,
-    operator_progress,
     refused,
     resolve_snapshot_name,
 )
@@ -94,13 +93,12 @@ def cli_repair(
             )
         except PreflightError as refusal:
             finish(ctx, refused(vmid, refusal, wu_held=False), command="repair", vmid=vmid, as_json=as_json)
-        with operator_progress():
-            result = run_repair(
-                request,
-                cli_ctx.services.make_node(settings.ssh),
-                repair=settings.repair,
-                guest=settings.guest,
-                receipts=cli_ctx.services.make_receipts(settings.node.state_dir),
-                on_step=echo_step,
-            )
+        result = run_repair(
+            request,
+            cli_ctx.services.make_node(settings.ssh),
+            repair=settings.repair,
+            guest=settings.guest,
+            receipts=cli_ctx.services.make_receipts(settings.node.state_dir),
+            on_step=echo_step,
+        )
         finish(ctx, result, command="repair", vmid=vmid, as_json=as_json)

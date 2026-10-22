@@ -4,10 +4,13 @@ A run command reads the node CLI settings (a configuration that does not load or
 before anything else), checks what would otherwise fail only deep inside the run (:func:`check_node`),
 and then hands the use case a node and a receipt store from the composition.
 
-The operator sees each step on stderr as it happens (:func:`echo_step`) and the use case's progress
-lines between steps (:func:`operator_progress`); stdout carries only the result (:func:`finish`): the
-``--json`` envelope, or one ``vm <vmid>: <verdict>`` line. An internal error without ``--json``
-prints nothing to stdout, so a caller reading that line never mistakes a crash for a verdict.
+The operator sees each step on stderr as it happens (:func:`echo_step`); stdout carries only the
+result (:func:`finish`): the ``--json`` envelope, or one ``vm <vmid>: <verdict>`` line. The use
+cases' progress lines between steps are stdlib ``logging`` records: they reach the operator the way
+every log event does, through the root logger's lib_log_rich bridge (its scrubber, its console on
+stderr at the configured level, its backends), so nothing here handles or re-levels them. An
+internal error without ``--json`` prints nothing to stdout, so a caller reading that line never
+mistakes a crash for a verdict.
 
 Contents:
     * :class:`PreflightError` - a check before any call failed; the message names the setting or option.
@@ -16,21 +19,17 @@ Contents:
     * :func:`resolve_snapshot_name` - ``--snapshot-name`` validated as ``[repair] snapshot_name`` is.
     * :func:`refused` - the run result of a :class:`PreflightError`, shaped like the use cases' own.
     * :func:`echo_step` - one step on stderr.
-    * :func:`operator_progress` - the use cases' progress lines on stderr for the length of a run.
     * :func:`finish` - print the result and exit with the run's code.
 """
 
 from __future__ import annotations
 
 import json
-import logging
 import stat
-from contextlib import contextmanager
 from typing import TYPE_CHECKING, NoReturn
 
 from pydantic import ValidationError
 
-from pve_winrepair import application
 from pve_winrepair.adapters.config.settings import SettingsError
 from pve_winrepair.domain.report import Report, RunExit, RunResult, Step
 from pve_winrepair.domain.settings import RepairSettings
@@ -40,10 +39,10 @@ from ..config_load import require_config
 from ..exit_codes import ExitCode
 
 if TYPE_CHECKING:
-    from collections.abc import Generator
     from pathlib import Path
 
     import rich_click as click
+    from pydantic_core import ErrorDetails
 
     from pve_winrepair.domain.settings import Settings
 
@@ -55,7 +54,6 @@ __all__ = [
     "echo_step",
     "finish",
     "load_run_settings",
-    "operator_progress",
     "refused",
     "resolve_snapshot_name",
 ]
@@ -127,14 +125,23 @@ def resolve_snapshot_name(repair: RepairSettings, override: str | None) -> str:
     """``--snapshot-name``, validated by ``RepairSettings``' own rule; ``[repair] snapshot_name`` without it.
 
     Raises:
-        PreflightError: The override breaks the rule; the message names the option and the rule, never the value.
+        PreflightError: The override breaks the rule; the message names the option and the rule, never
+            the value. Any other field the re-validation refuses is named as its own ``[repair]``
+            setting: that is not the option's fault.
     """
     if override is None:
         return repair.snapshot_name
     try:
         return RepairSettings.model_validate(repair.model_dump() | {"snapshot_name": override}).snapshot_name
     except ValidationError as error:
-        raise PreflightError("; ".join(f"--snapshot-name: {item['msg']}" for item in error.errors())) from None
+        raise PreflightError("; ".join(_override_problem(item) for item in error.errors())) from None
+
+
+def _override_problem(item: ErrorDetails) -> str:
+    """``--snapshot-name: <reason>`` for the option's own field, ``[repair] <field>: <reason>`` for any other."""
+    if item["loc"] == ("snapshot_name",):
+        return f"--snapshot-name: {item['msg']}"
+    return f"[repair] {'.'.join(str(part) for part in item['loc'])}: {item['msg']}"
 
 
 def refused(vmid: int, refusal: PreflightError, *, wu_held: bool) -> RunResult:
@@ -156,40 +163,6 @@ def echo_step(step: Step) -> None:
     state = "ok " if step.get("ok") is True else "FAIL"
     detail = " ".join(f"{key}={value}" for key, value in step.items() if key not in ("step", "ok"))
     safe_console.echo(f"[{state}] {step.get('step')!s:<{_STEP_WIDTH}} {detail}".rstrip(), err=True)
-
-
-class _OperatorLines(logging.Handler):
-    """Writes each record's message to stderr as an indented progress line."""
-
-    def emit(self, record: logging.LogRecord) -> None:
-        try:
-            safe_console.echo(f"    ... {record.getMessage()}", err=True)
-        except Exception:  # a logging handler never raises into the code that logged
-            self.handleError(record)
-
-
-@contextmanager
-def operator_progress() -> Generator[None]:
-    """Show the use cases' INFO and higher progress lines on stderr while the block runs.
-
-    Between steps the use cases log their waits and retried reads through stdlib ``logging``
-    (``pve_winrepair.application``); the operator needs them at every logging configuration, the
-    test runtime's quiet one included. Propagation is off for the block, so a lib_log_rich console
-    running at INFO does not print each line a second time; its other sinks do not receive them,
-    which is no loss against the driver scripts these commands replace, where they were prints.
-    """
-    logger = logging.getLogger(application.__name__)
-    handler = _OperatorLines(logging.INFO)
-    level, propagate = logger.level, logger.propagate
-    logger.addHandler(handler)
-    logger.setLevel(logging.INFO)
-    logger.propagate = False
-    try:
-        yield
-    finally:
-        logger.removeHandler(handler)
-        logger.setLevel(level)
-        logger.propagate = propagate
 
 
 def finish(ctx: click.Context, result: RunResult, *, command: str, vmid: int, as_json: bool) -> NoReturn:
