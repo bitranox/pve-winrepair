@@ -9,7 +9,6 @@ stray ``.env`` decides a result.
 
 from __future__ import annotations
 
-import os
 from ipaddress import IPv4Network
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -30,25 +29,6 @@ if TYPE_CHECKING:
 
 #: The env prefix lib_layered_config reads for this application.
 _ENV_PREFIX = "PVE_WINREPAIR___"
-
-
-@pytest.fixture
-def isolated_layers(monkeypatch: pytest.MonkeyPatch, user_layer_in_tmp_path: Path, clear_config_cache: None) -> Path:
-    """Every configuration layer but the shipped defaults points into ``tmp_path``, which is the cwd.
-
-    All three app roots are set because each platform reads its own (``/etc`` on Linux, the
-    Application Support root on macOS, ProgramData on Windows); an inherited ``PVE_WINREPAIR___``
-    variable would decide a result, so every one is removed.
-    """
-    root = user_layer_in_tmp_path
-    monkeypatch.setenv("LIB_LAYERED_CONFIG_ETC", str(root / "etc"))
-    monkeypatch.setenv("LIB_LAYERED_CONFIG_MAC_APP_ROOT", str(root / "macapp"))
-    monkeypatch.setenv("LIB_LAYERED_CONFIG_PROGRAMDATA", str(root / "programdata"))
-    for name in list(os.environ):
-        if name.upper().startswith(_ENV_PREFIX):
-            monkeypatch.delenv(name)
-    monkeypatch.chdir(root)
-    return root
 
 
 def _refusal(config: Config) -> str:

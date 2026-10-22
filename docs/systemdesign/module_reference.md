@@ -24,6 +24,7 @@ moves or removes a module, a CLI option or a public name.
 - `src/pve_winrepair/adapters/config/display.py`  -  Configuration display (TOML/JSON output, redaction)
 - `src/pve_winrepair/adapters/config/overrides.py`  -  CLI `--set` override parsing and deep-merge
 - `src/pve_winrepair/adapters/config/settings.py`  -  `load_settings` validates the `[ssh] [guest] [repair] [node]` sections into `Settings`; `SettingsError` carries one `<section>.<field>: <reason>` line per problem
+- `src/pve_winrepair/adapters/guest_ssh.py`  -  The guest tool over ssh: `Guest` pushes the packed tool to its content address, runs one subcommand and reads its JSON envelope (`Envelope`, typed `Fields`; `GuestNoAnswerError`, `GuestInternalError`, `GuestProtocolError`, `GuestPushError`); `Node` bundles `qm`, the clock and the guests; `ssh_options` turns `SshSettings` into ssh's `-o` options; `TOOL_DIR` is the packed tool shipped in `adapters/guest_tool/`
 - `src/pve_winrepair/adapters/logging/setup.py`  -  lib_log_rich initialization; takes only the `LOG_*` lines of a `.env`, and raises `InvalidLoggingConfigError` for a refused `[lib_log_rich]` value or `LOG_*` variable, after starting logging with its defaults (and without the `LOG_*` variables only when one of them is refused); `check_logging_config` refuses another configuration's logging settings through lib_log_rich's `validate_config`, without touching the running runtime
 - `src/pve_winrepair/adapters/cli/`  -  CLI adapter package:
   - `__init__.py`  -  Public facade
@@ -81,6 +82,8 @@ moves or removes a module, a CLI option or a public name.
 - `tests/test_display.py`  -  Config display formatting tests
 - `tests/test_enums.py`  -  Domain enum tests
 - `tests/test_errors.py`  -  Domain error types
+- `tests/guest_fakes.py`  -  A fake ssh/scp runner answering with the guest tool's real envelopes, plus fake `qm` and clock
+- `tests/test_guest_ssh.py`  -  The ssh adapter: the argv it builds from `SshSettings`, the arguments it refuses, the push and its hashes, how it reads an answer
 - `tests/test_logging.py`  -  Logging configuration model
 - `tests/test_logging_dotenv_isolation.py`  -  Only `LOG_*` lines of a `.env` reach the environment; an invalid `[lib_log_rich]` section or `LOG_*` variable is a configuration failure that leaves logging running
 - `tests/test_memory_logging.py`  -  Testing-composition logging runtime and the per-test logging reset
@@ -351,6 +354,7 @@ Use `composition.build_testing()` to wire all in-memory adapters.
 | `managed_traceback_state` | Resets/restores traceback configuration                                                                                                                                 |
 | `isolated_logging_state`  | Autouse: after every test, shuts the lib_log_rich runtime down and restores the root logger; yields that restore step                                                   |
 | `user_layer_in_tmp_path`  | Points every OS's user-layer location (`HOME`, `USERPROFILE`, `XDG_CONFIG_HOME`, `APPDATA`, `LOCALAPPDATA`) at `tmp_path` and returns it, so a real deploy writes there |
+| `isolated_layers`         | Points every config layer but the shipped defaults (all three app roots, the user layer, the cwd) at `tmp_path` and removes inherited `PVE_WINREPAIR___` variables      |
 
 ---
 
