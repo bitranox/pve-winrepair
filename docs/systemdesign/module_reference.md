@@ -13,6 +13,7 @@ moves or removes a module, a CLI option or a public name.
 - `src/pve_winrepair/domain/behaviors.py`  -  Pure domain functions (greeting)
 - `src/pve_winrepair/domain/enums.py`  -  Type-safe enums (OutputFormat, DeployTarget)
 - `src/pve_winrepair/domain/errors.py`  -  Domain exceptions (ConfigurationError)
+- `src/pve_winrepair/domain/settings.py`  -  Node CLI settings models (`SshSettings`, `GuestSettings`, `RepairSettings`, `NodeSettings`, `Settings`); see Settings below
 
 ### Application Layer
 - `src/pve_winrepair/application/ports.py`  -  Callable Protocol definitions for adapter functions
@@ -22,6 +23,7 @@ moves or removes a module, a CLI option or a public name.
 - `src/pve_winrepair/adapters/config/deploy.py`  -  Configuration deployment
 - `src/pve_winrepair/adapters/config/display.py`  -  Configuration display (TOML/JSON output, redaction)
 - `src/pve_winrepair/adapters/config/overrides.py`  -  CLI `--set` override parsing and deep-merge
+- `src/pve_winrepair/adapters/config/settings.py`  -  `load_settings` validates the `[ssh] [guest] [repair] [node]` sections into `Settings`; `SettingsError` carries one `<section>.<field>: <reason>` line per problem
 - `src/pve_winrepair/adapters/logging/setup.py`  -  lib_log_rich initialization; takes only the `LOG_*` lines of a `.env`, and raises `InvalidLoggingConfigError` for a refused `[lib_log_rich]` value or `LOG_*` variable, after starting logging with its defaults (and without the `LOG_*` variables only when one of them is refused); `check_logging_config` refuses another configuration's logging settings through lib_log_rich's `validate_config`, without touching the running runtime
 - `src/pve_winrepair/adapters/cli/`  -  CLI adapter package:
   - `__init__.py`  -  Public facade
@@ -56,6 +58,7 @@ moves or removes a module, a CLI option or a public name.
 
 ### Configuration Defaults
 - `src/pve_winrepair/adapters/config/defaultconfig.toml`  -  Base defaults
+- `src/pve_winrepair/adapters/config/defaultconfig.d/20-winrepair.toml`  -  Node CLI settings defaults (`[ssh] [guest] [repair] [node]`)
 - `src/pve_winrepair/adapters/config/defaultconfig.d/40-layered-config.toml`  -  lib_layered_config integration docs
 - `src/pve_winrepair/adapters/config/defaultconfig.d/90-logging.toml`  -  Logging defaults
 
@@ -84,11 +87,12 @@ moves or removes a module, a CLI option or a public name.
 - `tests/test_metadata.py`  -  Package metadata and PEP 561 marker tests
 - `tests/test_metadata_sync.py`  -  `__init__conf__` constants stay in sync with `pyproject.toml`
 - `tests/test_module_entry.py`  -  `python -m` entry tests
-- `tests/test_module_reference_sync.py`  -  This document exists and names both packages
+- `tests/test_module_reference_sync.py`  -  This document names both packages, and its settings tables match the models' fields and defaults
 - `tests/test_permission_defaults.py`  -  `config-deploy` hands permissions to lib_layered_config: `--set` overrides, `.env` and deployed destinations never decide a mode, refusals exit 78
 - `tests/test_ports.py`  -  Protocol conformance tests
 - `tests/test_property_overrides.py`  -  Property-based `--set` override tests
 - `tests/test_safe_console.py`  -  Legacy-codepage output tests, plus the guard forbidding direct `click.echo`
+- `tests/test_settings.py`  -  Settings models and `load_settings`: shipped defaults, refusals by field, the fleet-shaped file, the env override end to end
 
 ---
 
@@ -276,6 +280,52 @@ Raises `ValueError` with descriptive message on invalid input.
 
 ---
 
+## Settings
+
+`domain/settings.py` holds one frozen model per configuration section; each refuses an unknown key
+(`extra="forbid"`) and keeps a number given to a text field as its digits (`coerce_numbers_to_str`),
+because lib_layered_config reads an unquoted digit-only `.env` or environment value as an int.
+`adapters/config/settings.py` `load_settings(config)` validates the four sections of a loaded
+`Config` (an absent section takes its defaults) and raises `SettingsError(ValueError)` with one
+`<section>.<field>: <reason>` line per problem, never echoing the refused value. The shipped defaults
+are `adapters/config/defaultconfig.d/20-winrepair.toml`; an empty `ssh.key` or `repair.media_dir`
+loads and means "not configured". Override one key per run with
+`PVE_WINREPAIR___<SECTION>__<KEY>`, e.g. `PVE_WINREPAIR___SSH__KEY=<path>`.
+
+### `[ssh]`  -  `SshSettings`
+
+| Field                      | Type   | Default                | Rule                                                                 |
+|----------------------------|--------|------------------------|----------------------------------------------------------------------|
+| `key`                      | `str`  | `""`                   | private key path; empty = not configured                             |
+| `user`                     | `str`  | `"Administrator"`      | `[A-Za-z0-9_.-]{1,64}`                                               |
+| `strict_host_key_checking` | `bool` | `true`                 | the ssh adapter passes `yes` or `no`                                 |
+| `known_hosts_file`         | `str`  | `"~/.ssh/known_hosts"` | passed to ssh as written; a leading `~` is expanded by ssh, not here |
+
+### `[guest]`  -  `GuestSettings`
+
+| Field              | Type              | Default | Rule                                                                                                      |
+|--------------------|-------------------|---------|-----------------------------------------------------------------------------------------------------------|
+| `subnet`           | `str`             | `""`    | IPv4 network in CIDR notation, no host bits, or empty; `network()` returns it as `IPv4Network`, or `None` |
+| `runner_tasks`     | `tuple[str, ...]` | `[]`    | each `[A-Za-z0-9_.-]{1,64}`; no node command reads it: the values for guest `verify-runners --task NAME`  |
+| `expected_runners` | `int`             | `0`     | 0 to 999999; no node command reads it: the value for guest `verify-runners --expected N` (0 = any count)  |
+
+### `[repair]`  -  `RepairSettings`
+
+| Field            | Type    | Default           | Rule                                                        |
+|------------------|---------|-------------------|-------------------------------------------------------------|
+| `media_dir`      | `str`   | `""`              | directory of the installation media; empty = not configured |
+| `snapshot_name`  | `str`   | `"pre_winrepair"` | `[A-Za-z][A-Za-z0-9_-]{0,39}`                               |
+| `stage_free_gb`  | `float` | `15.0`            | finite, greater than 0 (GiB on the staging drive)           |
+| `system_free_gb` | `float` | `25.0`            | finite, greater than 0 (GiB on C:)                          |
+
+### `[node]`  -  `NodeSettings`
+
+| Field       | Type   | Default                    | Rule                    |
+|-------------|--------|----------------------------|-------------------------|
+| `state_dir` | `Path` | `"/var/lib/pve-winrepair"` | where receipts are kept |
+
+---
+
 ## Testing Infrastructure
 
 ### In-Memory Adapters
@@ -304,4 +354,4 @@ Use `composition.build_testing()` to wire all in-memory adapters.
 
 ---
 
-**Last Updated:** 2026-10-22 (guest package, import contracts)
+**Last Updated:** 2026-10-22 (settings models)

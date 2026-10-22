@@ -1,0 +1,107 @@
+# ==============================================================================
+# pve-winrepair - node CLI settings
+# ==============================================================================
+#
+# Put the values for your site in the app layer, /etc/pve-winrepair/config.toml on the
+# Proxmox node (precedence and the other layers: see defaultconfig.toml). An unknown key
+# or a refused value stops every command that reads these settings, naming
+# <section>.<key>.
+#
+# Environment Variable format: PVE_WINREPAIR___<SECTION>__<KEY>=<VALUE>, for example
+#   PVE_WINREPAIR___SSH__KEY=/root/.ssh/id_guest
+# overrides [ssh] key for one run.
+#
+# An empty text value means "not configured": it loads, and the command that needs it
+# refuses to run until it is set.
+
+[ssh]
+
+# Purpose: Private key file the node uses to log in to the guest over ssh
+# Type: string (path); required by the commands that reach a guest
+# Default: "" (not configured)
+# Environment Variable: PVE_WINREPAIR___SSH__KEY=/root/.ssh/id_guest
+key = ""
+
+# Purpose: Account the node logs in as on the guest
+# Type: string; letters, digits and _ . - only, 1 to 64 characters (no DOMAIN\ part)
+# Default: "Administrator"
+# Environment Variable: PVE_WINREPAIR___SSH__USER=admin
+user = "Administrator"
+
+# Purpose: Whether ssh refuses a guest whose host key is unknown or has changed
+# Type: boolean; true passes StrictHostKeyChecking=yes to ssh, false passes no
+# Default: true
+# Environment Variable: PVE_WINREPAIR___SSH__STRICT_HOST_KEY_CHECKING=false
+# Note: a guest rebuilt from a template gets a new host key; set false only for guests
+#       on a network you trust
+strict_host_key_checking = true
+
+# Purpose: known_hosts file ssh reads and writes for the guests
+# Type: string (path); a leading ~ is passed to ssh as written, and ssh expands it
+# Default: "~/.ssh/known_hosts"
+# Environment Variable: PVE_WINREPAIR___SSH__KNOWN_HOSTS_FILE=~/.ssh/known_hosts_guests
+known_hosts_file = "~/.ssh/known_hosts"
+
+[guest]
+
+# Purpose: The LAN the guest's address must be in
+# Type: string; an IPv4 network in CIDR notation with no host bits set (192.0.2.0/24),
+#       or "" (empty)
+# Default: "" - the guest's only non-loopback, non-link-local IPv4 address is used, and
+#       a guest with several such addresses is refused
+# Environment Variable: PVE_WINREPAIR___GUEST__SUBNET=192.0.2.0/24
+subnet = ""
+
+# Purpose: Boot tasks that start the guest's CI runners
+# Type: array of strings; letters, digits and _ . - only, 1 to 64 characters each
+# Default: [] (no task check)
+# Environment Variable: PVE_WINREPAIR___GUEST__RUNNER_TASKS='["runner-a","runner-b"]'
+# Note: no node command reads this value. It records what an operator passes to the guest
+#       tool as `verify-runners --task NAME` (one --task per entry); `pve-winrepair config`
+#       shows it.
+runner_tasks = []
+
+# Purpose: Number of running runner containers that means the runners are healthy
+# Type: integer, 0 to 999999
+# Default: 0 (any readable count is OK)
+# Environment Variable: PVE_WINREPAIR___GUEST__EXPECTED_RUNNERS=4
+# Note: no node command reads this value. It records what an operator passes to the guest
+#       tool as `verify-runners --expected N`; `pve-winrepair config` shows it.
+expected_runners = 0
+
+[repair]
+
+# Purpose: Directory on the node that holds the Windows installation media (ISO files)
+# Type: string (path); required by `repair`
+# Default: "" (not configured)
+# Environment Variable: PVE_WINREPAIR___REPAIR__MEDIA_DIR=/srv/media
+media_dir = ""
+
+# Purpose: Name of the Proxmox snapshot taken before a repair
+# Type: string; a letter first, then letters, digits, _ and -, at most 40 characters
+# Default: "pre_winrepair"
+# Environment Variable: PVE_WINREPAIR___REPAIR__SNAPSHOT_NAME=pre_repair
+snapshot_name = "pre_winrepair"
+
+# Purpose: Free space (GiB, 1024^3 bytes) the drive the media are staged to must have
+#          (the media copy); when C: is the only usable drive it needs this plus
+#          system_free_gb
+# Type: float, greater than 0
+# Default: 15.0
+# Environment Variable: PVE_WINREPAIR___REPAIR__STAGE_FREE_GB=15.0
+stage_free_gb = 15.0
+
+# Purpose: Free space (GiB) C: must have before a repair starts: the in-place upgrade's
+#          own working set and rollback copy
+# Type: float, greater than 0
+# Default: 25.0
+# Environment Variable: PVE_WINREPAIR___REPAIR__SYSTEM_FREE_GB=25.0
+system_free_gb = 25.0
+
+[node]
+
+# Purpose: Directory where the node keeps its state (repair receipts)
+# Type: string (path)
+# Default: "/var/lib/pve-winrepair"
+# Environment Variable: PVE_WINREPAIR___NODE__STATE_DIR=/var/lib/pve-winrepair
+state_dir = "/var/lib/pve-winrepair"

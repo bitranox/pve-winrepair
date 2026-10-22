@@ -50,6 +50,7 @@ DECOY_FILES = ("handover.md", "OPEN-WORK.md", "EXECUTION-USER-REVIEW.md", "reset
 REQUIRED_WHEEL_DATA = (
     f"{PACKAGE}/py.typed",
     f"{PACKAGE}/adapters/config/defaultconfig.toml",
+    f"{PACKAGE}/adapters/config/defaultconfig.d/20-winrepair.toml",
     f"{PACKAGE}/adapters/config/defaultconfig.d/40-layered-config.toml",
     f"{PACKAGE}/adapters/config/defaultconfig.d/90-logging.toml",
     f"{PACKAGE}/adapters/guest_tool/winrepair_guest.ps1",

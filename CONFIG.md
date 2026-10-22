@@ -179,7 +179,7 @@ pve-winrepair config-deploy --target user --profile production
 pve-winrepair config-deploy --target user --profile production --force
 ```
 
-Every target receives `config.toml` plus `config.d/40-layered-config.toml`
+Every target receives `config.toml` plus `config.d/20-winrepair.toml`, `config.d/40-layered-config.toml`
 and `config.d/90-logging.toml` (the host target writes `hosts/{hostname}.toml` and
 `hosts/{hostname}.d/`). With `--force`, a file whose content differs from the bundled one is
 replaced and the old file is kept as `<name>.bak` (numbered, `<name>.bak.1` and so on, when a
