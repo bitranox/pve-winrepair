@@ -723,3 +723,30 @@ def test_the_scope_check_takes_the_tool_alone_when_no_stage_root_is_named(tmp_pa
     tool = guest_ssh.packed_tool(tmp_path).guest_path
     assert lockdown.lock_scope_problem(tool, None) is None
     assert lockdown.lock_scope_problem(r"C:\Windows\x.ps1", None) is not None
+
+
+def test_ssh_options_keep_the_order_winrepair_shipped() -> None:
+    # Literal on purpose: an expectation built from ssh_options() cannot see a reorder.
+    settings = SshSettings(key="/k", strict_host_key_checking=False, known_hosts_file="~/.ssh/kh")
+    assert ssh_options(settings) == (
+        "-o", "BatchMode=yes",
+        "-o", "PreferredAuthentications=publickey",
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "UserKnownHostsFile=~/.ssh/kh",
+        "-o", "ConnectTimeout=20",
+        "-o", "ServerAliveInterval=30",
+    )  # fmt: skip
+
+
+def test_ssh_and_scp_argv_carry_the_options_in_that_order() -> None:
+    # Driven through the public Guest calls, which build the argv a guest call really runs.
+    settings = SshSettings(key="/k", user="admin", strict_host_key_checking=False, known_hosts_file="~/.ssh/kh")
+    opts = list(ssh_options(settings))
+    runner = FakeRunner().on("hostname", Reply(0, "GUEST\r\n")).on("scp", Reply(0))
+    guest = Guest("192.0.2.10", ssh_settings=settings, tool_dir=TOOL_DIR, runner=runner)
+    guest.ssh("hostname", timeout=5.0)
+    guest.copy_to(["a"], "D:\\x\\", timeout=5.0)
+    assert runner.calls == [
+        ["ssh", "-i", "/k", *opts, "admin@192.0.2.10", "hostname"],
+        ["scp", "-q", "-i", "/k", *opts, "-r", "a", "admin@192.0.2.10:D:\\x\\"],
+    ]

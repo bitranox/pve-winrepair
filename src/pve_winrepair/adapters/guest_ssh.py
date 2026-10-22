@@ -117,11 +117,14 @@ PUSH_TIMEOUT = 300.0
 REMOTE_TIMEOUT = 60.0
 # The pushed copy's first run may bootstrap uv and Python on the guest before it answers.
 LOCK_TIMEOUT = 300.0
-# Options fixed for every guest. BatchMode plus publickey: a rejected key fails at once instead of
-# hanging an unattended run on a password prompt.
-_FIXED_SSH_OPTS = (
+# Options fixed for every guest, either side of the two host-key options (ssh_options keeps that
+# order). BatchMode plus publickey: a rejected key fails at once instead of hanging an unattended
+# run on a password prompt.
+_AUTH_OPTS = (
     "-o", "BatchMode=yes",
     "-o", "PreferredAuthentications=publickey",
+)  # fmt: skip
+_TIMEOUT_OPTS = (
     "-o", "ConnectTimeout=20",
     "-o", "ServerAliveInterval=30",
 )  # fmt: skip
@@ -276,16 +279,17 @@ def ssh_options(ssh: SshSettings) -> tuple[str, ...]:
 
     Example:
         >>> from pve_winrepair.domain.settings import SshSettings
-        >>> ssh_options(SshSettings(strict_host_key_checking=False, known_hosts_file="~/.ssh/kh"))[-4:]
+        >>> ssh_options(SshSettings(strict_host_key_checking=False, known_hosts_file="~/.ssh/kh"))[4:8]
         ('-o', 'StrictHostKeyChecking=no', '-o', 'UserKnownHostsFile=~/.ssh/kh')
     """
     checking = "yes" if ssh.strict_host_key_checking else "no"
     return (
-        *_FIXED_SSH_OPTS,
+        *_AUTH_OPTS,
         "-o",
         f"StrictHostKeyChecking={checking}",
         "-o",
         f"UserKnownHostsFile={ssh.known_hosts_file}",
+        *_TIMEOUT_OPTS,
     )
 
 
