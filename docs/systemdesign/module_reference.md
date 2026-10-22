@@ -12,7 +12,7 @@ moves or removes a module, a CLI option or a public name.
 ### Domain Layer
 - `src/pve_winrepair/domain/behaviors.py`  -  Pure domain functions (greeting)
 - `src/pve_winrepair/domain/enums.py`  -  Type-safe enums (OutputFormat, DeployTarget)
-- `src/pve_winrepair/domain/errors.py`  -  Domain exceptions (ConfigurationError, DeliveryError, InvalidRecipientError)
+- `src/pve_winrepair/domain/errors.py`  -  Domain exceptions (ConfigurationError)
 
 ### Application Layer
 - `src/pve_winrepair/application/ports.py`  -  Callable Protocol definitions for adapter functions
@@ -96,15 +96,15 @@ moves or removes a module, a CLI option or a public name.
 
 ### Layer Assignments
 
-| Directory/Module       | Layer       | Responsibility                                |
-|------------------------|-------------|-----------------------------------------------|
-| `domain/`              | Domain      | Pure logic  -  no I/O, logging, or frameworks |
-| `application/ports.py` | Application | Protocol definitions for adapters             |
-| `adapters/config/`     | Adapters    | Configuration loading, deployment, display    |
-| `adapters/logging/`    | Adapters    | lib_log_rich initialization                   |
-| `adapters/cli/`        | Adapters    | Click CLI framework integration               |
-| `adapters/memory/`     | Adapters    | In-memory implementations for testing         |
-| `composition/`         | Composition | Wires adapters to ports                       |
+| Directory/Module       | Layer       | Responsibility                                                  |
+|------------------------|-------------|-----------------------------------------------------------------|
+| `domain/`              | Domain      | Pure logic  -  no I/O, logging, or frameworks                   |
+| `application/ports.py` | Application | Protocol definitions for adapters                               |
+| `adapters/config/`     | Adapters    | Configuration loading, deployment, display                      |
+| `adapters/logging/`    | Adapters    | lib_log_rich initialization                                     |
+| `adapters/cli/`        | Adapters    | Click CLI framework integration                                 |
+| `adapters/memory/`     | Adapters    | In-memory implementations for testing                           |
+| `composition/`         | Composition | Wires adapters to ports                                         |
 | `pve_winrepair_guest/` | Guest tool  | Runs on the Windows guest; imports nothing from `pve_winrepair` |
 
 ### Import Enforcement
@@ -122,18 +122,18 @@ Run `lint-imports` to verify compliance.
 
 POSIX-conventional exit codes defined in `adapters/cli/exit_codes.py`:
 
-| Code | Name                 | Usage                                                                                                                  |
-|------|----------------------|------------------------------------------------------------------------------------------------------------------------|
-| 0    | `SUCCESS`            | Command completed successfully                                                                                         |
-| 1    | `GENERAL_ERROR`      | Unhandled exception, general failure                                                                                   |
-| 2    | `FILE_NOT_FOUND`     | File not found; also click's usage error             (bad option value, malformed `--set`, invalid `--profile` name) |
-| 13   | `PERMISSION_DENIED`  | Cannot write to target directory                                                                                       |
-| 22   | `INVALID_ARGUMENT`   | Invalid CLI argument or section not found                                                                              |
-| 78   | `CONFIG_ERROR`       | Configuration missing, not loadable or invalid                                                                         |
-| 110  | `TIMEOUT`            | Operation timed out                                                                                                    |
-| 130  | `SIGNAL_INT`         | Interrupted (SIGINT/Ctrl+C)                                                                                            |
-| 141  | `BROKEN_PIPE`        | Output pipe closed                                                                                                     |
-| 143  | `SIGNAL_TERM`        | Terminated (SIGTERM)                                                                                                   |
+| Code | Name                | Usage                                                                                                                |
+|------|---------------------|----------------------------------------------------------------------------------------------------------------------|
+| 0    | `SUCCESS`           | Command completed successfully                                                                                       |
+| 1    | `GENERAL_ERROR`     | Unhandled exception, general failure                                                                                 |
+| 2    | `FILE_NOT_FOUND`    | File not found; also click's usage error             (bad option value, malformed `--set`, invalid `--profile` name) |
+| 13   | `PERMISSION_DENIED` | Cannot write to target directory                                                                                     |
+| 22   | `INVALID_ARGUMENT`  | Invalid CLI argument or section not found                                                                            |
+| 78   | `CONFIG_ERROR`      | Configuration missing, not loadable or invalid                                                                       |
+| 110  | `TIMEOUT`           | Operation timed out                                                                                                  |
+| 130  | `SIGNAL_INT`        | Interrupted (SIGINT/Ctrl+C)                                                                                          |
+| 141  | `BROKEN_PIPE`       | Output pipe closed                                                                                                   |
+| 143  | `SIGNAL_TERM`       | Terminated (SIGTERM)                                                                                                 |
 
 ---
 
