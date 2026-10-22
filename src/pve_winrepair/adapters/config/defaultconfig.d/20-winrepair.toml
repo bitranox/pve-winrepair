@@ -45,8 +45,8 @@ known_hosts_file = "~/.ssh/known_hosts"
 [guest]
 
 # Purpose: The LAN the guest's address must be in
-# Type: string; an IPv4 network in CIDR notation with no host bits set (192.0.2.0/24),
-#       or "" (empty)
+# Type: string; an IPv4 network in CIDR or netmask form with no host bits set
+#       (192.0.2.0/24 or 192.0.2.0/255.255.255.0), or "" (empty)
 # Default: "" - the guest's only non-loopback, non-link-local IPv4 address is used, and
 #       a guest with several such addresses is refused
 # Environment Variable: PVE_WINREPAIR___GUEST__SUBNET=192.0.2.0/24
@@ -62,7 +62,7 @@ subnet = ""
 runner_tasks = []
 
 # Purpose: Number of running runner containers that means the runners are healthy
-# Type: integer, 0 to 999999
+# Type: integer, 0 to 999999 (true/false is refused)
 # Default: 0 (any readable count is OK)
 # Environment Variable: PVE_WINREPAIR___GUEST__EXPECTED_RUNNERS=4
 # Note: no node command reads this value. It records what an operator passes to the guest
@@ -78,7 +78,7 @@ expected_runners = 0
 media_dir = ""
 
 # Purpose: Name of the Proxmox snapshot taken before a repair
-# Type: string; a letter first, then letters, digits, _ and -, at most 40 characters
+# Type: string; a letter first, then letters, digits, _ and -, 2 to 40 characters
 # Default: "pre_winrepair"
 # Environment Variable: PVE_WINREPAIR___REPAIR__SNAPSHOT_NAME=pre_repair
 snapshot_name = "pre_winrepair"
@@ -86,14 +86,14 @@ snapshot_name = "pre_winrepair"
 # Purpose: Free space (GiB, 1024^3 bytes) the drive the media are staged to must have
 #          (the media copy); when C: is the only usable drive it needs this plus
 #          system_free_gb
-# Type: float, greater than 0
+# Type: float, greater than 0 (true/false is refused)
 # Default: 15.0
 # Environment Variable: PVE_WINREPAIR___REPAIR__STAGE_FREE_GB=15.0
 stage_free_gb = 15.0
 
 # Purpose: Free space (GiB) C: must have before a repair starts: the in-place upgrade's
 #          own working set and rollback copy
-# Type: float, greater than 0
+# Type: float, greater than 0 (true/false is refused)
 # Default: 25.0
 # Environment Variable: PVE_WINREPAIR___REPAIR__SYSTEM_FREE_GB=25.0
 system_free_gb = 25.0
@@ -101,7 +101,8 @@ system_free_gb = 25.0
 [node]
 
 # Purpose: Directory where the node keeps its state (repair receipts)
-# Type: string (path)
+# Type: string; an absolute path starting with / ("", a relative path and a leading ~
+#       are refused)
 # Default: "/var/lib/pve-winrepair"
 # Environment Variable: PVE_WINREPAIR___NODE__STATE_DIR=/var/lib/pve-winrepair
 state_dir = "/var/lib/pve-winrepair"

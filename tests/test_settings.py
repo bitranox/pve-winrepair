@@ -272,6 +272,125 @@ def test_a_subnet_that_is_not_a_strict_ipv4_cidr_is_refused(
     assert "IPv4" in text
 
 
+@pytest.mark.os_agnostic
+def test_a_subnet_in_netmask_form_is_accepted(config_factory: Callable[[dict[str, Any]], Config]) -> None:
+    network = load_settings(config_factory({"guest": {"subnet": "192.0.2.0/255.255.255.0"}})).guest.network()
+
+    assert network == IPv4Network("192.0.2.0/24")
+
+
+# --- repair.snapshot_name ----------------------------------------------------------------------
+
+
+@pytest.mark.os_agnostic
+def test_a_one_character_snapshot_name_is_refused(config_factory: Callable[[dict[str, Any]], Config]) -> None:
+    # Proxmox's CONFIGID_RE is [a-z][a-z0-9_-]+, so a snapshot name has at least two characters.
+    text = _refusal(config_factory({"repair": {"snapshot_name": "a"}}))
+
+    assert text == "repair.snapshot_name: String should match pattern '^[A-Za-z][A-Za-z0-9_-]{1,39}$'"
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("name", ["ab", "a" * 40])
+def test_a_snapshot_name_of_two_to_forty_characters_is_accepted(
+    config_factory: Callable[[dict[str, Any]], Config], name: str
+) -> None:
+    assert load_settings(config_factory({"repair": {"snapshot_name": name}})).repair.snapshot_name == name
+
+
+# --- node.state_dir ----------------------------------------------------------------------------
+
+#: The refusal reason for a state directory that is not an absolute POSIX path.
+_STATE_DIR_REASON = "node.state_dir: must be an absolute path on the node (starting with /)"
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(
+    "state_dir",
+    ["", "rel/dir", "~/x", "./receipts", 4711],
+    ids=["empty", "relative", "tilde", "dot-relative", "digit-only"],
+)
+def test_a_state_dir_that_is_not_absolute_is_refused_without_its_value(
+    config_factory: Callable[[dict[str, Any]], Config], state_dir: object
+) -> None:
+    text = _refusal(config_factory({"node": {"state_dir": state_dir}}))
+
+    assert text == _STATE_DIR_REASON
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("state_dir", ["/var/lib/pve-winrepair", "/root/winrepair", "/"])
+def test_an_absolute_posix_state_dir_is_accepted_on_every_os(
+    config_factory: Callable[[dict[str, Any]], Config], state_dir: str
+) -> None:
+    settings = load_settings(config_factory({"node": {"state_dir": state_dir}}))
+
+    assert settings.node.state_dir == Path(state_dir)
+
+
+@pytest.mark.os_linux
+def test_an_empty_state_dir_from_the_environment_is_refused(
+    isolated_layers: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Linux only: an environment variable set to "" is removed on Windows, so it never reaches the loader.
+    monkeypatch.setenv(f"{_ENV_PREFIX}NODE__STATE_DIR", "")
+    config = get_config()
+    # Premise: the empty text reaches the settings; without it the refusal below proves nothing.
+    assert config.as_dict()["node"]["state_dir"] == ""
+
+    assert _refusal(config) == _STATE_DIR_REASON
+
+
+# --- numbers: no booleans ----------------------------------------------------------------------
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(
+    ("section", "field"),
+    [("guest", "expected_runners"), ("repair", "stage_free_gb"), ("repair", "system_free_gb")],
+)
+@pytest.mark.parametrize("flag", [True, False])
+def test_a_boolean_is_refused_for_a_number(
+    config_factory: Callable[[dict[str, Any]], Config], section: str, field: str, flag: bool
+) -> None:
+    text = _refusal(config_factory({section: {field: flag}}))
+
+    assert text == f"{section}.{field}: must be a number, not true or false"
+
+
+@pytest.mark.os_agnostic
+def test_a_number_written_as_text_is_accepted(config_factory: Callable[[dict[str, Any]], Config]) -> None:
+    config = config_factory({"guest": {"expected_runners": "4"}, "repair": {"stage_free_gb": "15.5"}})
+
+    settings = load_settings(config)
+
+    assert settings.guest.expected_runners == 4
+    assert settings.repair.stage_free_gb == 15.5
+
+
+@pytest.mark.os_agnostic
+def test_numbers_from_a_dotenv_file_are_accepted_and_a_boolean_is_refused(isolated_layers: Path) -> None:
+    dotenv = isolated_layers / ".env"
+    dotenv.write_text("GUEST__EXPECTED_RUNNERS=4\nREPAIR__STAGE_FREE_GB=15.5\n", encoding="utf-8")
+    config = build_production().get_config(dotenv_path=str(dotenv))
+    # Premise: the dotenv layer hands both values over as numbers, the digit-only one as an int.
+    assert type(config.as_dict()["guest"]["expected_runners"]) is int
+    assert type(config.as_dict()["repair"]["stage_free_gb"]) is float
+
+    settings = load_settings(config)
+
+    assert settings.guest.expected_runners == 4
+    assert settings.repair.stage_free_gb == 15.5
+
+    get_config.cache_clear()
+    dotenv.write_text("REPAIR__SYSTEM_FREE_GB=true\n", encoding="utf-8")
+    config = build_production().get_config(dotenv_path=str(dotenv))
+    # Premise: the dotenv layer turns "true" into a bool.
+    assert config.as_dict()["repair"]["system_free_gb"] is True
+
+    assert _refusal(config) == "repair.system_free_gb: must be a number, not true or false"
+
+
 # --- env override, end to end ------------------------------------------------------------------
 
 

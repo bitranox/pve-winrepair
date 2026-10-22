@@ -303,26 +303,26 @@ loads and means "not configured". Override one key per run with
 
 ### `[guest]`  -  `GuestSettings`
 
-| Field              | Type              | Default | Rule                                                                                                      |
-|--------------------|-------------------|---------|-----------------------------------------------------------------------------------------------------------|
-| `subnet`           | `str`             | `""`    | IPv4 network in CIDR notation, no host bits, or empty; `network()` returns it as `IPv4Network`, or `None` |
-| `runner_tasks`     | `tuple[str, ...]` | `[]`    | each `[A-Za-z0-9_.-]{1,64}`; no node command reads it: the values for guest `verify-runners --task NAME`  |
-| `expected_runners` | `int`             | `0`     | 0 to 999999; no node command reads it: the value for guest `verify-runners --expected N` (0 = any count)  |
+| Field              | Type              | Default | Rule                                                                                                                       |
+|--------------------|-------------------|---------|----------------------------------------------------------------------------------------------------------------------------|
+| `subnet`           | `str`             | `""`    | IPv4 network in CIDR or netmask form, no host bits, or empty; `network()` returns it as `IPv4Network`, or `None`           |
+| `runner_tasks`     | `tuple[str, ...]` | `[]`    | each `[A-Za-z0-9_.-]{1,64}`; no node command reads it: the values for guest `verify-runners --task NAME`                   |
+| `expected_runners` | `int`             | `0`     | 0 to 999999, never true/false; no node command reads it: the value for guest `verify-runners --expected N` (0 = any count) |
 
 ### `[repair]`  -  `RepairSettings`
 
-| Field            | Type    | Default           | Rule                                                        |
-|------------------|---------|-------------------|-------------------------------------------------------------|
-| `media_dir`      | `str`   | `""`              | directory of the installation media; empty = not configured |
-| `snapshot_name`  | `str`   | `"pre_winrepair"` | `[A-Za-z][A-Za-z0-9_-]{0,39}`                               |
-| `stage_free_gb`  | `float` | `15.0`            | finite, greater than 0 (GiB on the staging drive)           |
-| `system_free_gb` | `float` | `25.0`            | finite, greater than 0 (GiB on C:)                          |
+| Field            | Type    | Default           | Rule                                                                |
+|------------------|---------|-------------------|---------------------------------------------------------------------|
+| `media_dir`      | `str`   | `""`              | directory of the installation media; empty = not configured         |
+| `snapshot_name`  | `str`   | `"pre_winrepair"` | `[A-Za-z][A-Za-z0-9_-]{1,39}`                                       |
+| `stage_free_gb`  | `float` | `15.0`            | finite, greater than 0, never true/false (GiB on the staging drive) |
+| `system_free_gb` | `float` | `25.0`            | finite, greater than 0, never true/false (GiB on C:)                |
 
 ### `[node]`  -  `NodeSettings`
 
-| Field       | Type   | Default                    | Rule                    |
-|-------------|--------|----------------------------|-------------------------|
-| `state_dir` | `Path` | `"/var/lib/pve-winrepair"` | where receipts are kept |
+| Field       | Type   | Default                    | Rule                                                                           |
+|-------------|--------|----------------------------|--------------------------------------------------------------------------------|
+| `state_dir` | `Path` | `"/var/lib/pve-winrepair"` | where receipts are kept; an absolute POSIX path ("", relative and `~` refused) |
 
 ---
 
