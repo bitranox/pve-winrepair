@@ -1,0 +1,133 @@
+"""Application ports - callable Protocol definitions for adapter functions.
+
+Each Protocol class defines a ``__call__`` method whose signature exactly
+matches the corresponding adapter function.  Existing module-level functions
+satisfy these protocols automatically via structural subtyping (PEP 544).
+
+System Role:
+    Sits between domain and adapters.  Infrastructure types (``Config``,
+    ``EmailConfig``) are imported under ``TYPE_CHECKING`` only so that
+    import-linter layer contracts remain satisfied at runtime.
+"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any, Protocol
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
+    from pathlib import Path
+
+    from lib_layered_config import Config
+
+    from ..adapters.email.sender import EmailConfig
+    from ..domain.enums import DeployTarget, OutputFormat
+
+
+class GetConfig(Protocol):
+    """Load layered configuration with application defaults."""
+
+    def __call__(
+        self, *, profile: str | None = ..., start_dir: str | None = ..., dotenv_path: str | None = ...
+    ) -> Config: ...
+
+
+class GetDefaultConfigPath(Protocol):
+    """Return the path to the bundled default configuration file."""
+
+    def __call__(self) -> Path: ...
+
+
+class DeployConfiguration(Protocol):
+    """Deploy default configuration to specified target layers."""
+
+    def __call__(
+        self,
+        *,
+        targets: Sequence[DeployTarget],
+        force: bool = ...,
+        profile: str | None = ...,
+        set_permissions: bool | None = ...,
+        dir_mode: int | None = ...,
+        file_mode: int | None = ...,
+        permission_overrides: Mapping[str, object] | None = ...,
+    ) -> list[Path]: ...
+
+
+class DisplayConfig(Protocol):
+    """Display the provided configuration in the requested format."""
+
+    def __call__(
+        self, config: Config, *, output_format: OutputFormat = ..., section: str | None = ..., profile: str | None = ...
+    ) -> None: ...
+
+
+class SendEmail(Protocol):
+    """Send an email using configured SMTP settings."""
+
+    def __call__(
+        self,
+        *,
+        config: EmailConfig,
+        recipients: str | Sequence[str] | None = ...,
+        subject: str,
+        body: str = ...,
+        body_html: str = ...,
+        from_address: str | None = ...,
+        attachments: Sequence[Path] | None = ...,
+    ) -> bool: ...
+
+
+class SendNotification(Protocol):
+    """Send a simple plain-text notification email."""
+
+    def __call__(
+        self,
+        *,
+        config: EmailConfig,
+        recipients: str | Sequence[str] | None = ...,
+        subject: str,
+        message: str,
+        from_address: str | None = ...,
+    ) -> bool: ...
+
+
+class LoadEmailConfigFromDict(Protocol):
+    """Load EmailConfig from a configuration dictionary."""
+
+    def __call__(self, config_dict: Mapping[str, Any]) -> EmailConfig: ...
+
+
+class InitLogging(Protocol):
+    """Initialize lib_log_rich runtime with the provided configuration.
+
+    ``dotenv_path`` is the ``.env`` the configuration was loaded with, or None for the one the
+    configuration's provenance names.
+    A refused logging setting raises ``InvalidLoggingConfigError`` only after logging has been
+    started with its defaults, so the caller never has to start it a second time.
+    """
+
+    def __call__(self, config: Config, *, dotenv_path: str | None = None) -> None: ...
+
+
+class CheckLoggingConfig(Protocol):
+    """Refuse ``config``'s logging settings as ``InitLogging`` would, leaving the running runtime alone.
+
+    For a configuration loaded after logging is running; a refused setting raises
+    ``InvalidLoggingConfigError`` and logging keeps running with the settings it started with.
+    """
+
+    def __call__(self, config: Config) -> None: ...
+
+
+__all__ = [
+    "CheckLoggingConfig",
+    "DeployConfiguration",
+    "DisplayConfig",
+    "GetConfig",
+    "GetDefaultConfigPath",
+    "InitLogging",
+    "LoadEmailConfigFromDict",
+    "SendEmail",
+    "SendNotification",
+]

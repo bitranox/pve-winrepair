@@ -1,0 +1,303 @@
+[project]
+name = "pve-winrepair"
+version = "2.4.3"
+description = "Template CLI application with configuration management and structured logging"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "rich-click>=1.9.9",
+    # Imported directly (adapters/cli/main.py, commands/config.py), not only through rich-click.
+    "click>=8.5.0",
+    "lib_cli_exit_tools>=2.4.1",
+    # 6.4.2: validate_config, the check config --profile runs, refuses exactly what init() refuses.
+    "lib_log_rich>=6.5.7",
+    "python-dotenv>=1.2.4",
+    "lib_layered_config>=7.3.0",
+    "btx_lib_mail>=4.5.0",
+    "pydantic>=2.14.1",
+    "orjson>=3.13.0",
+]
+license = { text = "MIT" }
+authors = [{ name = "bitranox", email = "bitranox@gmail.com" }]
+keywords = ["cli", "template", "config", "logging", "layered-config", "rich-click"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Programming Language :: Python :: 3.15",
+  "License :: OSI Approved :: MIT License",
+  "Environment :: Console",
+  "Operating System :: OS Independent",
+  "Typing :: Typed",
+]
+
+# System packages required for CI runners (read by GitHub Actions workflow template)
+# Format: "apt_package_name" for Ubuntu, future: {"apt": "...", "brew": "...", "choco": "..."}
+[tool.ci]
+system-dependencies-ubuntu = []
+system-dependencies-macos = []
+system-dependencies-windows-pip = []
+system-dependencies-windows-choco = []
+os = ["ubuntu-latest", "windows-latest", "macos-latest"]
+
+[project.urls]
+Homepage = "https://github.com/bitranox/pve-winrepair"
+Repository = "https://github.com/bitranox/pve-winrepair.git"
+Issues = "https://github.com/bitranox/pve-winrepair/issues"
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=9.1.1",
+  "pytest-cov>=7.1.0",
+  "hypothesis>=6.168.5",
+  "ruff>=0.17.1",
+  "pyright[nodejs]>=1.1.414",
+  "bandit>=1.9.4",
+  "build>=1.6.1",
+  # The build backend, importable in the test env: tests/test_packaging.py builds the sdist
+  # and wheel in-process to prove what they ship.
+  "hatchling>=1.32.4",
+  "twine>=7.0.0",
+  # codecov-cli is disabled, not dropped: it requires click<8.3.0, which drags click back to
+  # 8.2.1 - the version with CVE-2026-7246 (command injection in click.edit(), fixed in 8.3.3).
+  # Nothing else here caps click, so with this line active the audit gate goes red on every
+  # clean install. Leaving it off costs nothing: CI uploads coverage via codecov/codecov-action,
+  # not this CLI, and "bmk codecov" resolves codecovcli from PATH and only warns when absent.
+  # Re-enable once codecov-cli relaxes its click<8.3.0 pin.
+  # "codecov-cli>=11.2.8",
+  "pip-audit>=2.10.1",
+  "textual>=8.2.8",
+  "import-linter>=2.15",
+  "rtoml>=0.14.0",
+  "httpx2>=2.13.1",
+  # Transitive CVE pins
+  "click>=8.5.0",                # CVE-2026-7246
+  "jaraco-context>=6.1.2",       # CVE-2025-23949
+  "python-multipart>=0.0.32",    # CVE-2025-24486
+  "wheel>=0.48.0",               # CVE-2025-24049
+  "pynacl>=1.6.2",               # CVE-2025-69277
+  "urllib3>=2.8.0",              # CVE-2025-66471, CVE-2025-66418
+  "virtualenv>=21.14.9",         # CVE-2025-22702, CVE-2026-113722
+  "certifi>=2026.10.19",         # PYSEC-2026-4320
+]
+
+[project.scripts]
+pve_winrepair = "pve_winrepair.entry:main"
+pve-winrepair = "pve_winrepair.entry:main"
+
+[build-system]
+requires = ["hatchling>=1.32.4"]
+build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pve_winrepair"]
+include = [
+    "src/pve_winrepair/py.typed",
+    "src/pve_winrepair/adapters/config/defaultconfig.toml",
+    "src/pve_winrepair/adapters/config/defaultconfig.d/*.toml",
+]
+
+# An allowlist, never a denylist: hatchling reads only the root .gitignore, so tracked working
+# files and files hidden through .git/info/exclude or a nested .gitignore (session records,
+# review notes, helper scripts) would ship. tests/test_packaging.py builds the sdist and
+# refuses any other top-level entry.
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src/pve_winrepair",
+    "/tests/*.py",
+    "/docs",
+    "/README.md",
+    "/CONFIG.md",
+    "/LICENSE",
+    "/CHANGELOG.md",
+    "/pyproject.toml",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = [
+  "E", "W",     # pycodestyle
+  "F",           # pyflakes
+  "I",           # isort
+  "N",           # pep8-naming
+  "UP",          # pyupgrade
+  "B",           # bugbear
+  "A",           # builtins shadowing
+  "C4",          # comprehension simplification
+  "C90",         # mccabe: cyclomatic complexity <= 10 (the house hard limit)
+  "SIM",         # simplification
+  "TCH",         # type-checking imports
+  "RUF",         # ruff-specific
+  "G",           # logging format (catches f-string in logger)
+  "T20",         # print statements
+  "PTH",         # pathlib preference
+  "PLC", "PLE",  # pylint conventions/errors
+  "S",           # flake8-bandit security checks
+  "PERF",        # performance anti-patterns
+  "ERA",         # eradicate dead/commented-out code
+  "FBT",         # boolean trap (boolean positional args)
+  "PLR",         # pylint refactor
+  "PLW",         # pylint warnings
+]
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.flake8-type-checking]
+# The Pydantic models (EmailConfig, LoggingConfigModel)
+# resolve their field annotations at model-build time, so their field-type imports
+# must stay at runtime even though the file uses ``from __future__ import annotations``.
+# Telling ruff about the Pydantic base keeps TC001/TC002/TC003 from moving those
+# imports into a TYPE_CHECKING block and breaking model construction.
+runtime-evaluated-base-classes = ["pydantic.BaseModel"]
+
+[tool.ruff.lint.per-file-ignores]
+# Notebooks: unused imports are often intentional for side effects
+"notebooks/*.ipynb" = ["F401"]
+# Tests: assert is standard, test fixtures have passwords, magic values are clearer inline, temp paths are fine.
+# PLC0415: local/deferred imports are a deliberate test idiom - several tests import inside the test
+# body to exercise import-time and cache behaviour, so moving them to module top would defeat intent.
+"tests/*.py" = ["T20", "S101", "S105", "S106", "S108", "FBT001", "FBT003", "PLR0913", "PLR2004", "PLC0415"]
+# CLI: Click framework injects boolean params; commands have many options
+"src/pve_winrepair/adapters/cli/**/*.py" = ["FBT001", "FBT002", "PLR0913"]
+# Protocols/adapters: many-param signatures by design
+"src/pve_winrepair/application/*.py" = ["PLR0913"]
+"src/pve_winrepair/adapters/config/*.py" = ["PLR0913"]
+"src/pve_winrepair/adapters/email/*.py" = ["PLR0913"]
+"src/pve_winrepair/adapters/memory/*.py" = ["PLR0913"]
+
+[tool.pyright]
+typeCheckingMode = "strict"
+extraPaths = [
+  "src",
+]
+
+[tool.pytest.ini_options]
+addopts = ["--doctest-modules"]
+doctest_optionflags = ["ELLIPSIS", "NORMALIZE_WHITESPACE"]
+pythonpath = ["src"]
+markers = [
+  "os_agnostic: test runs on every supported operating system",
+  "os_windows: test exercises Windows-only behavior",
+  "os_macos: test exercises macOS-only behavior",
+  "os_posix: test exercises behavior requiring POSIX semantics",
+  "os_linux: test exercises Linux-only behavior",
+  "local_only: tests that require the local dev environment (external resources, script composition); skipped in CI",
+  "integration: tests requiring external resources (SMTP, databases, APIs); run via 'bmk ti' or 'mktesti.sh'",
+]
+
+[tool.coverage.run]
+branch = true
+parallel = false
+# The coverage database lives outside the checkout, because SQLite needs file
+# locking that a network-mounted tree does not reliably give it. It is one path
+# for the whole machine, so every run that leaves COVERAGE_FILE unset shares it:
+# pytest-cov erases it when a run starts and combines the data files beside it
+# when a run ends. bmk and CI each point COVERAGE_FILE at a directory of their
+# own; set it the same way before running pytest --cov beside another run.
+data_file = "/tmp/.coverage.pve_winrepair"
+source = ["src/pve_winrepair"]
+
+[tool.coverage.report]
+omit = [
+  "tests/*",
+]
+fail_under = 80
+show_missing = true
+
+[tool.coverage.json]
+output = "coverage.json"
+pretty_print = true
+
+[tool.clean]
+# Patterns to remove when running `make clean`
+patterns = [
+  "**/__pycache__",
+  ".hypothesis",
+  ".import_linter_cache",
+  ".pytest_cache",
+  ".ruff_cache",
+  ".pyright",
+  ".mypy_cache",
+  ".tox",
+  ".nox",
+  ".eggs",
+  "*.egg-info",
+  "build",
+  "dist",
+  "htmlcov",
+  ".coverage",
+  "coverage.xml",
+  "codecov.sh",
+  ".cache",
+  "result",
+  ".data_arch_violations.json",
+]
+
+[tool.git]
+# Default git remote for push/release commands
+default-remote = "origin"
+
+[tool.scripts.test]
+# Configuration for CI/CD test runner
+pytest-verbosity = "-vv"
+coverage-report-file = "coverage.xml"
+src-path = "src"
+
+[tool.importlinter]
+root_package = "pve_winrepair"
+exclude_type_checking_imports = true
+
+[[tool.importlinter.contracts]]
+name = "Domain is pure (no adapter dependencies)"
+type = "forbidden"
+source_modules = [
+  "pve_winrepair.domain",
+]
+forbidden_modules = [
+  "pve_winrepair.adapters",
+  "pve_winrepair.composition",
+]
+
+[[tool.importlinter.contracts]]
+name = "Clean Architecture layers"
+type = "layers"
+layers = [
+  # Composition wires adapters - can import everything
+  "pve_winrepair.composition",
+  # Adapters implement ports - can import application and domain
+  "pve_winrepair.adapters",
+  # Application defines ports - can import domain
+  "pve_winrepair.application",
+  # Domain is pure - bottom layer
+  "pve_winrepair.domain",
+]
+
+[tool.pip-audit]
+# Known vulnerabilities to ignore (environment-level packages, not project dependencies)
+# PYSEC-2022-42969: py library ReDoS - py 1.11.0 is installed in the development
+#   environment but is not a dependency of this project; no fix available.
+ignore-vulns = [
+  "PYSEC-2022-42969",  # py 1.11.0 - ReDoS, env-only, no fix available
+  "CVE-2025-8869",     # pip 24.3.1 - env-only, not a project dependency
+  "CVE-2026-1703",     # pip 24.3.1 - env-only, not a project dependency
+  "CVE-2026-25990",    # pillow 12.0.0 - env-only, fix in 12.1.1
+]
+
+[tool.bashate]
+# bashate style settings for .sh files (E003 excluded: indent handled by shfmt)
+max-line-length = 120
+ignores = ["E003"]
+
+[tool.uv]
+exclude-newer = "7 days"
+exclude-newer-package = {btx-lib-mail = false, lib-cli-exit-tools = false, lib-layered-config = false, lib-log-rich = false, virtualenv = "2026-10-17T16:09:43Z", certifi = "2026-10-20T02:24:17Z"}

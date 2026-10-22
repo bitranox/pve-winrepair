@@ -1,0 +1,56 @@
+# Default configuration for pve-winrepair
+#
+# This file contains the default configuration that ships with the application.
+# Additional settings can be placed in defaultconfig.d/*.toml
+#
+# Settings can be overridden via (each layer reads config.toml, then the files in its
+# config.d/ directory in lexical order; a config.d/ file may be .toml, .yaml, .yml or .json):
+#   - Application-level config:
+#        - Linux:   /etc/xdg/pve-winrepair/config.toml and config.d/*
+#                   (then /etc/pve-winrepair/config.toml and config.d/*)
+#        - macOS:   /Library/Application Support/bitranox/pve-winrepair/config.toml and config.d/*
+#        - Windows: C:\ProgramData\bitranox\pve-winrepair\config.toml and config.d\*
+#   - Host-level config (<hostname> is this machine's host name):
+#        - Linux:   /etc/xdg/pve-winrepair/hosts/<hostname>.toml and hosts/<hostname>.d/*
+#        - macOS:   /Library/Application Support/bitranox/pve-winrepair/hosts/<hostname>.toml
+#        - Windows: C:\ProgramData\bitranox\pve-winrepair\hosts\<hostname>.toml
+#   - User-level config:
+#        - Linux:   ~/.config/pve-winrepair/config.toml and config.d/*
+#                   ($XDG_CONFIG_HOME replaces ~/.config when set)
+#        - macOS:   ~/Library/Application Support/bitranox/pve-winrepair/config.toml and config.d/*
+#        - Windows: %APPDATA%\bitranox\pve-winrepair\config.toml and config.d\*
+#   - .env file: the first .env found in the current directory or a parent directory; when
+#     there is none, $XDG_CONFIG_HOME/pve-winrepair/.env (Linux; ~/.config when
+#     unset), ~/Library/Application Support/bitranox/pve-winrepair/.env (macOS),
+#     %APPDATA%\bitranox\pve-winrepair\.env (Windows)
+#   - Environment variables: Prefix with PVE_WINREPAIR___
+#
+# Precedence (lowest to highest): defaults -> app -> host -> user -> dotenv -> env
+#
+# IMPORTANT: Naming Conventions for .env Files vs Environment Variables
+# ----------------------------------------------------------------------
+#
+# .env FILES (no prefix needed):
+#   Format: SECTION__KEY=value
+#   Uses double underscore (__) to create nested structures.
+#
+#   Examples in .env file:
+#     MY_SECTION__SOME_KEY=some_value
+#     MY_SECTION__TIMEOUT=60.0
+#     LIB_LOG_RICH__CONSOLE_LEVEL=DEBUG
+#     EMAIL__SMTP_USERNAME=user@example.com
+#
+# ENVIRONMENT VARIABLES (require prefix):
+#   Format: PREFIX___SECTION__KEY=value
+#   Uses triple underscore (___) to separate PREFIX from SECTION,
+#   and double underscore (__) to separate SECTION from KEY.
+#
+#   Examples as environment variables:
+#     PVE_WINREPAIR___MY_SECTION__SOME_KEY=some_value
+#     PVE_WINREPAIR___LIB_LOG_RICH__CONSOLE_LEVEL=DEBUG
+#     PVE_WINREPAIR___EMAIL__SMTP_PASSWORD=secret
+#
+# Value conversion (.env and environment alike): an unquoted value converts - true/false
+# become booleans, null/none become None (except for secret keys such as passwords), a JSON
+# array/object is parsed, and a number becomes a number only when it converts back to the same
+# text (007 and 1.50 stay text). Quote a .env value to keep it as text.
