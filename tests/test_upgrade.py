@@ -1,0 +1,1640 @@
+"""Tests for prepare / launch / upgrade-run.
+
+The commands reach Windows through the ``UpgradeHost`` port; ``FakeUpgradeHost`` answers from
+real pwshpy records and a fake clock. Everything the old scripts did on the FILESYSTEM is done for
+real here, under ``tmp_path``: the read-only media files, the WIM (the real header and XML of the
+25H2 de-DE media, see ``test_wim.py``), ``setup.exe``'s presence and the append-only state log.
+The scheduled task is simulated by ``task_lines``: lines the SYSTEM run appends to the state log
+once the fake clock passes their time, so the launch wait is exercised against the real reader.
+``task`` models the task definition's state as Task Scheduler reports it (None = no such task);
+ending it kills the instance and deleting it leaves the instance running, as measured on a test guest.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import importlib.util
+import io
+import json
+import ntpath
+import shutil
+import stat
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from pathlib import Path
+from types import SimpleNamespace
+from typing import TYPE_CHECKING
+
+import pytest
+from json_paths import at, items, obj
+from pwshpy import (
+    CimInstance,
+    NativeCallError,
+    ProcessInfo,
+    RegistryHive,
+    RegistryValue,
+    RegistryValueType,
+    TaskState,
+)
+from win32_fakes import Descriptor, FakeApi, FakeFiles, FakeSecurity, Node, Sid, Win32Error
+
+from pve_winrepair_guest import lockdown, probes, upgrade, winrepair_guest
+from pve_winrepair_guest.lockdown import Ace, AclReading, LockTarget
+from pve_winrepair_guest.wim import WimImage, WimInfo
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable, Sequence
+
+FIXTURE = Path(__file__).resolve().parent / "fixtures" / "install_wim_header_xml.bin"
+CURRENT_VERSION = r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion"
+MOSETUP = r"HKLM\SYSTEM\Setup\MoSetup"
+WAIVER = "AllowUpgradesWithUnsupportedTPMOrCPU"
+BASE = datetime(2026, 10, 21, 10, 0, 0)
+# The driver pushes the tool under a content address (the first 16 hex of its sha256) and names
+# it with --tool; launch checks the bytes against that name.
+TOOL_BYTES = b"# the packed winrepair guest tool\r\n"
+TOOL = rf"C:\winrepair\winrepair_guest-{hashlib.sha256(TOOL_BYTES).hexdigest()[:16]}.ps1"
+STATE_LOG = r"C:\upgrade-state.log"
+SETUP = r"D:\upgrade\setup.exe"
+POWERSHELL = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+TASK_ARGS = (
+    rf"-NoProfile -ExecutionPolicy Bypass -File {TOOL} upgrade-run "
+    rf"--stage-root D:\upgrade --state-log {STATE_LOG}"
+)
+SYSTEM_SID, ADMINS_SID, RUNNER_SID, USERS_SID = "S-1-5-18", "S-1-5-32-544", "S-1-5-21-7-7-7-1001", "S-1-5-11"
+# A local non-admin account: what owns a directory it created itself.
+PLANTER_SID = "S-1-5-21-7-7-7-1002"
+MODIFY, FULL = 0x1301BF, 0x1F01FF
+LOCK_DIRS = [r"C:\winrepair", r"D:\upgrade"]
+
+
+def _reg(name: str, data: str | int) -> RegistryValue:
+    kind = RegistryValueType.REG_DWORD if isinstance(data, int) else RegistryValueType.REG_SZ
+    return RegistryValue(hive=RegistryHive.HKLM, key="x", name=name, type=kind, data=data)
+
+
+def _disk(letter: str, free: int) -> CimInstance:
+    return CimInstance(
+        class_name="Win32_LogicalDisk", properties={"DeviceID": letter, "FreeSpace": str(free), "Size": "999"}
+    )
+
+
+@dataclass
+class FakeUpgradeHost:
+    """An UpgradeHost over fixed records, a fake clock and a simulated SYSTEM task."""
+
+    state_log: Path
+    ubr: int = 8875
+    mosetup: dict[str, int] = field(default_factory=dict[str, int])
+    waiver_fails: bool = False
+    tpm: list[CimInstance] | None = field(default_factory=lambda: [CimInstance(class_name="Win32_Tpm", properties={})])
+    disks: list[CimInstance] = field(default_factory=lambda: [_disk("C:", 50 * 1024**3), _disk("D:", 9 * 1024**3)])
+    register_fails: bool = False
+    registered: list[upgrade.TaskSpec] = field(default_factory=list[upgrade.TaskSpec])
+    start_fails: bool = False
+    task_lines: list[tuple[float, str]] = field(default_factory=list[tuple[float, str]])
+    setuphost: int = 1
+    setup_exit: int = 0
+    setup_seconds: float = 3725.0
+    setup_fails: bool = False
+    setup_crash: bool = False
+    registry_fails: bool = False
+    newos: bool = True
+    now_s: float = 0.0
+    calls: list[str] = field(default_factory=list[str])
+    setup_argv: list[str] = field(default_factory=list[str])
+    started_at: float | None = None
+    task: TaskState | None = None
+    disabled: bool = False
+    stop_fails: bool = False
+    stop_ignored: bool = False
+    delete_fails: bool = False
+    disable_fails: bool = False
+    state_fails: bool = False
+    task_events: list[tuple[float, str]] = field(default_factory=list[tuple[float, str]])
+    locked: list[str] = field(default_factory=list[str])
+    acl_overrides: dict[str, AclReading] = field(default_factory=dict[str, AclReading])
+    lock_targets: dict[str, LockTarget] = field(default_factory=dict[str, LockTarget])
+    inspect_fails: bool = False
+    # The guest's filesystem as the lock and the tree walk see it: the directories that exist and
+    # every path below them, with the ones that are reparse points.
+    existing: set[str] = field(default_factory=set[str])
+    entries: list[str] = field(default_factory=list[str])
+    reparse: set[str] = field(default_factory=set[str])
+    create_fails: bool = False
+    walk_fails: bool = False
+
+    def system_root(self) -> str:
+        return r"C:\Windows"
+
+    def user_sid(self) -> str:
+        return RUNNER_SID
+
+    def create_locked_dir(self, path: str) -> bool:
+        """Windows' CreateDirectory with the lock's descriptor: the new directory is locked from birth."""
+        self.calls.append(f"create {path}")
+        if self.create_fails:
+            raise OSError(f"cannot create {path}: (3, 'CreateDirectory', 'Der Pfad wurde nicht gefunden.')")
+        if path in self.existing:
+            return False
+        self.existing.add(path)
+        self.locked.append(path)
+        return True
+
+    def tree(self, root: str) -> Iterable[lockdown.TreeEntry]:
+        if self.walk_fails:
+            raise OSError(f"[WinError 5] Zugriff verweigert: '{root}'")
+        below = [path for path in self.entries if path.startswith(root + "\\")]
+        dirs = {ntpath.dirname(path) for path in self.entries}
+        return [lockdown.TreeEntry(path, path in self.reparse, path in dirs) for path in below]
+
+    def inspect_lock_target(self, path: str) -> LockTarget:
+        """Windows' answer for a real directory an elevated admin created: owned by Administrators."""
+        if self.inspect_fails:
+            raise OSError(f"cannot inspect {path} before locking it: (5, 'Zugriff verweigert')")
+        return self.lock_targets.get(path, LockTarget(path, (), True, ADMINS_SID))
+
+    def read_acl(self, path: str) -> AclReading:
+        """Windows' answer: a locked dir and everything below it carry only the two lock ACEs."""
+        if path in self.acl_overrides:
+            return self.acl_overrides[path]
+        system, admins = Ace(SYSTEM_SID, 0, 0x3, FULL), Ace(ADMINS_SID, 0, 0x3, FULL)
+        if path in self.locked:
+            return AclReading(path, ADMINS_SID, True, (system, admins))
+        if any(path.startswith(d + "\\") for d in self.locked):
+            return AclReading(path, RUNNER_SID, False, (Ace(SYSTEM_SID, 0, 0x10, FULL), Ace(ADMINS_SID, 0, 0x10, FULL)))
+        # Not locked: what a directory under a drive root inherits by default.
+        return AclReading(path, ADMINS_SID, False, (system, admins, Ace(USERS_SID, 0, 0x1B, MODIFY)))
+
+    def registry(self, key: str) -> Iterable[RegistryValue]:
+        if key == CURRENT_VERSION:
+            if self.registry_fails:
+                raise NativeCallError("registry unavailable")
+            return [_reg("CurrentBuild", "26200"), _reg("UBR", self.ubr)]
+        assert key == MOSETUP
+        return [_reg(name, value) for name, value in self.mosetup.items()]
+
+    def create_key(self, key: str) -> None:
+        assert key == MOSETUP
+        self.calls.append("create MoSetup")
+
+    def set_dword(self, key: str, name: str, value: int) -> None:
+        assert (key, name) == (MOSETUP, WAIVER)
+        self.calls.append(f"set {name}={value}")
+        if self.waiver_fails:
+            raise NativeCallError("Zugriff verweigert")
+        self.mosetup[name] = value
+
+    def cim(self, class_name: str, *, where: str | None = None, namespace: str = "root/cimv2") -> Iterable[CimInstance]:
+        if class_name == "Win32_Tpm":
+            assert namespace == "root/cimv2/Security/MicrosoftTpm"
+            if self.tpm is None:
+                raise NativeCallError("Zugriff verweigert")
+            return self.tpm
+        assert class_name == "Win32_LogicalDisk"
+        if where == "DeviceID='C:'":
+            return [d for d in self.disks if d.properties["DeviceID"] == "C:"]
+        assert where == "DriveType=3"
+        return self.disks
+
+    def register_task(self, spec: upgrade.TaskSpec) -> None:
+        self.calls.append("register")
+        assert self.state_log.exists() is False, "the stale state log must be gone before the task exists"
+        if self.register_fails:
+            raise NativeCallError("Zugriff verweigert")
+        self.registered.append(spec)
+        self.task = TaskState.READY
+
+    def start_task(self, task_path: str) -> None:
+        self.calls.append(f"start {task_path}")
+        if self.start_fails:
+            raise NativeCallError("task not found")
+        self.started_at = self.now_s
+        self.task = TaskState.RUNNING
+
+    def task_state(self, task_path: str) -> TaskState | None:
+        assert task_path == "\\OVMRepairUpgrade"
+        if self.state_fails:
+            raise NativeCallError("Task Scheduler unavailable")
+        return self.task
+
+    def stop_task(self, task_path: str) -> None:
+        self._task_call("end", task_path)
+        if self.stop_fails:
+            raise NativeCallError("Zugriff verweigert")
+        if not self.stop_ignored and self.task is TaskState.RUNNING:
+            self.task = TaskState.READY
+
+    def disable_task(self, task_path: str) -> None:
+        self._task_call("disable", task_path)
+        if self.disable_fails:
+            raise NativeCallError("Zugriff verweigert")
+        self.disabled = True
+
+    def delete_task(self, task_path: str) -> None:
+        self._task_call("delete", task_path)
+        if self.delete_fails or self.task is None:
+            raise NativeCallError("Zugriff verweigert" if self.delete_fails else "not found")
+        self.task = None  # a running instance keeps running (measured on a test guest)
+
+    def _task_call(self, what: str, task_path: str) -> None:
+        assert task_path == "\\OVMRepairUpgrade"
+        self.calls.append(what)
+        self.task_events.append((self.now_s, what))
+
+    def processes(self) -> Iterable[ProcessInfo]:
+        return [ProcessInfo(pid=10 + i, name="SetupHost") for i in range(self.setuphost)]
+
+    def monotonic(self) -> float:
+        return self.now_s
+
+    def sleep(self, seconds: float) -> None:
+        self.now_s += seconds
+        if self.started_at is None:
+            return
+        due = [line for at, line in self.task_lines if at <= self.now_s - self.started_at]
+        self.task_lines = [(at, line) for at, line in self.task_lines if at > self.now_s - self.started_at]
+        with self.state_log.open("a", encoding="utf-8") as handle:
+            handle.writelines(f"2026-10-21 10:00:00  {line}\n" for line in due)
+
+    def now(self) -> datetime:
+        return BASE + timedelta(seconds=self.now_s)
+
+    def whoami(self) -> str:
+        return r"NT AUTHORITY\SYSTEM (S-1-5-18)"
+
+    def test_path(self, path: str) -> bool:
+        assert path == r"C:\$WINDOWS.~BT\NewOS"
+        return self.newos
+
+    def run_setup(self, argv: Sequence[str]) -> upgrade.SetupRun:
+        self.setup_argv = list(argv)
+        if self.setup_fails:
+            raise NativeCallError("Executable not found")
+        if self.setup_crash:
+            raise RuntimeError("boom")
+        self.now_s += self.setup_seconds
+        return upgrade.SetupRun(exit_code=self.setup_exit, tree_wait="job")
+
+
+def _run(host: FakeUpgradeHost, *argv: str) -> tuple[int, dict[str, object]]:
+    out, err = io.StringIO(), io.StringIO()
+    code = winrepair_guest.main(list(argv), commands=upgrade.commands(lambda: host), stdout=out, stderr=err)
+    lines = out.getvalue().splitlines()
+    assert len(lines) == 1, (lines, err.getvalue())
+    return code, json.loads(lines[0])
+
+
+def _data(envelope: dict[str, object]) -> dict[str, object]:
+    return obj(envelope["data"])
+
+
+@pytest.fixture
+def stage(tmp_path: Path) -> Path:
+    root = tmp_path / "upgrade"
+    (root / "sources").mkdir(parents=True)
+    shutil.copyfile(FIXTURE, root / "sources" / "install.wim")
+    (root / "setup.exe").write_bytes(b"MZ")
+    return root
+
+
+@pytest.fixture
+def host(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FakeUpgradeHost:
+    """A guest whose launch-relevant files exist for real under their Windows names.
+
+    The working directory is the process's own external state, not a project internal: on Linux
+    a name like ``C:\\upgrade-state.log`` is one plain file in it, so launch reads, hashes and
+    deletes the real files at the absolute Windows paths it validates.
+    """
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / TOOL).write_bytes(TOOL_BYTES)
+    (tmp_path / SETUP).write_bytes(b"MZ")
+    (tmp_path / POWERSHELL).write_bytes(b"MZ")
+    # lock-dirs locked both directories before the driver copied the tool and the media in.
+    return FakeUpgradeHost(
+        state_log=tmp_path / STATE_LOG,
+        existing=set(LOCK_DIRS),
+        locked=list(LOCK_DIRS),
+        entries=[TOOL, SETUP],
+    )
+
+
+@pytest.fixture
+def fresh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FakeUpgradeHost:
+    """A guest the driver has not touched yet: no C:\\winrepair, no stage root, no tool."""
+    monkeypatch.chdir(tmp_path)
+    return FakeUpgradeHost(state_log=tmp_path / STATE_LOG)
+
+
+# --- prepare --------------------------------------------------------------------------------
+
+
+def test_prepare_clears_read_only_on_every_file_below_the_stage_root(stage: Path, host: FakeUpgradeHost) -> None:
+    nested = stage / "sources" / "sxs" / "x.cab"
+    nested.parent.mkdir()
+    nested.write_bytes(b"cab")
+    for path in (nested, stage / "setup.exe"):
+        path.chmod(stat.S_IREAD)
+
+    code, envelope = _run(host, "prepare", "--stage-root", str(stage))
+
+    assert code == 0
+    assert _data(envelope)["readonly_cleared"] == 2
+    assert nested.stat().st_mode & stat.S_IWRITE
+    assert (stage / "setup.exe").stat().st_mode & stat.S_IWRITE
+
+
+def test_prepare_passes_media_newer_than_the_running_build_and_writes_the_waiver(
+    stage: Path, host: FakeUpgradeHost
+) -> None:
+    code, envelope = _run(host, "prepare", "--stage-root", str(stage))
+
+    assert code == 0
+    data = _data(envelope)
+    assert (data["gate"], data["reason"]) == ("PASS", None)
+    assert data["image"] == {
+        "index": 1,
+        "name": "Windows-Image-0001",
+        "edition": "Professional",
+        "build": 26200,
+        "spbuild": 8973,
+        "languages": ["de-DE"],
+        "default_language": "de-DE",
+    }
+    assert data["running"] == {"current_build": "26200", "ubr": 8875, "build": "26200.8875"}
+    assert host.calls == ["create MoSetup", f"set {WAIVER}=1"]
+    assert (data["waiver_readback"], data["tpm_present"]) == (1, True)
+    assert [at(d, "letter") for d in items(data, "drives")] == ["C", "D"]
+
+
+def test_prepare_passes_media_equal_to_the_running_build(stage: Path, host: FakeUpgradeHost) -> None:
+    host.ubr = 8973
+
+    code, envelope = _run(host, "prepare", "--stage-root", str(stage))
+
+    assert (code, _data(envelope)["gate"]) == (0, "PASS")
+
+
+def test_prepare_refuses_media_older_than_the_running_build(stage: Path, host: FakeUpgradeHost) -> None:
+    host.ubr = 9711
+
+    code, envelope = _run(host, "prepare", "--stage-root", str(stage))
+
+    assert code == 1
+    data = _data(envelope)
+    assert (data["gate"], data["reason"]) == ("FAIL", "image SPBuild 8973 older than running 9711")
+    assert host.calls == []  # nothing changed on a refused gate
+
+
+def test_prepare_refuses_a_missing_wim(stage: Path, host: FakeUpgradeHost) -> None:
+    (stage / "sources" / "install.wim").unlink()
+
+    code, envelope = _run(host, "prepare", "--stage-root", str(stage))
+
+    assert code == 1
+    assert (_data(envelope)["gate"], _data(envelope)["reason"]) == ("FAIL", "install.wim missing")
+
+
+def test_prepare_refuses_a_wim_it_cannot_read(stage: Path, host: FakeUpgradeHost) -> None:
+    (stage / "sources" / "install.wim").write_bytes(b"NOTAWIM!" + bytes(300))
+
+    code, envelope = _run(host, "prepare", "--stage-root", str(stage))
+
+    assert code == 1
+    reason = _data(envelope)["reason"]
+    assert isinstance(reason, str)
+    assert reason.startswith("the WIM reader refused the image: ")
+
+
+def test_prepare_reports_drives_through_the_shared_parser(stage: Path, host: FakeUpgradeHost) -> None:
+    host.disks = [
+        _disk("C:", 50 * 1024**3),
+        CimInstance(class_name="Win32_LogicalDisk", properties={"DeviceID": "E:", "FreeSpace": "n/a"}),
+    ]
+
+    code, envelope = _run(host, "prepare", "--stage-root", str(stage))
+
+    assert code == 0
+    assert [at(d, "letter") for d in items(envelope, "data", "drives")] == ["C"]
+    assert "E:" in [at(s, "item") for s in items(envelope, "skipped")]
+
+
+def test_prepare_reports_tpm_absent_and_unknown_distinctly(stage: Path, host: FakeUpgradeHost) -> None:
+    host.tpm = []
+    _, absent = _run(host, "prepare", "--stage-root", str(stage))
+    host.tpm = None
+    code, unknown = _run(host, "prepare", "--stage-root", str(stage))
+
+    assert _data(absent)["tpm_present"] is False
+    assert (code, _data(unknown)["tpm_present"]) == (0, None)
+    assert unknown["skipped"] == [{"item": "Win32_Tpm", "reason": "Zugriff verweigert"}]
+
+
+def test_prepare_reports_a_waiver_that_did_not_read_back(stage: Path, host: FakeUpgradeHost) -> None:
+    host.waiver_fails = True
+
+    code, envelope = _run(host, "prepare", "--stage-root", str(stage))
+
+    assert code == 0  # the old script did not gate on the waiver either; the readback says it
+    assert _data(envelope)["waiver_readback"] is None
+    assert {"item": f"{MOSETUP}\\{WAIVER}", "reason": "Zugriff verweigert"} in items(envelope, "skipped")
+
+
+@pytest.mark.parametrize(
+    ("spbuild", "ubr", "gate"),
+    [(8973, 8875, "PASS"), (8973, 8973, "PASS"), (8973, 8974, "FAIL"), (8973, 9711, "FAIL")],
+)
+def test_wim_gate_compares_spbuild_against_ubr(spbuild: int, ubr: int, gate: str) -> None:
+    image = WimImage(1, "n", "e", 26200, spbuild, ("de-DE",), "de-DE")
+
+    assert upgrade.wim_gate(WimInfo(images=(image,)), ubr)[0] == gate
+
+
+def test_wim_gate_refuses_media_without_image_index_1() -> None:
+    image = WimImage(2, "n", "e", 26200, 9999, ("de-DE",), "de-DE")
+
+    assert upgrade.wim_gate(WimInfo(images=(image,)), 8875) == ("FAIL", "the WIM has no image index 1", None)
+
+
+# --- launch ---------------------------------------------------------------------------------
+
+
+def _spec(host: FakeUpgradeHost) -> upgrade.TaskSpec:
+    return upgrade.TaskSpec(
+        path="\\OVMRepairUpgrade",
+        program=POWERSHELL,
+        arguments=TASK_ARGS.format(log=host.state_log),
+        user_id="S-1-5-18",  # SYSTEM by SID: the account name is localised on a German guest
+        logon_type=5,  # TASK_LOGON_SERVICE_ACCOUNT
+        run_level=1,  # TASK_RUNLEVEL_HIGHEST
+        execution_time_limit="PT72H",
+        multiple_instances=2,  # TASK_INSTANCES_IGNORE_NEW
+        disallow_start_on_batteries=False,
+        stop_on_batteries=False,
+    )
+
+
+def _launch(host: FakeUpgradeHost) -> tuple[int, dict[str, object]]:
+    return _run(host, "launch", "--stage-root", r"D:\upgrade", "--state-log", STATE_LOG, "--tool", TOOL)
+
+
+def test_launch_creates_and_starts_the_system_task_after_removing_the_stale_log(
+    host: FakeUpgradeHost,
+) -> None:
+    host.state_log.write_text("2026-08-01 10:00:00  STATE=DONE-OK reboot required to apply\n", encoding="utf-8")
+    host.task_lines = [
+        (20.0, "=== upgrade_run start ==="),
+        (30.0, "launching: D:\\upgrade\\setup.exe /auto upgrade"),
+    ]
+
+    code, envelope = _launch(host)
+
+    assert code == 0
+    assert host.registered == [_spec(host)]
+    # launch writes no DACL: lock-dirs locked both directories before anything was copied in.
+    assert host.calls == ["register", "start \\OVMRepairUpgrade", "delete"]
+    data = _data(envelope)
+    assert (data["verdict"], data["setuphost"], data["registered"]) == ("OK", 1, True)
+    assert data["command"] == f"{POWERSHELL} {TASK_ARGS}"
+    assert data["wait"] == {"status": "LAUNCHED", "waited_s": 30.0, "last_error": None}
+
+
+def test_launch_starts_the_150_second_check_only_after_the_launching_line(host: FakeUpgradeHost) -> None:
+    # A first SYSTEM run may spend minutes bootstrapping uv and Python before setup starts.
+    host.task_lines = [(420.0, "launching: D:\\upgrade\\setup.exe")]
+
+    code, envelope = _launch(host)
+
+    assert code == 0
+    assert at(envelope, "data", "wait", "waited_s") == 420.0
+    assert host.now_s == 420.0 + 150.0
+
+
+def test_launch_gives_up_after_ten_minutes_without_a_launching_line(host: FakeUpgradeHost) -> None:
+    host.task_lines = [(5.0, "=== upgrade_run start ===")]
+
+    code, envelope = _launch(host)
+
+    assert code == 1
+    data = _data(envelope)
+    assert data["verdict"] == "NO_START"
+    assert at(data, "wait", "status") == "TIMEOUT"
+    assert host.now_s == 600.0
+    assert data["setuphost"] is None
+
+
+def test_launch_is_suspect_at_once_when_the_run_ends_before_launching(host: FakeUpgradeHost) -> None:
+    host.task_lines = [(10.0, "STATE=DONE-FAIL setup.exe missing")]
+
+    code, envelope = _launch(host)
+
+    assert code == 1
+    data = _data(envelope)
+    assert (data["verdict"], at(data, "wait", "status")) == ("SUSPECT", "ENDED")
+    assert host.now_s == 10.0
+    assert at(data, "state", "verdict") == "DONE-FAIL"
+
+
+def test_launch_is_suspect_when_setuphost_is_gone_after_150_seconds(host: FakeUpgradeHost) -> None:
+    host.task_lines = [(5.0, "launching: D:\\upgrade\\setup.exe")]
+    host.setuphost = 0
+
+    code, envelope = _launch(host)
+
+    assert code == 1
+    assert (_data(envelope)["verdict"], _data(envelope)["setuphost"]) == ("SUSPECT", 0)
+
+
+def test_launch_fails_when_the_task_cannot_be_registered(host: FakeUpgradeHost) -> None:
+    host.register_fails = True
+
+    code, envelope = _launch(host)
+
+    assert code == 1
+    data = _data(envelope)
+    assert (data["verdict"], data["registered"]) == ("FAILED", False)
+    assert data["reason"] == "the task could not be registered: Zugriff verweigert"
+    assert host.calls[-1] == "register"
+
+
+def test_launch_fails_when_the_task_cannot_be_started(host: FakeUpgradeHost) -> None:
+    host.start_fails = True
+
+    code, envelope = _launch(host)
+
+    assert code == 1
+    assert _data(envelope)["verdict"] == "FAILED"
+
+
+# --- launch: the SYSTEM task's lifecycle ------------------------------------------------------
+
+DISARMED = {"action": "DISARM", "ended": None, "disabled": False, "deleted": True, "error": None}
+REMOVED = {"action": "REMOVE", "ended": True, "disabled": False, "deleted": True, "error": None}
+
+
+def test_launch_disarms_the_task_as_soon_as_setup_is_launching(host: FakeUpgradeHost) -> None:
+    # The task has no trigger, but a definition left behind could still be started by hand or by
+    # a second launch while this setup runs; it has no use once the run is launching.
+    host.task_lines = [(30.0, "launching: D:\\upgrade\\setup.exe")]
+
+    code, envelope = _launch(host)
+
+    assert code == 0
+    assert host.task is None  # the definition is gone, so nothing can start it by name
+    assert "end" not in host.calls  # the running upgrade-run must not be killed
+    assert host.task_events == [(30.0, "delete")]  # before the 150 s SetupHost check, not after
+    assert _data(envelope)["task_cleanup"] == DISARMED
+
+
+def test_launch_disarms_without_ending_when_setup_is_gone_after_150_seconds(host: FakeUpgradeHost) -> None:
+    # upgrade-run saw setup exit and is about to write its marker: ending it would lose the verdict.
+    host.task_lines = [(5.0, "launching: D:\\upgrade\\setup.exe")]
+    host.setuphost = 0
+
+    code, envelope = _launch(host)
+
+    assert (code, _data(envelope)["verdict"]) == (1, "SUSPECT")
+    assert "end" not in host.calls
+    assert _data(envelope)["task_cleanup"] == DISARMED
+
+
+def test_launch_ends_and_deletes_a_task_that_never_launched_setup(host: FakeUpgradeHost) -> None:
+    # A slow bootstrap would otherwise still start setup after launch reported NO_START.
+    host.task_lines = [(5.0, "=== upgrade_run start ===")]
+
+    code, envelope = _launch(host)
+
+    assert (code, _data(envelope)["verdict"]) == (1, "NO_START")
+    assert host.calls[-2:] == ["end", "delete"]
+    assert host.task is None
+    assert _data(envelope)["task_cleanup"] == REMOVED
+
+
+def test_launch_ends_and_deletes_the_task_when_the_run_ended_before_launching(host: FakeUpgradeHost) -> None:
+    host.task_lines = [(10.0, "STATE=DONE-FAIL setup.exe missing")]
+
+    code, envelope = _launch(host)
+
+    assert (code, _data(envelope)["verdict"]) == (1, "SUSPECT")
+    assert host.calls[-2:] == ["end", "delete"]
+    assert _data(envelope)["task_cleanup"] == REMOVED
+
+
+def test_launch_deletes_a_task_that_was_created_but_could_not_be_started(host: FakeUpgradeHost) -> None:
+    # Left behind, anyone starting it by name would run setup with nobody watching.
+    host.start_fails = True
+
+    code, envelope = _launch(host)
+
+    assert (code, _data(envelope)["verdict"]) == (1, "FAILED")
+    assert host.calls[-1] == "delete"
+    assert "end" not in host.calls  # nothing runs, so nothing to end
+    assert host.task is None
+    assert _data(envelope)["task_cleanup"] == REMOVED
+
+
+def test_launch_has_nothing_to_remove_when_the_task_was_never_created(host: FakeUpgradeHost) -> None:
+    host.register_fails = True
+
+    _, envelope = _launch(host)
+
+    assert _data(envelope)["task_cleanup"] == REMOVED
+
+
+def test_launch_says_task_left_when_the_launched_task_cannot_be_deleted(host: FakeUpgradeHost) -> None:
+    host.task_lines = [(30.0, "launching: D:\\upgrade\\setup.exe")]
+    host.delete_fails = True
+
+    code, envelope = _launch(host)
+
+    assert (code, envelope["ok"]) == (1, False)  # never a silent OK with the task still defined
+    data = _data(envelope)
+    assert data["verdict"] == "TASK_LEFT"
+    assert str(data["reason"]).startswith("OK; the task \\OVMRepairUpgrade could not be disarmed: delete: ")
+    assert host.disabled  # the fallback: the definition stays, but it refuses any start
+    assert data["task_cleanup"] == {
+        "action": "DISARM", "ended": None, "disabled": True, "deleted": False,
+        "error": "delete: Zugriff verweigert",
+    }  # fmt: skip
+
+
+def test_launch_keeps_a_task_it_could_not_end_so_it_can_still_be_ended_by_name(
+    host: FakeUpgradeHost,
+) -> None:
+    host.task_lines = [(5.0, "=== upgrade_run start ===")]
+    host.stop_fails = True
+
+    code, envelope = _launch(host)
+
+    assert code == 1
+    data = _data(envelope)
+    assert data["verdict"] == "TASK_LEFT"
+    assert str(data["reason"]).startswith("NO_START: no 'launching' line within 600 s; the task ")
+    assert "delete" not in host.calls
+    assert (host.task, host.disabled) == (TaskState.RUNNING, True)
+    assert data["task_cleanup"] == {
+        "action": "REMOVE", "ended": False, "disabled": True, "deleted": False,
+        "error": "end: Zugriff verweigert",
+    }  # fmt: skip
+
+
+def test_launch_waits_a_bounded_time_for_an_ended_task_to_stop_running(host: FakeUpgradeHost) -> None:
+    host.task_lines = [(5.0, "=== upgrade_run start ===")]
+    host.stop_ignored = True
+
+    _, envelope = _launch(host)
+
+    data = _data(envelope)
+    assert data["verdict"] == "TASK_LEFT"
+    assert at(data, "task_cleanup", "error") == "end: still running 30 s after the end request"
+    assert host.now_s == 600.0 + 30.0
+
+
+def test_launch_says_task_left_when_the_task_state_cannot_be_read(host: FakeUpgradeHost) -> None:
+    host.start_fails = True
+    host.state_fails = True
+
+    _, envelope = _launch(host)
+
+    data = _data(envelope)
+    assert data["verdict"] == "TASK_LEFT"
+    assert data["task_cleanup"] == {
+        "action": "REMOVE", "ended": None, "disabled": False, "deleted": False,
+        "error": "read: Task Scheduler unavailable",
+    }  # fmt: skip
+
+
+# --- launch: the task definition handed to the Task Scheduler COM API -------------------------
+# Recording stand-ins for the COM objects; their member names are the COM interfaces' own.
+
+
+class _ComTriggers:
+    def __init__(self) -> None:
+        self.created: list[int] = []
+
+    @property
+    def Count(self) -> int:  # noqa: N802 - mirrors the pywin32 / COM member name
+        return len(self.created)
+
+    def Create(self, kind: int) -> SimpleNamespace:  # noqa: N802 - mirrors the pywin32 / COM member name
+        self.created.append(kind)
+        return SimpleNamespace()
+
+
+class _ComActions:
+    def __init__(self) -> None:
+        self.created: list[SimpleNamespace] = []
+
+    def Create(self, kind: int) -> SimpleNamespace:  # noqa: N802 - mirrors the pywin32 / COM member name
+        action = SimpleNamespace(kind=kind, Path=None, Arguments=None)
+        self.created.append(action)
+        return action
+
+
+class _ComDefinition:
+    def __init__(self) -> None:
+        # Sentinels that differ from every value the assertions below expect, so a field the code
+        # forgets to set reads wrong - even where it would equal the scheduler's own default.
+        self.RegistrationInfo = SimpleNamespace(Description="")
+        self.Principal = SimpleNamespace(UserId="", LogonType=3, RunLevel=0)
+        self.Settings = SimpleNamespace(
+            Enabled=False, AllowDemandStart=False, AllowHardTerminate=False, ExecutionTimeLimit="PT0S",
+            MultipleInstances=0, DisallowStartIfOnBatteries=True, StopIfGoingOnBatteries=True,
+        )  # fmt: skip
+        self.Triggers = _ComTriggers()
+        self.Actions = _ComActions()
+
+
+class _ComFolder:
+    def __init__(self, fails: bool) -> None:
+        self.fails = fails
+        self.registered: list[tuple[object, ...]] = []
+
+    def RegisterTaskDefinition(self, *args: object) -> SimpleNamespace:  # noqa: N802 - mirrors the pywin32 / COM member name
+        if self.fails:
+            raise OSError(-2147024891, "Zugriff verweigert")  # what pywintypes.com_error looks like
+        self.registered.append(args)
+        return SimpleNamespace()
+
+
+class _ComService:
+    def __init__(self, *, fails: bool = False) -> None:
+        self.folders: list[str] = []
+        self.definition = _ComDefinition()
+        self.folder = _ComFolder(fails)
+
+    def GetFolder(self, path: str) -> _ComFolder:  # noqa: N802 - mirrors the pywin32 / COM member name
+        self.folders.append(path)
+        return self.folder
+
+    def NewTask(self, flags: int) -> _ComDefinition:  # noqa: N802 - mirrors the pywin32 / COM member name
+        assert flags == 0
+        return self.definition
+
+
+def test_register_on_demand_defines_a_system_task_with_no_trigger(host: FakeUpgradeHost) -> None:
+    service = _ComService()
+
+    upgrade.register_on_demand(lambda: service, _spec(host))
+
+    definition = service.definition
+    assert definition.Triggers.created == []  # nothing can start it but an explicit Run
+    assert definition.Triggers.Count == 0
+    assert vars(definition.Principal) == {"UserId": "S-1-5-18", "LogonType": 5, "RunLevel": 1}
+    assert vars(definition.Settings) == {
+        "Enabled": True, "AllowDemandStart": True, "AllowHardTerminate": True,
+        "ExecutionTimeLimit": "PT72H", "MultipleInstances": 2,
+        "DisallowStartIfOnBatteries": False, "StopIfGoingOnBatteries": False,
+    }  # fmt: skip
+    assert [(a.kind, a.Path, a.Arguments) for a in definition.Actions.created] == [(0, POWERSHELL, TASK_ARGS)]
+    assert service.folders == ["\\"]
+    # TASK_CREATE_OR_UPDATE (the old /F), the principal again (the API wants it here too), no password.
+    assert service.folder.registered == [("OVMRepairUpgrade", definition, 6, "S-1-5-18", None, 5)]
+
+
+def test_register_on_demand_raises_a_pwshpy_error_when_the_scheduler_refuses(host: FakeUpgradeHost) -> None:
+    with pytest.raises(NativeCallError, match="Zugriff verweigert"):
+        upgrade.register_on_demand(lambda: _ComService(fails=True), _spec(host))
+
+
+def test_register_on_demand_raises_a_pwshpy_error_when_the_scheduler_is_unreachable(
+    host: FakeUpgradeHost,
+) -> None:
+    def connect() -> _ComService:
+        raise OSError("Der RPC-Server ist nicht verfuegbar")
+
+    with pytest.raises(NativeCallError, match="RPC-Server"):
+        upgrade.register_on_demand(connect, _spec(host))
+
+
+class _ComError(Exception):
+    """Stands in for pywintypes.com_error, which derives from Exception and not from OSError."""
+
+
+def test_register_on_demand_wraps_a_com_error(host: FakeUpgradeHost) -> None:
+    def connect() -> _ComService:
+        raise _ComError(-2147024891, "Zugriff verweigert", None, None)
+
+    with pytest.raises(NativeCallError, match="Zugriff verweigert"):
+        upgrade.register_on_demand(connect, _spec(host), com_errors=(_ComError,))
+
+
+def test_register_on_demand_lets_a_programming_error_through_as_internal(host: FakeUpgradeHost) -> None:
+    # A typo in _define must be exit 2 (internal), never a FAILED verdict that reads like a refusal.
+    def connect() -> SimpleNamespace:
+        return SimpleNamespace()  # no NewTask: AttributeError inside _define
+
+    with pytest.raises(AttributeError):
+        upgrade.register_on_demand(connect, _spec(host), com_errors=(_ComError,))
+
+
+@pytest.mark.parametrize(
+    "root",
+    [
+        r"D:\up grade",
+        'D:\\up"grade',
+        "upgrade",
+        r"D:\upgrade&calc",
+        "D:\\upgrade\\",
+        r"D:\..\x",
+        r"D:\up\..\x",
+        "/tmp/up",
+    ],
+)
+def test_launch_refuses_a_stage_root_that_cannot_ride_in_the_task_command(host: FakeUpgradeHost, root: str) -> None:
+    code, envelope = _run(host, "launch", "--stage-root", root, "--tool", TOOL)
+
+    assert code == 2
+    assert "stage root" in str(_data(envelope)["error"])
+    assert host.calls == []
+
+
+@pytest.mark.parametrize(
+    ("flag", "value"),
+    [
+        ("--tool", "winrepair_guest-0123456789abcdef.ps1"),
+        ("--tool", r"..\winrepair_guest-0123456789abcdef.ps1"),
+        ("--state-log", "upgrade-state.log"),
+        ("--state-log", "/tmp/upgrade-state.log"),
+        ("--state-log", r"C:\..\upgrade-state.log"),
+    ],
+)
+def test_launch_refuses_a_relative_tool_or_state_log(host: FakeUpgradeHost, flag: str, value: str) -> None:
+    # The SYSTEM task starts in System32: a relative path there names a different file.
+    args = {"--tool": TOOL, "--state-log": STATE_LOG, flag: value}
+    code, envelope = _run(host, "launch", "--stage-root", r"D:\upgrade", *(x for kv in args.items() for x in kv))
+
+    assert code == 2
+    assert repr(value) in str(_data(envelope)["error"])
+    assert host.calls == []
+
+
+def test_launch_without_tool_is_a_usage_error_and_starts_nothing(host: FakeUpgradeHost) -> None:
+    # No default: the tool lives under a content address only the driver knows, and a default
+    # path would register a task whose action runs a file that is not there.
+    code, envelope = _run(host, "launch", "--stage-root", r"D:\upgrade", "--state-log", STATE_LOG)
+
+    assert code == 2
+    assert "--tool" in str(_data(envelope))
+    assert host.calls == []
+    assert host.registered == []
+
+
+def test_wait_for_launch_keeps_polling_through_read_errors() -> None:
+    clock = [0.0]
+    reads = iter([OSError("locked"), [], ["x  launching: setup.exe"]])
+
+    def read() -> list[str]:
+        item = next(reads)
+        if isinstance(item, OSError):
+            raise item
+        return item
+
+    def sleep(seconds: float) -> None:
+        clock[0] += seconds
+
+    wait = upgrade.wait_for_launch(read, clock=lambda: clock[0], sleep=sleep)
+
+    assert wait == upgrade.LaunchWait(status="LAUNCHED", waited_s=10.0, last_error="locked")
+
+
+# --- upgrade-run ----------------------------------------------------------------------------
+
+
+def _run_upgrade(host: FakeUpgradeHost, stage: Path) -> tuple[int, dict[str, object]]:
+    return _run(host, "upgrade-run", "--stage-root", str(stage), "--state-log", str(host.state_log))
+
+
+def _log(host: FakeUpgradeHost) -> list[str]:
+    return host.state_log.read_bytes().decode("utf-8").split("\r\n")[:-1]
+
+
+def test_upgrade_run_writes_the_state_log_and_marks_success(stage: Path, host: FakeUpgradeHost) -> None:
+    code, envelope = _run_upgrade(host, stage)
+
+    assert code == 0
+    setup = str(stage / "setup.exe")
+    assert host.setup_argv == [
+        setup, "/auto", "upgrade", "/quiet", "/eula", "accept", "/noreboot",
+        "/compat", "ignorewarning", "/dynamicupdate", "disable", "/copylogs", f"{stage}-logs",
+    ]  # fmt: skip
+    assert _log(host) == [
+        "2026-10-21 10:00:00  === upgrade_run start ===",
+        "2026-10-21 10:00:00  whoami=NT AUTHORITY\\SYSTEM (S-1-5-18)",
+        "2026-10-21 10:00:00  build_before=26200.8875",
+        "2026-10-21 10:00:00  free_C_GB=50.0",
+        f"2026-10-21 10:00:00  launching: {setup} " + " ".join(host.setup_argv[1:]),
+        "2026-10-21 11:02:05  setup exit=0x00000000 (0) after 01:02:05",
+        "2026-10-21 11:02:05  setup tree wait=job",
+        "2026-10-21 11:02:05  build_after_downlevel=26200.8875 (unchanged until the apply reboot)",
+        "2026-10-21 11:02:05  NewOS_staged=True",
+        "2026-10-21 11:02:05  STATE=DONE-OK reboot required to apply",
+        "2026-10-21 11:02:05  === upgrade_run end ===",
+    ]
+    data = _data(envelope)
+    assert (data["verdict"], data["exit_code"], data["exit_hex"]) == ("DONE-OK", 0, "0x00000000")
+    assert (data["seconds"], data["newos_staged"], data["build_before"]) == (3725.0, True, "26200.8875")
+    assert probes.read_state(host.state_log).verdict == "DONE-OK"
+
+
+@pytest.mark.parametrize("exit_code", [3010, 0x3010])
+def test_upgrade_run_accepts_the_reboot_required_codes(stage: Path, host: FakeUpgradeHost, exit_code: int) -> None:
+    host.setup_exit = exit_code
+
+    code, envelope = _run_upgrade(host, stage)
+
+    assert (code, _data(envelope)["verdict"]) == (0, "DONE-OK")
+
+
+def test_upgrade_run_marks_a_setup_failure_with_its_hresult(stage: Path, host: FakeUpgradeHost) -> None:
+    host.setup_exit = 0xC1900200  # ps.exec reports the DWORD unsigned (measured on a test guest)
+    host.setup_seconds = 30.0
+
+    code, envelope = _run_upgrade(host, stage)
+
+    assert code == 1
+    log = _log(host)
+    assert "2026-10-21 10:00:30  setup exit=0xC1900200 (-1047526912) after 00:00:30" in log
+    assert "2026-10-21 10:00:30  STATE=DONE-FAIL rc=0xC1900200" in log
+    assert _data(envelope)["exit_hex"] == "0xC1900200"
+    assert probes.read_state(host.state_log).verdict == "DONE-FAIL"
+
+
+def test_upgrade_run_fails_without_setup_exe(stage: Path, host: FakeUpgradeHost) -> None:
+    (stage / "setup.exe").unlink()
+
+    code, envelope = _run_upgrade(host, stage)
+
+    assert code == 1
+    assert _log(host)[-1] == "2026-10-21 10:00:00  STATE=DONE-FAIL setup.exe missing"
+    assert host.setup_argv == []
+    assert _data(envelope)["verdict"] == "DONE-FAIL"
+
+
+def test_upgrade_run_marks_a_setup_that_could_not_start(stage: Path, host: FakeUpgradeHost) -> None:
+    host.setup_fails = True
+
+    code, _ = _run_upgrade(host, stage)
+
+    assert code == 1
+    assert "STATE=DONE-FAIL setup.exe could not run: Executable not found" in _log(host)[-2]
+
+
+def test_upgrade_run_leaves_a_fail_marker_when_it_crashes(stage: Path, host: FakeUpgradeHost) -> None:
+    host.setup_crash = True
+
+    code, envelope = _run_upgrade(host, stage)
+
+    assert (code, envelope["ok"]) == (2, False)
+    assert _log(host)[-1] == "2026-10-21 10:00:00  STATE=DONE-FAIL internal error: RuntimeError: boom"
+    assert probes.read_state(host.state_log).verdict == "DONE-FAIL"
+
+
+def test_upgrade_run_carries_on_past_an_unreadable_build(stage: Path, host: FakeUpgradeHost) -> None:
+    host.registry_fails = True
+
+    code, envelope = _run_upgrade(host, stage)
+
+    assert code == 0
+    assert "2026-10-21 10:00:00  build_before=unknown (NativeCallError: registry unavailable)" in _log(host)
+    assert _data(envelope)["build_before"] is None
+
+
+@dataclass
+class _ShapeChangedHost(FakeUpgradeHost):
+    """whoami fails the way a pywin32 shape change would: neither OSError nor a pwshpy error."""
+
+    def whoami(self) -> str:
+        raise TypeError("'NoneType' object is not subscriptable")
+
+
+def test_upgrade_run_launches_setup_when_whoami_fails_with_any_error(stage: Path, tmp_path: Path) -> None:
+    host = _ShapeChangedHost(state_log=tmp_path / "upgrade-state.log")
+
+    code, _ = _run_upgrade(host, stage)
+
+    assert code == 0
+    assert host.setup_argv[0] == str(stage / "setup.exe")
+    assert _log(host)[1] == "2026-10-21 10:00:00  whoami=unknown (TypeError: 'NoneType' object is not subscriptable)"
+
+
+def test_upgrade_run_appends_to_an_existing_log(stage: Path, host: FakeUpgradeHost) -> None:
+    host.state_log.write_bytes(b"earlier line\r\n")
+
+    _run_upgrade(host, stage)
+
+    assert _log(host)[0] == "earlier line"
+
+
+def test_exit_text_formats_like_the_old_powershell_line() -> None:
+    assert upgrade.exit_hex(3247440384) == "0xC1900200"
+    assert upgrade.signed32(3247440384) == -1047526912
+    assert upgrade.signed32(3010) == 3010
+    assert upgrade.elapsed_text(3725.4) == "01:02:05"
+
+
+def _system_token(failing: str = "") -> FakeSecurity:
+    """win32security for the SYSTEM account a SYSTEM task runs as; ``failing`` names a call that raises."""
+    return _FailingSecurity(failing) if failing else FakeSecurity(user=SYSTEM_SID, account=("SYSTEM", "NT AUTHORITY"))
+
+
+class _FailingSecurity(FakeSecurity):
+    """win32security whose call named ``failing`` raises the module's own error type."""
+
+    def __init__(self, failing: str) -> None:
+        super().__init__(user=SYSTEM_SID, account=("SYSTEM", "NT AUTHORITY"))
+        self.failing = failing
+
+    def OpenProcessToken(self, process: object, access: int, /) -> object:  # noqa: N802 - mirrors the pywin32 / COM member name
+        if self.failing == "OpenProcessToken":
+            raise Win32Error(5, "OpenProcessToken", "Zugriff verweigert")
+        return super().OpenProcessToken(process, access)
+
+    def LookupAccountSid(self, system: str | None, sid: object, /) -> tuple[str, str, int]:  # noqa: N802 - mirrors the pywin32 / COM member name
+        if self.failing == "LookupAccountSid":
+            raise Win32Error(1332, "LookupAccountSid", "Keine Zuordnung")
+        return super().LookupAccountSid(system, sid)
+
+
+def test_whoami_names_the_token_account_with_its_sid_not_the_computer_account() -> None:
+    # Measured on a test guest: GetUserNameEx(NameSamCompatible) under the SYSTEM task returned
+    # the computer account EXAMPLE\WIN-HOST$, so the state log never showed the run was SYSTEM.
+    security = _system_token()
+    api = FakeApi()
+
+    assert upgrade.token_account(security, api) == "NT AUTHORITY\\SYSTEM (S-1-5-18)"
+    assert security.calls == ["open process 8", "info token 1"]
+
+
+@dataclass
+class _TokenHost(FakeUpgradeHost):
+    """A FakeUpgradeHost whose whoami goes through the real token_account over a stand-in module."""
+
+    security: FakeSecurity = field(default_factory=_system_token)
+
+    def whoami(self) -> str:
+        return upgrade.token_account(self.security, FakeApi())
+
+
+@pytest.mark.parametrize(
+    ("failing", "reason"),
+    [("OpenProcessToken", "(5, 'OpenProcessToken'"), ("LookupAccountSid", "(1332, 'LookupAccountSid'")],
+)
+def test_upgrade_run_launches_setup_when_the_token_account_cannot_be_read(
+    stage: Path, tmp_path: Path, failing: str, reason: str
+) -> None:
+    # A diagnostic line must never stop the run that is the whole point of the SYSTEM task.
+    host = _TokenHost(state_log=tmp_path / "upgrade-state.log", security=_system_token(failing))
+
+    code, envelope = _run_upgrade(host, stage)
+
+    assert code == 0
+    assert host.setup_argv[0] == str(stage / "setup.exe")
+    whoami = _log(host)[1]
+    assert whoami.startswith("2026-10-21 10:00:00  whoami=unknown (")
+    assert reason in whoami
+    assert _data(envelope)["verdict"] == "DONE-OK"
+
+
+def test_token_account_reports_a_pywin32_failure_as_oserror() -> None:
+    with pytest.raises(OSError, match="LookupAccountSid") as caught:
+        upgrade.token_account(_system_token("LookupAccountSid"), FakeApi())
+    assert isinstance(caught.value.__cause__, Win32Error)
+
+
+@pytest.mark.skipif(importlib.util.find_spec("win32security") is not None, reason="pywin32 is installed")
+def test_pwshpy_host_whoami_reports_a_missing_pywin32_as_oserror() -> None:
+    # The real adapter on a host without pywin32: the import failure is an OSError too, so
+    # upgrade-run's informational read logs it as unknown instead of aborting.
+    with pytest.raises(OSError, match="win32security") as caught:
+        upgrade.PwshpyHost().whoami()
+    assert isinstance(caught.value.__cause__, ImportError)
+
+
+# --- lock-dirs: both directories are locked before anything is copied into them ------------------
+
+
+def _lock_dirs(host: FakeUpgradeHost, *extra: str) -> tuple[int, dict[str, object]]:
+    return _run(host, "lock-dirs", "--tool", TOOL, *extra)
+
+
+def _actions(envelope: dict[str, object]) -> list[tuple[object, object]]:
+    return [(obj(d)["path"], obj(d)["action"]) for d in items(_data(envelope)["directories"])]
+
+
+def test_lock_dirs_creates_and_locks_both_directories(fresh: FakeUpgradeHost) -> None:
+    code, envelope = _lock_dirs(fresh, "--stage-root", r"D:\upgrade")
+
+    assert code == 0
+    assert fresh.calls == ["create C:\\winrepair", "create D:\\upgrade"]
+    data = _data(envelope)
+    assert (data["verdict"], data["reason"], data["tool_present"]) == ("OK", None, False)
+    assert _actions(envelope) == [(r"C:\winrepair", "CREATED"), (r"D:\upgrade", "CREATED")]
+
+
+def test_lock_dirs_without_a_stage_root_locks_only_the_tool_directory(fresh: FakeUpgradeHost) -> None:
+    # The driver's push runs it from an admin-only copy before the tool goes into C:\winrepair,
+    # when the stage root is not known yet.
+    code, envelope = _lock_dirs(fresh)
+
+    assert code == 0
+    assert fresh.calls == ["create C:\\winrepair"]
+    assert _actions(envelope) == [(r"C:\winrepair", "CREATED")]
+
+
+def test_lock_dirs_leaves_an_exactly_locked_directory_and_its_content_alone(host: FakeUpgradeHost) -> None:
+    # A re-run (or a live SYSTEM run executing the tool): no DACL is rewritten under it.
+    code, envelope = _lock_dirs(host, "--stage-root", r"D:\upgrade")
+
+    assert code == 0
+    assert host.calls == ["create C:\\winrepair", "create D:\\upgrade"]  # both existed: nothing written
+    assert _actions(envelope) == [(r"C:\winrepair", "ALREADY_LOCKED"), (r"D:\upgrade", "ALREADY_LOCKED")]
+    data = _data(envelope)
+    assert (data["tool_present"], data["tool_sha256"]) == (True, hashlib.sha256(TOOL_BYTES).hexdigest())
+
+
+def _lock_refused(host: FakeUpgradeHost, envelope: dict[str, object], fragment: str) -> None:
+    data = _data(envelope)
+    assert (envelope["ok"], data["verdict"]) == (False, "FAILED")
+    assert fragment in str(data["reason"]), data["reason"]
+
+
+def test_lock_dirs_refuses_an_existing_unlocked_directory_even_when_empty(fresh: FakeUpgradeHost) -> None:
+    # Locking it now would not revoke a handle a local user opened while it was open: relative
+    # opens through that handle are checked against the access granted when it was opened.
+    fresh.existing.add(r"D:\upgrade")
+
+    code, envelope = _lock_dirs(fresh, "--stage-root", r"D:\upgrade")
+
+    assert code == 1
+    _lock_refused(fresh, envelope, r"rd /s /q D:\upgrade")
+    assert r"D:\upgrade" not in fresh.locked
+
+
+def test_lock_dirs_refuses_a_locked_directory_holding_something_a_non_admin_can_change(
+    host: FakeUpgradeHost,
+) -> None:
+    evil = r"D:\upgrade\sources\evil.dll"
+    host.entries += [r"D:\upgrade\sources", evil]
+    host.acl_overrides[evil] = AclReading(evil, PLANTER_SID, False, (Ace(SYSTEM_SID, 0, 0x10, FULL),))
+
+    code, envelope = _lock_dirs(host, "--stage-root", r"D:\upgrade")
+
+    assert code == 1
+    _lock_refused(host, envelope, f"{evil} is owned by {PLANTER_SID}")
+
+
+def test_lock_dirs_refuses_a_directory_that_held_files_before_it_was_locked(fresh: FakeUpgradeHost) -> None:
+    # Anything in it may have been written or replaced by a local user while it was open to them.
+    fresh.existing.add(r"D:\upgrade")
+    fresh.entries = [r"D:\upgrade\sources", r"D:\upgrade\sources\evil.dll"]
+
+    code, envelope = _lock_dirs(fresh, "--stage-root", r"D:\upgrade")
+
+    assert code == 1
+    _lock_refused(fresh, envelope, r"rd /s /q D:\upgrade")
+
+
+@pytest.mark.parametrize(
+    ("target", "fragment"),
+    [
+        (LockTarget(r"D:\upgrade", (r"D:\upgrade",), True, PLANTER_SID), r"D:\upgrade is a reparse point"),
+        (LockTarget(r"D:\upgrade", (), True, PLANTER_SID), f"owned by {PLANTER_SID}"),
+        (LockTarget(r"D:\upgrade", (), False, ADMINS_SID), r"D:\upgrade is not a directory"),
+    ],
+    ids=["junction", "foreign-owner", "not-a-directory"],
+)
+def test_lock_dirs_refuses_an_unsafe_existing_directory_without_locking_it(
+    fresh: FakeUpgradeHost, target: LockTarget, fragment: str
+) -> None:
+    fresh.existing.add(r"D:\upgrade")
+    fresh.lock_targets[r"D:\upgrade"] = target
+
+    code, envelope = _lock_dirs(fresh, "--stage-root", r"D:\upgrade")
+
+    assert code == 1
+    _lock_refused(fresh, envelope, fragment)
+    assert r"D:\upgrade" not in fresh.locked
+
+
+@pytest.mark.parametrize("root", [r"C:\Windows", r"D:\data", r"C:\Users\admin\upgrade"])
+def test_lock_dirs_refuses_a_stage_root_it_must_not_lock_before_touching_anything(
+    fresh: FakeUpgradeHost, root: str
+) -> None:
+    code, envelope = _lock_dirs(fresh, "--stage-root", root)
+
+    assert code == 1
+    _lock_refused(fresh, envelope, root)
+    assert fresh.calls == []
+
+
+def test_lock_dirs_refuses_a_tool_outside_the_pushed_location_before_touching_anything(
+    fresh: FakeUpgradeHost,
+) -> None:
+    code, envelope = _run(fresh, "lock-dirs", "--tool", ntpath.join("C:\\", ntpath.basename(TOOL)))
+
+    assert code == 1
+    _lock_refused(fresh, envelope, "only tool directory")
+    assert fresh.calls == []
+
+
+def test_lock_dirs_refuses_a_tool_already_there_whose_bytes_do_not_match_its_name(
+    host: FakeUpgradeHost, tmp_path: Path
+) -> None:
+    # The driver would otherwise run it as an elevated admin without pushing its own copy.
+    (tmp_path / TOOL).write_bytes(b"# a local user's replacement\r\n")
+
+    code, envelope = _lock_dirs(host)
+
+    assert code == 1
+    _lock_refused(host, envelope, "does not match its name")
+
+
+def test_lock_dirs_refuses_a_tool_already_there_that_others_can_write(host: FakeUpgradeHost) -> None:
+    host.acl_overrides[TOOL] = AclReading(TOOL, ADMINS_SID, False, (Ace(USERS_SID, 0, 0, MODIFY),))
+
+    code, envelope = _lock_dirs(host)
+
+    assert code == 1
+    _lock_refused(host, envelope, f"lets {USERS_SID} write")
+
+
+def test_lock_dirs_refuses_a_directory_it_cannot_create(fresh: FakeUpgradeHost) -> None:
+    fresh.create_fails = True
+
+    code, envelope = _lock_dirs(fresh, "--stage-root", r"D:\upgrade")
+
+    assert code == 1
+    _lock_refused(fresh, envelope, r"cannot create C:\winrepair")
+    assert "create D:\\upgrade" not in fresh.calls  # nothing after a refusal
+
+
+def test_lock_dirs_refuses_a_lock_that_does_not_read_back_exactly(fresh: FakeUpgradeHost) -> None:
+    extra = (Ace(SYSTEM_SID, 0, 0x3, FULL), Ace(ADMINS_SID, 0, 0x3, FULL), Ace(USERS_SID, 0, 0x3, 0x1200A9))
+    fresh.acl_overrides[r"C:\winrepair"] = AclReading(r"C:\winrepair", ADMINS_SID, True, extra)
+
+    code, envelope = _lock_dirs(fresh)
+
+    assert code == 1
+    _lock_refused(fresh, envelope, "carries 3 ACEs")
+
+
+def test_lock_dirs_then_staging_then_launch_is_the_order_launch_accepts(fresh: FakeUpgradeHost) -> None:
+    fresh.task_lines = [(30.0, "launching: D:\\upgrade\\setup.exe")]
+    assert _lock_dirs(fresh, "--stage-root", r"D:\upgrade")[0] == 0
+    Path(TOOL).write_bytes(TOOL_BYTES)  # the push and the media transfer, after the lock
+    Path(SETUP).write_bytes(b"MZ")
+    Path(POWERSHELL).write_bytes(b"MZ")
+    fresh.entries = [TOOL, SETUP]
+
+    code, envelope = _launch(fresh)
+
+    assert code == 0
+    assert _data(envelope)["verdict"] == "OK"
+
+
+@dataclass
+class _Win32LockHost(FakeUpgradeHost):
+    """A FakeUpgradeHost whose creation, inspection and read-back go through the real lockdown over
+    pywin32 stand-ins: a directory reads back with exactly the descriptor it was created with."""
+
+    security: FakeSecurity = field(default_factory=FakeSecurity)
+    files: FakeFiles = field(default_factory=FakeFiles)
+
+    def inspect_lock_target(self, path: str) -> LockTarget:
+        return lockdown.inspect_lock_target(self.security, self.files, path)
+
+    def create_locked_dir(self, path: str) -> bool:
+        created = lockdown.create_locked_dir(self.security, self.files, path)
+        if created:
+            self.existing.add(path)
+            self.security.objects[path] = self.files.created[path]
+        return created
+
+    def read_acl(self, path: str) -> AclReading:
+        if path in self.security.objects:
+            return lockdown.read_acl(self.security, path)
+        return super().read_acl(path)
+
+
+LOCK_DESCRIPTOR_ACES = [((0, 0x3), FULL, Sid(SYSTEM_SID)), ((0, 0x3), FULL, Sid(ADMINS_SID))]
+
+
+def test_lock_dirs_creates_each_directory_with_the_lock_already_in_place(fresh: FakeUpgradeHost) -> None:
+    # A directory made first and locked afterwards is open to every local user in between, and a
+    # handle opened then keeps its access after the lock. So each one comes into existence locked.
+    real = _Win32LockHost(state_log=fresh.state_log)
+
+    code, envelope = _lock_dirs(real, "--stage-root", r"D:\upgrade")
+
+    assert code == 0, _data(envelope)["reason"]
+    assert set(real.files.created) == {r"C:\winrepair", r"D:\upgrade"}
+    for directory, descriptor in real.files.created.items():
+        assert descriptor.control & 0x1000, f"{directory} was created without a protected DACL"
+        assert descriptor.dacl is not None and descriptor.dacl.aces == LOCK_DESCRIPTOR_ACES, directory
+    assert _actions(envelope) == [(r"C:\winrepair", "CREATED"), (r"D:\upgrade", "CREATED")]
+
+
+@pytest.mark.parametrize("directory", LOCK_DIRS)
+def test_lock_dirs_through_pywin32_refuses_a_junction_and_writes_no_dacl(
+    fresh: FakeUpgradeHost, directory: str
+) -> None:
+    files = FakeFiles({directory: Node(0x410, PLANTER_SID, target=r"C:\Windows")})
+    real = _Win32LockHost(state_log=fresh.state_log, files=files, existing={directory})
+
+    code, envelope = _lock_dirs(real, "--stage-root", r"D:\upgrade")
+
+    assert code == 1
+    _lock_refused(real, envelope, f"{directory} is a reparse point")
+    assert directory not in real.files.created
+    assert all(handle.closed for handle in files.opened)
+
+
+class _BindingRefuses(FakeSecurity):
+    def SECURITY_DESCRIPTOR(self) -> Descriptor:  # noqa: N802 - mirrors the pywin32 / COM member name
+        class _Refusing(Descriptor):
+            def SetSecurityDescriptorControl(self, interest: int, bits: int, /) -> None:  # noqa: N802 - mirrors the pywin32 / COM member name
+                raise TypeError("an integer is required (got type str)")
+
+        return _Refusing(None, None, 0)
+
+
+def test_lock_dirs_refuses_cleanly_when_the_binding_rejects_the_descriptor(fresh: FakeUpgradeHost) -> None:
+    refusing = _Win32LockHost(state_log=fresh.state_log, security=_BindingRefuses())
+
+    code, envelope = _lock_dirs(refusing)
+
+    assert code == 1
+    _lock_refused(refusing, envelope, r"cannot create C:\winrepair")
+    assert refusing.files.created == {}
+
+
+# --- launch: what the SYSTEM task executes was locked before it was copied in -------------------
+
+
+def test_launch_verifies_both_locks_and_writes_no_dacl(host: FakeUpgradeHost) -> None:
+    host.task_lines = [(30.0, "launching: D:\\upgrade\\setup.exe")]
+
+    code, envelope = _launch(host)
+
+    assert code == 0
+    assert host.calls[:1] == ["register"]  # nothing created or locked: lock-dirs did that
+    data = _data(envelope)
+    assert data["locked"] == LOCK_DIRS
+    assert data["tool_sha256"] == hashlib.sha256(TOOL_BYTES).hexdigest()
+
+
+def _refused_before_the_task(host: FakeUpgradeHost, envelope: dict[str, object], fragment: str) -> None:
+    data = _data(envelope)
+    assert (envelope["ok"], data["verdict"], data["registered"]) == (False, "FAILED", False)
+    assert fragment in str(data["reason"]), data["reason"]
+    assert host.registered == []
+    assert not [c for c in host.calls if c in ("register", "end", "delete")]
+    assert not [c for c in host.calls if c.startswith("create ")]
+
+
+@pytest.mark.parametrize("directory", LOCK_DIRS)
+def test_launch_refuses_a_directory_lock_dirs_never_locked(host: FakeUpgradeHost, directory: str) -> None:
+    # Locking it now would bless whatever a local user planted while it was open to them.
+    host.locked.remove(directory)
+    host.state_log.write_text("2026-08-01 10:00:00  STATE=DONE-OK\n", encoding="utf-8")
+
+    code, envelope = _launch(host)
+
+    assert code == 1
+    _refused_before_the_task(host, envelope, f"{directory} is not locked as lock-dirs creates it")
+    assert host.state_log.exists()  # the previous run's verdict is not thrown away for nothing
+
+
+def test_launch_refuses_when_the_read_back_still_lets_users_write(host: FakeUpgradeHost) -> None:
+    stale = AclReading(r"D:\upgrade", ADMINS_SID, False, (Ace(USERS_SID, 0, 0x1B, MODIFY),))
+    host.acl_overrides[r"D:\upgrade"] = stale
+
+    code, envelope = _launch(host)
+
+    assert code == 1
+    _refused_before_the_task(host, envelope, f"lets {USERS_SID} write")
+
+
+def test_launch_refuses_a_setup_exe_that_others_can_still_write(host: FakeUpgradeHost) -> None:
+    # An explicit ACE on the file survives the parent's lock.
+    host.acl_overrides[SETUP] = AclReading(SETUP, RUNNER_SID, False, (Ace(USERS_SID, 0, 0, MODIFY),))
+
+    code, envelope = _launch(host)
+
+    assert code == 1
+    _refused_before_the_task(host, envelope, SETUP)
+
+
+def test_launch_refuses_a_tool_owned_by_an_untrusted_account(host: FakeUpgradeHost) -> None:
+    host.acl_overrides[TOOL] = AclReading(TOOL, USERS_SID, False, (Ace(SYSTEM_SID, 0, 0x10, FULL),))
+
+    code, envelope = _launch(host)
+
+    assert code == 1
+    _refused_before_the_task(host, envelope, f"owned by {USERS_SID}")
+
+
+EVIL = r"D:\upgrade\sources\evil.dll"
+INHERITED = (Ace(SYSTEM_SID, 0, 0x10, FULL), Ace(ADMINS_SID, 0, 0x10, FULL))
+
+
+@pytest.mark.parametrize(
+    ("reading", "fragment"),
+    [
+        # A file a local user created (through a handle opened before the lock): its owner can
+        # rewrite its DACL, so the locked parent does not protect it.
+        (AclReading(EVIL, PLANTER_SID, False, INHERITED), f"{EVIL} is owned by {PLANTER_SID}"),
+        # An explicit grant on a child survives the parent's lock.
+        (
+            AclReading(EVIL, ADMINS_SID, False, (*INHERITED, Ace(USERS_SID, 0, 0, MODIFY))),
+            f"lets {USERS_SID}",
+        ),
+        # A same-volume move keeps the source's ACEs, still flagged inherited: they count too.
+        (
+            AclReading(EVIL, ADMINS_SID, False, (*INHERITED, Ace(USERS_SID, 0, 0x10, MODIFY))),
+            f"lets {USERS_SID}",
+        ),
+        (AclReading(EVIL, ADMINS_SID, False, None), "NULL DACL"),
+    ],
+    ids=["planted-owner", "explicit-grant", "moved-in-grant", "null-dacl"],
+)
+def test_launch_refuses_a_child_a_non_admin_can_change(
+    host: FakeUpgradeHost, reading: AclReading, fragment: str
+) -> None:
+    host.entries += [r"D:\upgrade\sources", EVIL]
+    host.acl_overrides[EVIL] = reading
+
+    code, envelope = _launch(host)
+
+    assert code == 1
+    _refused_before_the_task(host, envelope, fragment)
+
+
+def test_launch_refuses_a_reparse_point_below_a_locked_directory(host: FakeUpgradeHost) -> None:
+    # setup.exe would follow sources\ into a tree the lock never reached.
+    host.entries += [r"D:\upgrade\sources", EVIL]
+    host.reparse.add(r"D:\upgrade\sources")
+
+    code, envelope = _launch(host)
+
+    assert code == 1
+    _refused_before_the_task(host, envelope, r"D:\upgrade\sources is a reparse point")
+
+
+def test_launch_refuses_a_tree_larger_than_any_media(host: FakeUpgradeHost) -> None:
+    host.entries += [rf"D:\upgrade\f{i}.dll" for i in range(upgrade.TREE_LIMIT + 1)]
+
+    code, envelope = _launch(host)
+
+    assert code == 1
+    _refused_before_the_task(host, envelope, f"more than {upgrade.TREE_LIMIT} entries")
+
+
+def test_launch_refuses_a_tree_it_cannot_walk(host: FakeUpgradeHost) -> None:
+    host.walk_fails = True
+
+    code, envelope = _launch(host)
+
+    assert code == 1
+    _refused_before_the_task(host, envelope, "Zugriff verweigert")
+
+
+def test_launch_refuses_a_tool_replaced_under_its_content_address(host: FakeUpgradeHost, tmp_path: Path) -> None:
+    (tmp_path / TOOL).write_bytes(b"# a local user's replacement\r\n")
+
+    code, envelope = _launch(host)
+
+    assert code == 1
+    _refused_before_the_task(host, envelope, "does not match its name")
+    assert host.calls == []
+
+
+def _named_tool(tmp_path: Path, path: str) -> str:
+    """Put the real tool bytes at ``path`` (a Windows name in the cwd) and return the path."""
+    (tmp_path / path).write_bytes(TOOL_BYTES)
+    return path
+
+
+@pytest.mark.parametrize(
+    "tool",
+    [
+        ntpath.join("C:\\", ntpath.basename(TOOL)),
+        ntpath.join(r"C:\Windows", ntpath.basename(TOOL)),
+        ntpath.join(r"D:\upgrade", ntpath.basename(TOOL)),
+        r"C:\winrepair\winrepair_guest.ps1",
+    ],
+    ids=["drive-root", "windows-dir", "stage-root", "no-content-address"],
+)
+def test_launch_refuses_a_tool_outside_the_pushed_location_before_reading_anything(
+    host: FakeUpgradeHost, tmp_path: Path, tool: str
+) -> None:
+    _named_tool(tmp_path, tool)
+
+    code, envelope = _run(host, "launch", "--stage-root", r"D:\upgrade", "--state-log", STATE_LOG, "--tool", tool)
+
+    assert code == 1
+    _refused_before_the_task(host, envelope, tool)
+    assert host.calls == []
+
+
+@pytest.mark.parametrize("root", [r"C:\Windows", r"D:\data", r"C:\Users\admin\upgrade"])
+def test_launch_refuses_a_stage_root_outside_the_driver_s_before_reading_anything(
+    host: FakeUpgradeHost, tmp_path: Path, root: str
+) -> None:
+    (tmp_path / ntpath.join(root, "setup.exe")).write_bytes(b"MZ")
+
+    code, envelope = _run(host, "launch", "--stage-root", root, "--state-log", STATE_LOG, "--tool", TOOL)
+
+    assert code == 1
+    _refused_before_the_task(host, envelope, root)
+    assert host.calls == []
+
+
+@pytest.mark.parametrize("directory", LOCK_DIRS)
+def test_launch_refuses_a_lock_directory_that_is_a_junction(host: FakeUpgradeHost, directory: str) -> None:
+    host.lock_targets[directory] = LockTarget(directory, (directory,), True, PLANTER_SID)
+
+    code, envelope = _launch(host)
+
+    assert code == 1
+    _refused_before_the_task(host, envelope, f"{directory} is a reparse point")
+    assert _data(envelope)["locked"] == []
+
+
+@pytest.mark.parametrize("directory", LOCK_DIRS)
+def test_launch_refuses_a_lock_directory_reached_through_a_reparse_point(host: FakeUpgradeHost, directory: str) -> None:
+    ancestor = ntpath.splitdrive(directory)[0] + "\\"
+    host.lock_targets[directory] = LockTarget(directory, (ancestor,), True, ADMINS_SID)
+
+    code, envelope = _launch(host)
+
+    assert code == 1
+    _refused_before_the_task(host, envelope, f"reparse point at {ancestor}")
+
+
+@pytest.mark.parametrize("directory", LOCK_DIRS)
+def test_launch_refuses_a_lock_directory_another_account_owns(host: FakeUpgradeHost, directory: str) -> None:
+    host.lock_targets[directory] = LockTarget(directory, (), True, PLANTER_SID)
+
+    code, envelope = _launch(host)
+
+    assert code == 1
+    _refused_before_the_task(host, envelope, f"{directory} is owned by {PLANTER_SID}")
+
+
+@pytest.mark.parametrize("directory", LOCK_DIRS)
+def test_launch_refuses_a_lock_target_that_is_not_a_directory(host: FakeUpgradeHost, directory: str) -> None:
+    host.lock_targets[directory] = LockTarget(directory, (), False, ADMINS_SID)
+
+    code, envelope = _launch(host)
+
+    assert code == 1
+    _refused_before_the_task(host, envelope, f"{directory} is not a directory")
+
+
+def test_launch_refuses_when_a_lock_directory_cannot_be_inspected(host: FakeUpgradeHost) -> None:
+    host.inspect_fails = True
+
+    code, envelope = _launch(host)
+
+    assert code == 1
+    _refused_before_the_task(host, envelope, "cannot inspect C:\\winrepair")
+
+
+def test_launch_accepts_directories_system_owns(host: FakeUpgradeHost) -> None:
+    host.task_lines = [(30.0, "launching: D:\\upgrade\\setup.exe")]
+    for directory in LOCK_DIRS:
+        host.lock_targets[directory] = LockTarget(directory, (), True, SYSTEM_SID)
+
+    code, envelope = _launch(host)
+
+    assert code == 0
+    assert _data(envelope)["locked"] == LOCK_DIRS
+
+
+@pytest.mark.parametrize("directory", LOCK_DIRS)
+def test_launch_through_pywin32_refuses_a_junction(host: FakeUpgradeHost, directory: str) -> None:
+    files = FakeFiles({directory: Node(0x410, PLANTER_SID, target=r"C:\Windows")})
+    real = _Win32LockHost(state_log=host.state_log, files=files, existing=set(LOCK_DIRS), locked=list(LOCK_DIRS))
+
+    code, envelope = _launch(real)
+
+    assert code == 1
+    _refused_before_the_task(real, envelope, f"{directory} is a reparse point")
+    assert real.files.created == {}
+    assert all(handle.closed for handle in files.opened)
+
+
+@pytest.mark.parametrize("missing", [TOOL, SETUP, POWERSHELL])
+def test_launch_refuses_a_missing_file_before_touching_anything(
+    host: FakeUpgradeHost, tmp_path: Path, missing: str
+) -> None:
+    # Without this a missing tool cost a 10-minute NO_START with a misleading reason.
+    (tmp_path / missing).unlink()
+
+    code, envelope = _launch(host)
+
+    assert code == 1
+    _refused_before_the_task(host, envelope, missing)
+    assert host.calls == []

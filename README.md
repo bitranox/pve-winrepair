@@ -206,6 +206,36 @@ uvx pve-winrepair info
 
 ---
 
+## Guest tool subcommands
+
+Every subcommand prints one JSON envelope `{"ok", "command", "data", "skipped"}` and exits 0 (ok),
+1 (refused: its own gate said no, or it could not decide) or 2 (internal error, still with an
+envelope). The drivers call them; an operator can run one by hand on the guest, as an elevated
+admin:
+
+```
+%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\winrepair\winrepair_guest-<sha16>.ps1 detect-lp-defect --json
+```
+
+| Subcommand                                                 | What it answers                                                                                       | Exit 1 when                   |
+|------------------------------------------------------------|-------------------------------------------------------------------------------------------------------|-------------------------------|
+| `detect-lp-defect`                                         | is this guest affected by the orphaned language pack: AFFECTED, CLEAN or UNKNOWN                      | UNKNOWN                       |
+| `drives`                                                   | free bytes per fixed drive (an unparsable volume is skipped)                                          | never (2 when no drive reads) |
+| `verify-runners [--expected N]`                            | did the runner containers and their boot tasks come back after a reboot: OK, SHORT or UNKNOWN         | SHORT or UNKNOWN              |
+| `build`                                                    | CurrentBuild and UBR                                                                                  | never                         |
+| `staged-os`                                                | is the staged NewOS still there: REARMABLE (apply) or RERUN (a rollback deleted it)                   | never (2 when it cannot look) |
+| `servicing-active`                                         | are TiWorker / TrustedInstaller running                                                               | never                         |
+| `setup-alive`                                              | is SetupHost running                                                                                  | never                         |
+| `state [--log PATH]`                                       | the upgrade state log and its last `STATE=DONE-OK` / `STATE=DONE-FAIL` marker                         | never                         |
+| `quiesce-wu`                                               | hold Windows Update (Start=4, issue stops, bounded wait) and verify: OK, FAIL or UNKNOWN              | FAIL or UNKNOWN               |
+| `restore-wu`                                               | restore the start types and verify: RESTORED, STILL_DISABLED or UNKNOWN; plus a bounded search probe  | STILL_DISABLED or UNKNOWN     |
+| `prepare --stage-root X:\upgrade`                          | clear read-only, gate on the WIM, write the compat waiver: PASS or FAIL                               | FAIL                          |
+| `lock-dirs --tool PATH [--stage-root X:\upgrade]`          | create `C:\winrepair` (and the stage root) already locked, before anything is copied in: OK or FAILED | FAILED                        |
+| `launch --stage-root X:\upgrade --tool PATH [--state-log]` | verify the locks, then upgrade-run as a SYSTEM task: OK, SUSPECT, NO_START, FAILED, TASK_LEFT         | anything but OK               |
+| `upgrade-run --stage-root X:\upgrade [--state-log]`        | the SYSTEM task's command: setup.exe, the state log, the marker: DONE-OK or DONE-FAIL                 | DONE-FAIL                     |
+
+---
+
 ## Further Documentation
 
 - [Install Guide](INSTALL.md)

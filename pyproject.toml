@@ -71,6 +71,9 @@ dev = [
   "pip-audit>=2.10.1",
   "textual>=8.2.8",
   "import-linter>=2.15",
+  # Exact, not a floor: the guest tool's own PEP 723 header pins this version, and the tests and
+  # pyright must see the pwshpy the packed tool runs with.
+  "pwshpy==1.5.0",
   "rtoml>=0.14.0",
   "httpx2>=2.13.1",
   # Transitive CVE pins
@@ -304,4 +307,4 @@ ignores = ["E003"]
 
 [tool.uv]
 exclude-newer = "7 days"
-exclude-newer-package = {lib-cli-exit-tools = false, lib-layered-config = false, lib-log-rich = false, virtualenv = "2026-10-17T16:09:43Z", certifi = "2026-10-20T02:24:17Z"}
+exclude-newer-package = {lib-cli-exit-tools = false, lib-layered-config = false, lib-log-rich = false, virtualenv = "2026-10-17T16:09:43Z", certifi = "2026-10-20T02:24:17Z",pwshpy = false,lib-registry = false, fake-winreg = false}
