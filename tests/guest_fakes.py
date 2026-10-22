@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from pve_winrepair.adapters.guest_ssh import Guest
+from pve_winrepair.adapters.node import Node
 from pve_winrepair.domain.settings import SshSettings
 from pve_winrepair_guest.envelope import Outcome, build, internal_error, render
 from pve_winrepair_guest.probes import StateLog, state_verdict
@@ -54,6 +55,12 @@ TOOL_PATH = expected_guest_path(TOOL_DIR / "winrepair_guest.ps1")
 def make_guest(runner: Runner, tool_dir: Path | None = None) -> Guest:
     """The guest at :data:`GUEST_IP`, reached with :data:`SSH` through ``runner``."""
     return Guest(GUEST_IP, ssh_settings=SSH, tool_dir=tool_dir or TOOL_DIR, runner=runner)
+
+
+def make_node(runner: Runner, clock: FakeClock | None = None) -> Node:
+    """A node reaching its guests with :data:`SSH` through ``runner``; ``clock`` (default: a fresh one) waits."""
+    clock = clock or FakeClock()
+    return Node(ssh=SSH, runner=runner, clock=clock.time, sleep=clock.sleep, tool_dir=TOOL_DIR)
 
 
 def locked(*, present: bool, stage_root: str | None = None) -> LockDirsReport:
@@ -190,16 +197,22 @@ def state_log(*lines: str, present: bool = True) -> StateLog:
 
 
 class FakePve:
-    """``qm`` on a node with one VM: tracks its power state so stop/start sequences read back."""
+    """``qm`` on a node with one VM: tracks its power state so stop/start sequences read back.
 
-    def __init__(self, status: str = "running") -> None:
+    ``stuck``: a VM whose power state never changes - ``qm shutdown`` and ``qm start`` answer 0 and
+    ``qm status`` keeps reporting ``status`` - for a wait that must give up.
+    """
+
+    def __init__(self, status: str = "running", *, stuck: bool = False) -> None:
         self.status = status
+        self.stuck = stuck
         self.config = "scsi0: local-zfs:vm-1-disk-0,size=64G\ntpmstate0: local-zfs:vm-1-disk-1,size=4M\n"
 
     def __call__(self, cmd: list[str]) -> Reply:
         verb = cmd[1]
         if verb in ("shutdown", "start"):
-            self.status = "stopped" if verb == "shutdown" else "running"
+            if not self.stuck:
+                self.status = "stopped" if verb == "shutdown" else "running"
             return Reply(0)
         interfaces = [{"ip-addresses": [{"ip-address-type": "ipv4", "ip-address": LAN_IP}]}]
         answers = {

@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
 from pve_winrepair.application.guest_state import read_run_state
+from pve_winrepair.application.vm import VmStatusTimeoutError, vm_status, wait_status
 from pve_winrepair.domain.addresses import AmbiguousAddressError, lan_address
 from pve_winrepair.domain.envelope import (
     PROBE_TIMEOUT,
@@ -42,7 +43,7 @@ from pve_winrepair.domain.envelope import (
     GuestProtocolError,
     state_marker,
 )
-from pve_winrepair.domain.report import Report, RunExit, Step
+from pve_winrepair.domain.report import Report, RunExit, RunResult, Step
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -58,9 +59,12 @@ _log = logging.getLogger(__name__)
 __all__ = [
     "RepairError",
     "RepairRequest",
-    "RunResult",
     "run_repair",
 ]
+
+
+# How many ``qm status`` reads, 5 s apart, a stop or start may take (4 min).
+_STATUS_TRIES = 48
 
 
 class RepairError(RuntimeError):
@@ -88,15 +92,6 @@ class RepairRequest:
     ip: str | None = None
     stage_root: str | None = None
     tpm_storage: str | None = None
-
-
-@dataclass(frozen=True)
-class RunResult:
-    """How a run ended: its exit, its verdict (``STATE=DONE-OK``, ``STAGED``, ``ERROR``, ...), its steps."""
-
-    exit: RunExit
-    verdict: str
-    steps: tuple[Step, ...]
 
 
 class _AgentAddress(BaseModel):
@@ -151,20 +146,6 @@ def guest_ip(node: NodePort, vmid: int, network: IPv4Network | None, tries: int 
     raise RepairError(f"no LAN address from the guest agent on {vmid} after {tries} tries")
 
 
-def vm_status(node: NodePort, vmid: int) -> str:
-    """The VM's status word (running, stopped)."""
-    return node.qm("status", str(vmid), timeout=60).stdout.strip().split(" ")[-1]
-
-
-def wait_status(node: NodePort, vmid: int, want: str, tries: int = 48) -> None:
-    """Poll the VM status until it is ``want``; raise after ``tries`` reads 5 s apart."""
-    for _ in range(tries):
-        if vm_status(node, vmid) == want:
-            return
-        node.sleep(5)
-    raise RepairError(f"vm {vmid} did not reach status {want}")
-
-
 def ensure_stopped(node: NodePort, vmid: int, rep: Report) -> None:
     """Stop the guest cleanly (ACPI) unless it is stopped already."""
     if vm_status(node, vmid) == "stopped":
@@ -173,7 +154,7 @@ def ensure_stopped(node: NodePort, vmid: int, rep: Report) -> None:
     node.qm("shutdown", str(vmid), "--timeout", "240", timeout=300)
     # Never force-stop: hard-stopping a guest mid-servicing is how component stores get damaged,
     # and the store is the thing under repair.
-    wait_status(node, vmid, "stopped")
+    wait_status(node, vmid, "stopped", tries=_STATUS_TRIES)
     rep.add("shutdown", ok=True, note="clean via qm shutdown (ACPI; agent-assisted only when the guest has one)")
 
 
@@ -225,7 +206,7 @@ def ensure_running(node: NodePort, vmid: int, rep: Report, network: IPv4Network 
         proc = node.qm("start", str(vmid), timeout=300)
         if proc.returncode != 0:
             raise RepairError(f"start failed: {proc.stderr.strip()}")
-        wait_status(node, vmid, "running")
+        wait_status(node, vmid, "running", tries=_STATUS_TRIES)
     for _ in range(60):
         if node.qm("agent", str(vmid), "ping", timeout=30).returncode == 0:
             break
@@ -771,7 +752,7 @@ def _agentless_running(node: NodePort, request: RepairRequest, ip: str, rep: Rep
     if vm_status(node, request.vmid) != "running":
         if node.qm("start", str(request.vmid), timeout=300).returncode != 0:
             raise RepairError("start failed")
-        wait_status(node, request.vmid, "running")
+        wait_status(node, request.vmid, "running", tries=_STATUS_TRIES)
     wait_ssh(guest, sleep=node.sleep)
     rep.add("running", ok=True, ip=ip, note="agentless (ssh-verified)")
     return guest
@@ -839,6 +820,7 @@ def run_repair(
     ``STATE=DONE-OK`` and ``STAGED`` are OK. Any other verdict the run returns (the poll's
     ``STATE=DONE-FAIL``, ``WORKER_GONE``, ``TIMEOUT``: answers, not exceptions) is REFUSED with
     that verdict, its last step flagged when Windows Update is still held. A :class:`RepairError`
+    or a VM that never reached the status a stop or start waits for (:class:`VmStatusTimeoutError`)
     is REFUSED with verdict ``ERROR``; anything else (a driver/tool mismatch) is INTERNAL.
 
     Args:
@@ -854,7 +836,7 @@ def run_repair(
     rep = Report(vmid=request.vmid, on_step=on_step)
     try:
         verdict = repair_sequence(request, rep, node, repair=repair, guest=guest)
-    except RepairError as exc:
+    except (RepairError, VmStatusTimeoutError) as exc:
         rep.failure("error", str(exc), exc)
         return RunResult(RunExit.REFUSED, "ERROR", tuple(rep.steps))
     except Exception as exc:  # anything unexpected (a driver/tool mismatch) is an internal error

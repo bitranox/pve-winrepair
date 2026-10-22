@@ -2,11 +2,12 @@
 
 A :class:`Report` collects each step as it happens and hands it to ``on_step`` (the CLI prints it
 for the operator); the CLI also turns the steps into the ``steps`` of the JSON envelope.
-:class:`RunExit` is the exit code a run maps to.
+:class:`RunExit` is the exit code a run maps to, :class:`RunResult` how a run ended.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from enum import IntEnum
 from typing import TYPE_CHECKING
 
@@ -15,7 +16,7 @@ from pve_winrepair.domain.envelope import WU_HELD_HINT, guest_stderr
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-__all__ = ["Report", "RunExit", "Step"]
+__all__ = ["Report", "RunExit", "RunResult", "Step"]
 
 #: One step of a run: ``step`` (its name), ``ok``, and the details it measured.
 Step = dict[str, object]
@@ -27,6 +28,15 @@ class RunExit(IntEnum):
     OK = 0
     REFUSED = 1
     INTERNAL = 2
+
+
+@dataclass(frozen=True)
+class RunResult:
+    """How a run ended: its exit, its verdict (``STATE=DONE-OK``, ``VERIFIED``, ``ERROR``, ...), its steps."""
+
+    exit: RunExit
+    verdict: str
+    steps: tuple[Step, ...]
 
 
 def _ignore(_step: Step) -> None:

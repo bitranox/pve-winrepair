@@ -16,7 +16,6 @@ from guest_fakes import (
     GUEST_IP,
     LAN_IP,
     MUTATING_QM,
-    SSH,
     TOOL_DIR,
     TOOL_PATH,
     USER,
@@ -32,15 +31,15 @@ from guest_fakes import (
     lock_dirs_reply,
     locked,
     make_guest,
+    make_node,
     state_log,
     tool_on_the_guest,
 )
 
-from pve_winrepair.adapters.node import Node
 from pve_winrepair.application import repair
-from pve_winrepair.application.repair import RepairError, RepairRequest, RunResult, run_repair
+from pve_winrepair.application.repair import RepairError, RepairRequest, run_repair
 from pve_winrepair.domain.envelope import GuestProtocolError
-from pve_winrepair.domain.report import Report, RunExit, Step
+from pve_winrepair.domain.report import Report, RunExit, RunResult, Step
 from pve_winrepair.domain.settings import GuestSettings, RepairSettings
 from pve_winrepair_guest.probes import BuildInfo, Drive, DriveReport, ServicingReport, SetupReport
 from pve_winrepair_guest.upgrade import LaunchReport, LaunchWait, LockDirsReport, PrepareReport, TaskCleanup
@@ -595,10 +594,6 @@ def _request(*, ip: str | None = None, stage_only: bool = True, hours: float = 1
     return RepairRequest(vmid=1, snapshot_name="pre_kb_test", hours=hours, stage_only=stage_only, ip=ip)
 
 
-def _node(runner: FakeRunner, clock: FakeClock) -> Node:
-    return Node(ssh=SSH, runner=runner, clock=clock.time, sleep=clock.sleep, tool_dir=TOOL_DIR)
-
-
 def _first_mutation(labels: list[str]) -> int:
     return next((i for i, label in enumerate(labels) if label.split()[-1] in MUTATING_QM), len(labels))
 
@@ -619,7 +614,7 @@ def test_a_rerun_over_a_live_run_refuses_before_anything_stops_the_guest(tmp_pat
     runner, clock = _live_run_runner(pve), FakeClock()
     with pytest.raises(RepairError, match="SetupHost is running"):
         repair.repair_sequence(
-            _request(ip=ip), Report(vmid=1), _node(runner, clock), repair=_repair_settings(tmp_path), guest=GUEST
+            _request(ip=ip), Report(vmid=1), make_node(runner, clock), repair=_repair_settings(tmp_path), guest=GUEST
         )
     labels = call_labels(runner.calls)
     assert [label for label in labels if label.split()[-1] in MUTATING_QM] == []
@@ -641,7 +636,7 @@ def test_an_agentless_run_clears_the_guard_before_its_offline_snapshot(tmp_path:
     )
     rep = Report(vmid=1)
     verdict = repair.repair_sequence(
-        _request(ip=GUEST_IP), rep, _node(runner, FakeClock()), repair=_repair_settings(tmp_path), guest=GUEST
+        _request(ip=GUEST_IP), rep, make_node(runner, FakeClock()), repair=_repair_settings(tmp_path), guest=GUEST
     )
     assert verdict == "STAGED"
     labels = call_labels(runner.calls)
@@ -662,13 +657,13 @@ def _interfaces(*addresses: str) -> Reply:
 
 def test_guest_ip_takes_the_address_inside_the_subnet() -> None:
     runner = FakeRunner().on("qm", _interfaces("172.17.0.1", LAN_IP))
-    assert repair.guest_ip(_node(runner, FakeClock()), 1, GUEST.network()) == LAN_IP
+    assert repair.guest_ip(make_node(runner, FakeClock()), 1, GUEST.network()) == LAN_IP
 
 
 def test_guest_ip_without_a_subnet_refuses_several_candidates_naming_them_and_the_setting() -> None:
     runner = FakeRunner().on("qm", _interfaces("172.17.0.1", LAN_IP))
     with pytest.raises(RepairError) as caught:
-        repair.guest_ip(_node(runner, FakeClock()), 1, None)
+        repair.guest_ip(make_node(runner, FakeClock()), 1, None)
     assert str(caught.value) == (
         f"the guest agent on 1 reports several candidate LAN addresses (172.17.0.1, {LAN_IP}): "
         "set [guest] subnet to the LAN the node reaches"
@@ -678,7 +673,7 @@ def test_guest_ip_without_a_subnet_refuses_several_candidates_naming_them_and_th
 def test_guest_ip_with_no_address_in_the_subnet_retries_then_refuses() -> None:
     runner, clock = FakeRunner().on("qm", _interfaces("172.17.0.1", "198.51.100.7")), FakeClock()
     with pytest.raises(RepairError, match="no LAN address from the guest agent on 1 after 2 tries"):
-        repair.guest_ip(_node(runner, clock), 1, GUEST.network(), tries=2)
+        repair.guest_ip(make_node(runner, clock), 1, GUEST.network(), tries=2)
     assert clock.slept == [10, 10]
 
 
@@ -718,7 +713,7 @@ def _run(
     request = RepairRequest(vmid=1, snapshot_name="pre_kb_test", hours=hours, ip=ip)
     result = run_repair(
         request,
-        _node(runner, FakeClock()),
+        make_node(runner, FakeClock()),
         repair=_repair_settings(media),
         guest=GUEST,
         on_step=lambda _s: None,
@@ -745,7 +740,7 @@ def test_an_unconfigured_media_dir_is_refused_before_any_call() -> None:
     runner = FakeRunner()
     result = run_repair(
         RepairRequest(vmid=1, snapshot_name="pre_kb_test"),
-        _node(runner, FakeClock()),
+        make_node(runner, FakeClock()),
         repair=RepairSettings(media_dir=""),
         guest=GUEST,
         on_step=lambda _s: None,
@@ -814,7 +809,7 @@ def test_on_step_sees_the_hold_flagged_on_the_failed_poll_it_already_received(tm
     recorded: list[Step] = []
     result = run_repair(
         RepairRequest(vmid=1, snapshot_name="pre_kb_test"),
-        _node(runner, FakeClock()),
+        make_node(runner, FakeClock()),
         repair=_repair_settings(_media(tmp_path)),
         guest=GUEST,
         on_step=recorded.append,
@@ -841,6 +836,17 @@ def test_main_carries_the_guest_traceback_into_the_error_step(tmp_path: Path) ->
     assert result.exit is RunExit.REFUSED
     assert steps[-1]["guest_stderr"] == trace.splitlines()
     assert "WinError 1060" in str(steps[-1]["message"])
+
+
+def test_repair_refuses_a_vm_that_never_reaches_the_status(tmp_path: Path) -> None:
+    runner = _agent_runner(FakePve(status="stopped", stuck=True))
+    result, steps = _run(runner, _media(tmp_path))
+    assert (result.exit, result.verdict, steps[-1]["step"]) == (RunExit.REFUSED, "ERROR", "error")
+    assert steps[-1]["message"] == "vm 1 did not reach status running"
+    labels = call_labels(runner.calls)
+    assert labels.count("qm start") == 1
+    # The repair run's own bound: 48 reads 5 s apart after the start.
+    assert labels[labels.index("qm start") + 1 :] == ["qm status"] * 48
 
 
 def test_main_driver_tool_mismatch_is_exit_2_internal(tmp_path: Path) -> None:
