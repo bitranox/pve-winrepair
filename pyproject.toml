@@ -43,6 +43,8 @@ system-dependencies-windows-pip = []
 system-dependencies-windows-choco = []
 os = ["ubuntu-latest", "windows-latest", "macos-latest"]
 
+[tool.bmk.pipelines.pack]
+add = [{name = "pack_guest", order = 10, argv = ["uv", "run", "--script", "scripts/pack_guest.py"]}]
 [project.urls]
 Homepage = "https://github.com/bitranox/pve-winrepair"
 Repository = "https://github.com/bitranox/pve-winrepair.git"
@@ -114,7 +116,10 @@ include = [
 [tool.hatch.build.targets.sdist]
 include = [
     "/src/pve_winrepair",
+    "/src/pve_winrepair_guest",
+    "/scripts/*.py",
     "/tests/*.py",
+    "/tests/fixtures",
     "/docs",
     "/README.md",
     "/CONFIG.md",
@@ -181,12 +186,13 @@ runtime-evaluated-base-classes = ["pydantic.BaseModel"]
 typeCheckingMode = "strict"
 extraPaths = [
   "src",
+  "scripts",
 ]
 
 [tool.pytest.ini_options]
 addopts = ["--doctest-modules"]
 doctest_optionflags = ["ELLIPSIS", "NORMALIZE_WHITESPACE"]
-pythonpath = ["src"]
+pythonpath = ["src", "scripts"]
 markers = [
   "os_agnostic: test runs on every supported operating system",
   "os_windows: test exercises Windows-only behavior",

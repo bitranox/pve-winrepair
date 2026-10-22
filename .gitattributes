@@ -13,3 +13,9 @@ Makefile     text eol=lf
 *.json       text eol=lf
 *.yml        text eol=lf
 *.yaml       text eol=lf
+
+# The packed guest tool is generated and committed: a fresh pack of the guest sources must equal it.
+# The sources are pinned to LF (a CRLF checkout would pack other bytes), and the artefact is stored
+# and checked out byte for byte, never converted, because its payload sha covers exact bytes.
+src/pve_winrepair_guest/*.py                     text eol=lf
+src/pve_winrepair/adapters/guest_tool/*.ps1      -text

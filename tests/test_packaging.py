@@ -33,11 +33,15 @@ ALLOWED_TOP_LEVEL = frozenset(
         "CONFIG.md",
         ".gitignore",
         "src",
+        "scripts",
         "tests",
         "docs",
     }
 )
-REQUIRED_TOP_LEVEL = frozenset({"PKG-INFO", "pyproject.toml", "src", "tests"})
+REQUIRED_TOP_LEVEL = frozenset({"PKG-INFO", "pyproject.toml", "src", "scripts", "tests"})
+# The guest tool's sources ship in the sdist (a test run from it packs them and compares the
+# artefact), but never in the wheel: the node package carries only the packed .ps1.
+GUEST_PACKAGE = "pve_winrepair_guest"
 
 # Files and directories that exist in working trees and must never ship. Tracked ones are
 # named in the repository; the others are hidden locally through .git/info/exclude.
@@ -48,6 +52,7 @@ REQUIRED_WHEEL_DATA = (
     f"{PACKAGE}/adapters/config/defaultconfig.toml",
     f"{PACKAGE}/adapters/config/defaultconfig.d/40-layered-config.toml",
     f"{PACKAGE}/adapters/config/defaultconfig.d/90-logging.toml",
+    f"{PACKAGE}/adapters/guest_tool/winrepair_guest.ps1",
 )
 
 
@@ -57,7 +62,7 @@ def _copy_tree_with_decoys(destination: Path) -> Path:
     root.mkdir()
     for name in ("pyproject.toml", "README.md", "LICENSE", "CHANGELOG.md", "CONFIG.md", ".gitignore"):
         shutil.copy2(PROJECT_ROOT / name, root / name)
-    for name in ("src", "docs", "tests"):
+    for name in ("src", "scripts", "docs", "tests"):
         shutil.copytree(PROJECT_ROOT / name, root / name, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
     for decoy in DECOY_FILES:
         path = root / decoy
@@ -115,12 +120,12 @@ def test_the_sdist_holds_only_allowlisted_top_level_entries(sdist_members: list[
 
 
 @pytest.mark.os_agnostic
-def test_the_sdist_ships_only_the_package_under_src(sdist_members: list[str]) -> None:
+def test_the_sdist_ships_only_the_packages_under_src(sdist_members: list[str]) -> None:
     under_src = {
         member.split("/")[1] for member in sdist_members if member.startswith("src/") and member.count("/") >= 1
     }
 
-    assert under_src == {PACKAGE}
+    assert under_src == {PACKAGE, GUEST_PACKAGE}
 
 
 @pytest.mark.os_agnostic
@@ -135,3 +140,23 @@ def test_the_wheel_carries_the_package_data_the_runtime_loads(wheel_members: lis
     missing = [name for name in REQUIRED_WHEEL_DATA if name not in wheel_members]
 
     assert not missing, f"the wheel lacks package data: {missing}"
+
+
+@pytest.mark.os_agnostic
+def test_the_sdist_carries_what_a_test_run_from_it_imports(sdist_members: list[str]) -> None:
+    needed = (
+        "scripts/pack_guest.py",
+        f"src/{GUEST_PACKAGE}/winrepair_guest.py",
+        "tests/fixtures/install_wim_header_xml.bin",
+    )
+    missing = [name for name in needed if name not in sdist_members]
+
+    assert not missing, f"the sdist lacks what its tests need: {missing}"
+
+
+@pytest.mark.os_agnostic
+def test_the_wheel_carries_no_guest_sources(wheel_members: list[str]) -> None:
+    guest = [name for name in wheel_members if name.split("/", 1)[0] == GUEST_PACKAGE]
+
+    assert not guest, f"the wheel ships the guest package: {guest[:5]}"
+    assert f"{PACKAGE}/adapters/guest_tool/winrepair_guest.ps1" in wheel_members

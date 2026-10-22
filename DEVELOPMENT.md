@@ -28,6 +28,16 @@ The targets used day to day:
   reaches bmk as `BMK_COMMIT_MESSAGE` and survives punctuation, newlines and `$`); without one,
   bmk prompts.
 - `make release` -- tag the current version and create the GitHub release.
+- `make custom pack` -- pack the guest tool (`src/pve_winrepair_guest/`) with pwshpy into the
+  committed artefact `src/pve_winrepair/adapters/guest_tool/winrepair_guest.ps1`
+  (`scripts/pack_guest.py`; `--check` exits 1 when the artefact is stale and writes nothing).
+
+## The Packed Guest Tool
+
+The node package ships the guest tool only as the packed `.ps1`; the wheel carries no guest
+sources. After any edit under `src/pve_winrepair_guest/` (including one `make test` made through
+ruff's formatting), run `make custom pack` and commit the `.ps1` with the change. `make test` does
+not repack: a gate that repacks before it compares could never find a stale artefact.
 
 ## Test Markers
 
