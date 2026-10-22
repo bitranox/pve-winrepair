@@ -17,13 +17,15 @@ The gate finds only the tokens written down. A new private name goes into BOTH c
 the gitignored one in the checkout and the maintainer's tracked canonical copy kept outside this
 repository.
 
-What is scanned: every file ``git ls-files`` lists, as bytes, in every rendering (UTF-8, else
-latin-1; plus UTF-16-LE at both byte alignments whenever the bytes hold a NUL), and every listed
-path name. ``uv.lock``'s content is skipped (machine-written hashes and sizes; a size can equal a
-VM id) but its name is scanned. The packed guest tool is scanned without its base64 payload, which
-can spell a token by chance and changes on every repack; the payload is scanned DECODED, member by
-member. A finding names the file, the line and the pattern or the token's list position (``token
-words[2]``), never the matched text, so a failing log does not publish what it found.
+What is scanned: every entry ``git ls-files`` lists, as the bytes a commit stores (the index blob,
+so a symlink's target too, never the worktree), in every rendering (UTF-8, else latin-1; plus
+UTF-16-LE at both byte alignments whenever the bytes hold a NUL), and every listed path name.
+``uv.lock``'s content is skipped (machine-written hashes and sizes; a size can equal a VM id) but
+its name is scanned. A gitlink's content is another repository; only its name is scanned here. The
+packed guest tool is scanned without its base64 payload, which can spell a token by chance and
+changes on every repack; the payload is scanned DECODED, member by member. A finding names the
+file, the line and the pattern or the token's list position (``token words[2]``), never the matched
+text, so a failing log does not publish what it found. The list object prints only its counts.
 """
 
 from __future__ import annotations
@@ -37,7 +39,9 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import zipfile
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -46,7 +50,7 @@ import pack_guest
 import pytest
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Iterator, Sequence
 
 TOKENS_FILE = ".privacy-tokens.json"
 TOKENS_VARIABLE = "PVE_WINREPAIR_PRIVACY_TOKENS_FILE"
@@ -55,6 +59,7 @@ KEYS = (*TOKEN_KEYS, "paths")
 SKIP_REASON = "no private token list: site-specific check not run"
 # Machine-written hashes and sizes, no prose: a size could equal a VM id.
 CONTENT_EXCLUDED = frozenset({"uv.lock"})
+GITLINK = "160000"  # the index mode of a submodule entry: its object is a commit, not a blob
 # The character class in the last pattern keeps this file's own source from matching it.
 GENERIC = tuple(
     re.compile(pattern, re.IGNORECASE)
@@ -72,26 +77,39 @@ class PrivacyListError(ValueError):
     """The private token list is unreadable or malformed: an error, never a reason to skip."""
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, repr=False)
 class PrivateList:
     """The private tokens, each with the label a finding prints in its place."""
 
     tokens: tuple[tuple[str, str], ...]  # (label "words[2]", lower-case token) for hosts/vmids/words
     paths: tuple[tuple[str, str], ...]  # (label "paths[1]", lower-case substring)
 
+    def __repr__(self) -> str:
+        """Per-key counts only.
+
+        pytest prints a failing test's arguments (the ``private`` fixture value among them) and the
+        operands of a failing assert; the dataclass default repr would publish every token there.
+        """
+        counts = Counter(label.split("[", 1)[0] for label, _ in (*self.tokens, *self.paths))
+        return "PrivateList(" + ", ".join(f"{key}={counts[key]}" for key in KEYS) + ")"
+
 
 def _parse(path: Path) -> object:
+    # "from None" for the decode errors: a chained traceback ends in json's own frame, whose
+    # argument is the whole list text, and pytest prints that argument.
     try:
         return json.loads(path.read_bytes().decode("utf-8"))
     except OSError as exc:
         raise PrivacyListError(f"{path}: cannot read the private token list ({exc.strerror})") from exc
     except UnicodeDecodeError as exc:
-        raise PrivacyListError(f"{path}: the private token list is not UTF-8") from exc
+        raise PrivacyListError(f"{path}: the private token list is not UTF-8 (byte {exc.start})") from None
     except json.JSONDecodeError as exc:
-        raise PrivacyListError(f"{path}: not valid JSON ({exc.msg}, line {exc.lineno})") from exc
+        raise PrivacyListError(f"{path}: not valid JSON ({exc.msg}, line {exc.lineno})") from None
 
 
 def _entries(path: Path, key: str, values: object) -> tuple[tuple[str, str], ...]:
+    # pytest prints the arguments of the frame that raised; ``values`` holds the tokens.
+    __tracebackhide__ = True
     if not isinstance(values, list):
         raise PrivacyListError(f"{path}: {key} must be a list of non-empty strings")
     found: list[tuple[str, str]] = []
@@ -271,44 +289,81 @@ def _git() -> str:
     return git
 
 
-def _tracked() -> list[tuple[str, bytes]]:
-    """Every tracked regular file as (name, bytes to scan).
-
-    ``uv.lock`` comes with empty bytes (its content is excluded, its name is not); the packed tool
-    comes as its wrapper without the payload, whose base64 is never scanned as text.
-    """
+def _git_run(project: Path, *args: str, stdin: bytes = b"") -> bytes:
     # Inherited GIT_* variables (a hook's GIT_DIR, a pathspec mode) would make git answer for
     # another repository or another pathspec rule; LC_ALL=C keeps its output unlocalised.
     env = {k: v for k, v in os.environ.items() if not k.upper().startswith("GIT_")}
     env["LC_ALL"] = "C"
-    listing = subprocess.run(  # noqa: S603 - fixed argv: git, resolved by shutil.which, listing this checkout
-        [_git(), "-C", str(pack_guest.PROJECT), "ls-files", "-z"],
+    return subprocess.run(  # noqa: S603 - fixed argv: git, resolved by shutil.which, run on a given checkout
+        [_git(), "-C", str(project), *args],
+        input=stdin,
         capture_output=True,
         check=True,
         env=env,
-    ).stdout.decode("utf-8", "surrogateescape")
+    ).stdout
+
+
+def _index(project: Path) -> list[tuple[str, str, str]]:
+    """Every index entry as (mode, object id, name), in ``git ls-files`` order, unmerged stages included."""
+    listing = _git_run(project, "ls-files", "-z", "-s").decode("utf-8", "surrogateescape")
+    entries: list[tuple[str, str, str]] = []
+    for record in filter(None, listing.split("\0")):
+        meta, name = record.split("\t", 1)
+        mode, object_id, _stage = meta.split(" ")
+        entries.append((mode, object_id, name))
+    return entries
+
+
+def _blobs(project: Path, object_ids: Sequence[str]) -> dict[str, bytes]:
+    """The bytes of each blob, read from git's object store in one ``git cat-file --batch``."""
+    out = _git_run(project, "cat-file", "--batch", stdin="".join(f"{i}\n" for i in object_ids).encode("ascii"))
+    found: dict[str, bytes] = {}
+    at = 0
+    for object_id in object_ids:
+        end = out.index(b"\n", at)
+        header = out[at:end].split(b" ")
+        if len(header) != 3 or header[1] != b"blob":  # "<id> missing", or not a blob
+            raise RuntimeError(f"git cannot read the index blob {object_id}: the scan would miss it")
+        size = int(header[2])
+        found[object_id] = out[end + 1 : end + 1 + size]
+        at = end + 1 + size + 1  # cat-file ends each object with a newline
+    return found
+
+
+def _tracked(project: Path = pack_guest.PROJECT) -> list[tuple[str, bytes]]:
+    """Every index entry as (name, bytes to scan), in ``git ls-files`` order.
+
+    The bytes are what a commit stores, read from the INDEX, never the worktree: a staged file
+    deleted or restored in the worktree, a dangling symlink and a symlink's target (the blob of a
+    mode-120000 entry) are all scanned. No entry is dropped, so a position here is the position in
+    ``git ls-files``. A gitlink (mode 160000, a submodule) comes with empty bytes: its content is
+    another repository, which its own scan covers; its name is still scanned. ``uv.lock`` comes with
+    empty bytes too (its content is excluded, its name is not); the packed tool comes as its wrapper
+    without the payload, whose base64 is never scanned as text.
+    """
+    entries = _index(project)
+    readable = [i for mode, i, name in entries if mode != GITLINK and name not in CONTENT_EXCLUDED]
+    blobs = _blobs(project, list(dict.fromkeys(readable)))
     artefact = pack_guest.ARTEFACT.as_posix()
     tracked: list[tuple[str, bytes]] = []
-    for name in filter(None, listing.split("\0")):
-        path = pack_guest.PROJECT / name
-        if not path.is_file():
-            continue
-        if name in CONTENT_EXCLUDED:
+    for mode, object_id, name in entries:
+        if mode == GITLINK or name in CONTENT_EXCLUDED:
             tracked.append((name, b""))
         elif name == artefact:
-            wrapper = pack_guest.wrapper_without_payload(path.read_bytes().decode("utf-8"))
+            wrapper = pack_guest.wrapper_without_payload(blobs[object_id].decode("utf-8"))
             tracked.append((name, wrapper.encode("utf-8")))
         else:
-            tracked.append((name, path.read_bytes()))
+            tracked.append((name, blobs[object_id]))
     return tracked
 
 
 def _artefact_text() -> str:
-    return (pack_guest.PROJECT / pack_guest.ARTEFACT).read_bytes().decode("utf-8")
+    """The packed tool as the index stores it, the same bytes :func:`_tracked` scans."""
+    return _git_run(pack_guest.PROJECT, "cat-file", "blob", f":{pack_guest.ARTEFACT.as_posix()}").decode("utf-8")
 
 
-def _tree_findings(private: PrivateList | None) -> list[str]:
-    tracked = _tracked()
+def _tree_findings(private: PrivateList | None, project: Path = pack_guest.PROJECT) -> list[str]:
+    tracked = _tracked(project)
     assert tracked, "the scan listed no tracked file: it examined nothing"
     return [
         f
@@ -352,8 +407,11 @@ def _packed(members: dict[str, bytes]) -> str:
 
 @pytest.mark.os_agnostic
 def test_the_scan_examines_the_tree_and_the_payload() -> None:
-    assert len(_tracked()) >= 100
-    assert len(pack_guest.decode_payload(_artefact_text())) == 10
+    # Counted into locals: a failing assert on len(...) would print the scanned contents.
+    entries = len(_tracked())
+    members = len(pack_guest.decode_payload(_artefact_text()))
+    assert entries >= 100
+    assert members == 10
 
 
 @pytest.mark.os_agnostic
@@ -380,8 +438,11 @@ def test_the_packed_payload_carries_no_private_token(private: PrivateList) -> No
 def test_the_artefact_is_scanned_without_its_base64_payload() -> None:
     scanned = dict(_tracked())[pack_guest.ARTEFACT.as_posix()].decode("utf-8")
     # The wrapper still names the variables; their definitions (the here-string, the sha) are gone.
-    assert "$PwshPyPayload = @'" not in scanned
-    assert "$PwshPySha = '" not in scanned
+    # Booleans, not "x not in scanned": a failing assert would print the scanned text.
+    has_payload = "$PwshPyPayload = @'" in scanned
+    has_sha = "$PwshPySha = '" in scanned
+    assert not has_payload
+    assert not has_sha
     assert scanned.strip(), "the wrapper of the packed tool was not scanned"
 
 
@@ -442,6 +503,157 @@ def test_a_list_with_only_paths_loads_and_matches_no_empty_token(tmp_path: Path)
 @pytest.mark.os_agnostic
 def test_a_planted_path_name_is_found_without_printing_it(tmp_path: Path) -> None:
     assert path_findings(7, "docs/plantedword_notes.md", _planted(tmp_path)) == ["path[7]: token words[1]"]
+
+
+@pytest.mark.os_agnostic
+def test_a_second_payload_block_is_refused_not_skipped(tmp_path: Path) -> None:
+    # The wrapper scan strips EVERY payload block; a decode of only the first would let a second
+    # block escape both checks.
+    packed = _packed({"pkg/clean.py": b"x = 1\n"}) + "$PwshPyPayload = @'\nAAAA\n'@\n"
+    with pytest.raises(ValueError, match="exactly one"):
+        payload_findings(packed, _planted(tmp_path))
+
+
+# --- what a commit stores: the index, not the worktree (a scratch repository) ---------------
+
+
+@pytest.fixture
+def repo(tmp_path: Path) -> Path:
+    """A fresh repository with one clean staged file; nothing is committed (the index is the subject)."""
+    path = tmp_path / "repo"
+    path.mkdir()
+    _git_run(path, "init", "-q")
+    (path / "clean.txt").write_bytes(b"nothing private\n")
+    _git_run(path, "add", "clean.txt")
+    return path
+
+
+def _stage(repo: Path, mode: str, name: str, data: bytes) -> None:
+    """Put an index entry of ``mode`` holding ``data`` under ``name``, with no worktree file."""
+    object_id = _git_run(repo, "hash-object", "-w", "--stdin", stdin=data).decode("ascii").strip()
+    _git_run(repo, "update-index", "--add", "--cacheinfo", f"{mode},{object_id},{name}")
+
+
+@pytest.mark.os_agnostic
+def test_a_dangling_symlink_name_is_scanned(repo: Path, tmp_path: Path) -> None:
+    _stage(repo, "120000", "docs/plantedword-link", b"nowhere")
+    assert _tree_findings(_planted(tmp_path), repo) == ["path[1]: token words[1]"]
+
+
+@pytest.mark.os_agnostic
+def test_a_symlink_target_is_scanned_as_its_blob(repo: Path, tmp_path: Path) -> None:
+    _stage(repo, "120000", "link", b"/planted/dir/x")
+    assert _tree_findings(_planted(tmp_path), repo) == ["link:1: token paths[1]"]
+
+
+@pytest.mark.os_agnostic
+def test_a_staged_file_deleted_from_the_worktree_is_scanned(repo: Path, tmp_path: Path) -> None:
+    (repo / "leak.txt").write_bytes(b"host planted-host7\n")
+    _git_run(repo, "add", "leak.txt")
+    (repo / "leak.txt").unlink()
+    assert _tree_findings(_planted(tmp_path), repo) == ["leak.txt:1: token hosts[1]"]
+
+
+@pytest.mark.os_agnostic
+def test_staged_content_is_scanned_when_the_worktree_is_restored(repo: Path, tmp_path: Path) -> None:
+    (repo / "leak.txt").write_bytes(b"host planted-host7\n")
+    _git_run(repo, "add", "leak.txt")
+    (repo / "leak.txt").write_bytes(b"nothing private\n")
+    assert _tree_findings(_planted(tmp_path), repo) == ["leak.txt:1: token hosts[1]"]
+
+
+@pytest.mark.os_agnostic
+def test_a_gitlink_name_is_scanned_and_its_commit_is_not_read(repo: Path, tmp_path: Path) -> None:
+    # The object id names a commit in another repository: reading it here would fail.
+    _git_run(repo, "update-index", "--add", "--cacheinfo", f"{GITLINK},{'1' * 40},plantedword-sub")
+    assert _tree_findings(_planted(tmp_path), repo) == ["path[1]: token words[1]"]
+
+
+@pytest.mark.os_agnostic
+def test_positions_are_those_of_git_ls_files(repo: Path) -> None:
+    _stage(repo, "120000", "a-dangling-link", b"nowhere")
+    (repo / "z.txt").write_bytes(b"z\n")
+    _git_run(repo, "add", "z.txt")
+    (repo / "z.txt").unlink()
+    listed = _git_run(repo, "ls-files", "-z").decode("utf-8").split("\0")[:-1]
+    assert [name for name, _ in _tracked(repo)] == listed == ["a-dangling-link", "clean.txt", "z.txt"]
+
+
+# --- a failing privacy test prints no token -------------------------------------------------
+
+
+@pytest.mark.os_agnostic
+def test_a_private_list_prints_counts_never_tokens(tmp_path: Path) -> None:
+    planted = _planted(tmp_path)
+    assert repr(planted) == "PrivateList(hosts=1, vmids=1, words=1, paths=1)"
+    assert str(planted) == repr(planted)
+
+
+_PROBE = """
+import os
+from pathlib import Path
+
+import test_privacy_gate as gate
+from test_privacy_gate import private
+
+
+def test_probe(private):
+    assert gate._tree_findings(private, Path(os.environ["PROBE_REPO"])) == []
+"""
+_PLANTED_TOKENS = ("planted-host7", "98765", "plantedword", "/planted/dir/")
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(
+    ("tokens_json", "outcome"),
+    [
+        (
+            '{"hosts": ["planted-host7"], "vmids": ["98765"], "words": ["plantedword"], "paths": ["/planted/dir/"]}',
+            "1 failed",
+        ),
+        ('{"hosts": ["planted-host7"], "vmids": ["98765"], "words": ["plantedword", ""]}', "1 error"),
+        ('{"hosts": ["planted-host7"], "vmids": ["98765"], "words": ["plantedword"]', "1 error"),
+    ],
+    ids=["a-finding", "a-malformed-list", "invalid-json"],
+)
+def test_a_failing_run_prints_no_token(repo: Path, tmp_path: Path, tokens_json: str, outcome: str) -> None:
+    """Run a failing privacy test in a child pytest, the strictest tracebacks on, and read its output."""
+    (repo / "leak.txt").write_bytes(" ".join(_PLANTED_TOKENS).encode("utf-8") + b"x\n")
+    _git_run(repo, "add", "leak.txt")
+    (tmp_path / "tokens.json").write_text(tokens_json, encoding="utf-8")
+    (tmp_path / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
+    (tmp_path / "test_probe.py").write_text(_PROBE, encoding="utf-8")
+    here = Path(__file__).resolve().parent
+    env = {k: v for k, v in os.environ.items() if not k.startswith("COV_CORE_")}
+    env |= {
+        "PYTHONPATH": os.pathsep.join(
+            str(p) for p in (here, pack_guest.PROJECT / "scripts", pack_guest.PROJECT / "src")
+        ),
+        TOKENS_VARIABLE: str(tmp_path / "tokens.json"),
+        "PROBE_REPO": str(repo),
+    }
+    run = subprocess.run(  # noqa: S603 - fixed argv: this interpreter running pytest on a generated probe
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-c",
+            str(tmp_path / "pytest.ini"),
+            "-p",
+            "no:cacheprovider",
+            "-vv",
+            "--tb=long",
+            str(tmp_path / "test_probe.py"),
+        ],
+        capture_output=True,
+        env=env,
+        cwd=tmp_path,
+        check=False,
+    )
+    output = (run.stdout + run.stderr).decode("utf-8", "replace").lower()
+    assert outcome in output, "the probe did not run to the expected outcome"
+    leaked = [n for n, token in enumerate(_PLANTED_TOKENS, start=1) if token in output]
+    assert leaked == [], "planted token number(s) printed by the failing run"
 
 
 # --- known negatives ------------------------------------------------------------------------

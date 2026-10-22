@@ -104,13 +104,20 @@ def decode_payload(text: str) -> dict[str, bytes]:
         Each archive member name mapped to its bytes.
 
     Raises:
-        ValueError: There is no payload or sha line, the base64 or zip is malformed, or the sha256 of
-            the payload does not match ``$PwshPySha``.
+        ValueError: There is not exactly one payload and one sha line, the base64 or zip is
+            malformed, or the sha256 of the payload does not match ``$PwshPySha``.
     """
-    blob = _PAYLOAD.search(text)
-    sha = _SHA.search(text)
-    if blob is None or sha is None:
+    # Exactly one of each: wrapper_without_payload strips EVERY block, so a second block decoded by
+    # nobody would escape both the freshness check and the privacy scan of the decoded members.
+    blobs = list(_PAYLOAD.finditer(text))
+    shas = list(_SHA.finditer(text))
+    if not blobs or not shas:
         raise ValueError("no pwshpy payload or $PwshPySha line found")
+    if len(blobs) != 1 or len(shas) != 1:
+        raise ValueError(
+            f"expected exactly one pwshpy payload and one $PwshPySha line, found {len(blobs)} and {len(shas)}"
+        )
+    blob, sha = blobs[0], shas[0]
     try:
         raw = base64.b64decode("".join(blob.group(1).split()), validate=True)
     except binascii.Error as exc:

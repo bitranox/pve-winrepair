@@ -208,6 +208,21 @@ def test_decode_payload_refuses_a_wrong_sha() -> None:
 
 
 @pytest.mark.os_agnostic
+@pytest.mark.parametrize("extra", ["$PwshPyPayload = @'\nAAAA\n'@\n", "$PwshPySha = '" + "0" * 64 + "'\n"])
+def test_decode_payload_refuses_a_second_payload_or_sha_line(extra: str) -> None:
+    with pytest.raises(ValueError, match="exactly one"):
+        pack_guest.decode_payload(_committed() + extra)
+
+
+@pytest.mark.os_agnostic
+def test_same_pack_sees_an_appended_second_payload() -> None:
+    # No newline after the block: both wrappers are then equal, so only the decode can tell them apart.
+    second = _committed() + "$PwshPyPayload = @'\nAAAA\n'@"
+    assert pack_guest.wrapper_without_payload(second) == pack_guest.wrapper_without_payload(_committed())
+    assert not pack_guest.same_pack(_committed(), second)
+
+
+@pytest.mark.os_agnostic
 def test_decode_payload_refuses_text_without_a_payload() -> None:
     with pytest.raises(ValueError, match="payload"):
         pack_guest.decode_payload("Write-Output 'hello'\n")
