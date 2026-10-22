@@ -30,11 +30,14 @@ repository; only its name is scanned here. The packed guest tool is scanned with
 payload, which can spell a token by chance and changes on every repack; the payload is scanned
 DECODED, member by member (the index copy by its own tests, a worktree copy with the tree).
 
-A finding names the file, the version (``leak.txt (worktree):3: ...``), the line and the pattern or
-the token's list position (``token words[2]``), never the matched text, so a failing log does not
-publish what it found; a path finding names the path's index (``path[7]``): the tracked entries in
-``git ls-files`` order first, then the untracked ones in ``git ls-files -o`` order; a modified
-file's worktree copy keeps its tracked entry's index. The list object prints only its counts.
+A finding never prints the matched text, nor a file or member NAME (a name can hold the token its
+content also holds): it names the path's index, the version, the line and the pattern or the
+token's list position (``path[7] (worktree):3: token words[2]``; a hit in the name itself is
+``path[7]: token words[2]``). ``path[i]`` counts the tracked entries in ``git ls-files -s`` order
+first, then the untracked ones in ``git ls-files -o --exclude-standard`` order; a modified file's
+worktree copy keeps its tracked entry's index. A payload member is ``member[j]``, its 0-based
+position in the archive. A failing tree or payload test says how to print a name locally
+(:func:`lookup_hint`). The list object prints only its counts.
 pytest's long tracebacks print every shown frame's arguments, and ``-l`` its locals: every helper
 holding scanned text or list content hides its frame (``__tracebackhide__``), and a refused payload
 is re-raised as a message-only :class:`PayloadError` with its chain dropped.
@@ -253,7 +256,8 @@ def findings(name: str, text: str, private: PrivateList | None) -> list[str]:
     """The findings in one text, deduplicated, never quoting what matched.
 
     Args:
-        name: The label printed before each finding (a file name).
+        name: The label printed before each finding (``path[3] (index)``, ``member[2]``): never a
+            file name, which can hold a token.
         text: The text to scan.
         private: The private tokens, or None for the generic patterns alone.
 
@@ -268,7 +272,7 @@ def file_findings(name: str, data: bytes, private: PrivateList | None) -> list[s
     """The findings in every rendering of a file's bytes, deduplicated.
 
     Args:
-        name: The file's name, printed before each finding.
+        name: The label printed before each finding (see :func:`findings`).
         data: The file's bytes.
         private: The private tokens, or None for the generic patterns alone.
 
@@ -291,25 +295,35 @@ def path_findings(index: int, name: str, private: PrivateList | None) -> list[st
         ``path[<index>]: pattern <regex>`` and ``path[<index>]: token <key>[<n>]`` lines.
     """
     __tracebackhide__ = True
-    return list(dict.fromkeys(f"path[{index}]: {what}" for _, what in sorted(_hits(name, private))))
+    return _name_findings(f"path[{index}]", name, private)
+
+
+def _name_findings(label: str, name: str, private: PrivateList | None) -> list[str]:
+    __tracebackhide__ = True  # ``name`` is the scanned name
+    return list(dict.fromkeys(f"{label}: {what}" for _, what in sorted(_hits(name, private))))
 
 
 def payload_findings(text: str, private: PrivateList | None) -> list[str]:
-    """The findings in each member of a packed script's decoded payload.
+    """The findings in each member name and member content of a packed script's decoded payload.
 
     Args:
         text: The packed script.
         private: The private tokens, or None for the generic patterns alone.
 
     Returns:
-        The :func:`file_findings` of every member, labelled by the member name.
+        ``member[<j>]: ...`` for a hit in a member's name and ``member[<j>]:<line>: ...`` for one in
+        its content (:func:`file_findings`), j being the member's 0-based position in the archive:
+        the name is never printed.
 
     Raises:
         PayloadError: The payload is refused (see :func:`pack_guest.decode_payload`).
     """
     __tracebackhide__ = True
     members = decoded_payload(text)
-    return [f for name, data in members.items() for f in file_findings(name, data, private)]
+    found: list[str] = []
+    for j, (name, data) in enumerate(members.items()):
+        found += [*_name_findings(f"member[{j}]", name, private), *file_findings(f"member[{j}]", data, private)]
+    return found
 
 
 def decoded_payload(text: str) -> dict[str, bytes]:
@@ -479,14 +493,14 @@ def _artefact_text() -> str:
     return _git_run(pack_guest.PROJECT, "cat-file", "blob", f":{pack_guest.ARTEFACT.as_posix()}").decode("utf-8")
 
 
-def _worktree_findings(name: str, data: bytes, private: PrivateList | None) -> list[str]:
-    """The findings in a worktree copy, each labelled ``<name> (worktree)``.
+def _worktree_findings(index: int, name: str, data: bytes, private: PrivateList | None) -> list[str]:
+    """The findings in the worktree copy of path ``index``, each labelled ``path[<index>] (worktree)``.
 
     The packed tool is scanned as its wrapper plus its DECODED payload (a repack not yet staged is
     what ``git add -A`` commits); a refused payload raises :class:`PayloadError`, never a skip.
     """
     __tracebackhide__ = True
-    label = f"{name} (worktree)"
+    label = f"path[{index}] (worktree)"
     if name != pack_guest.ARTEFACT.as_posix():
         return file_findings(label, data, private)
     text = data.decode("utf-8")
@@ -495,23 +509,43 @@ def _worktree_findings(name: str, data: bytes, private: PrivateList | None) -> l
 
 
 def _tree_findings(private: PrivateList | None, project: Path = pack_guest.PROJECT) -> list[str]:
-    """Path findings by position; content findings tagged with the version that hit.
+    """Path and content findings by position, content tagged with the version that hit.
 
-    An index entry's content is labelled ``<name> (index)``; the worktree copy of a modified tracked
-    file (:func:`_modified`) is scanned too, at the same position, labelled ``<name> (worktree)``,
-    as is every untracked path.
+    An index entry's content is labelled ``path[<i>] (index)``; the worktree copy of a modified
+    tracked file (:func:`_modified`) is scanned too, labelled ``path[<i>] (worktree)`` with its
+    entry's position, as is every untracked path. No label carries the name: a name can hold the
+    token its content holds (:func:`lookup_hint` says how to print one locally).
     """
     __tracebackhide__ = True
     staged, untracked, modified = _staged(project), _untracked(project), _modified(project)
     assert staged or untracked, "the scan listed no tracked file: it examined nothing"
     found: list[str] = []
     for i, (name, data) in enumerate(staged):
-        found += [*path_findings(i, name, private), *file_findings(f"{name} (index)", data, private)]
+        found += [*path_findings(i, name, private), *file_findings(f"path[{i}] (index)", data, private)]
         if name in modified:
-            found += _worktree_findings(name, modified.pop(name), private)
+            found += _worktree_findings(i, name, modified.pop(name), private)
     for i, (name, data) in enumerate(untracked, start=len(staged)):
-        found += [*path_findings(i, name, private), *_worktree_findings(name, data, private)]
+        found += [*path_findings(i, name, private), *_worktree_findings(i, name, data, private)]
     return found
+
+
+def lookup_hint(project: Path = pack_guest.PROJECT) -> str:
+    """How to print a finding's path or member name locally; a failing log never names it.
+
+    Args:
+        project: The checkout the positions refer to.
+
+    Returns:
+        The command for ``path[i]`` (tracked entries first, then untracked) and ``member[j]``.
+    """
+    tracked = len(_index(project))
+    return (
+        f"path[i] is line i+1 of `git ls-files -s` when i < {tracked}, else line i-{tracked}+1 of "
+        "`git ls-files -o --exclude-standard`; print it locally, e.g. `git ls-files -s | sed -n '<i+1>p'`. "
+        "member[j] is entry j (0-based) of the packed tool's payload: "
+        "`.venv/bin/python -c \"import sys; sys.path[:0] = ['scripts']; import pack_guest as p; "
+        "print(list(p.decode_payload((p.PROJECT / p.ARTEFACT).read_text(encoding='utf-8')))[<j>])\"`"
+    )
 
 
 @pytest.fixture
@@ -558,25 +592,27 @@ def test_the_scan_examines_the_tree_and_the_payload() -> None:
 
 @pytest.mark.os_agnostic
 def test_no_tracked_file_or_path_matches_a_generic_pattern() -> None:
-    assert _tree_findings(None) == []
+    found = _tree_findings(None)
+    assert found == [], lookup_hint()
 
 
 @pytest.mark.os_agnostic
 def test_no_tracked_file_or_path_carries_a_private_token(private: PrivateList) -> None:
-    assert _tree_findings(private) == []
+    found = _tree_findings(private)
+    assert found == [], lookup_hint()
 
 
 @pytest.mark.os_agnostic
 def test_the_packed_payload_matches_no_generic_pattern() -> None:
     # Into a local: a failing assert over the call would print its argument, the artefact text.
     found = payload_findings(_artefact_text(), None)
-    assert found == []
+    assert found == [], lookup_hint()
 
 
 @pytest.mark.os_agnostic
 def test_the_packed_payload_carries_no_private_token(private: PrivateList) -> None:
     found = payload_findings(_artefact_text(), private)
-    assert found == []
+    assert found == [], lookup_hint()
 
 
 def _scanned_artefact_shape() -> tuple[bool, bool, bool]:
@@ -637,8 +673,14 @@ def test_a_planted_token_in_undecodable_bytes_is_found_as_latin1(tmp_path: Path)
 @pytest.mark.os_agnostic
 def test_a_planted_token_in_a_decoded_payload_member_is_found(tmp_path: Path) -> None:
     packed = _packed({"pkg/clean.py": b"x = 1\n", "pkg/leak.py": b"# one\nHOST = 'planted-host7'\n"})
-    assert payload_findings(packed, _planted(tmp_path)) == ["pkg/leak.py:2: token hosts[1]"]
+    assert payload_findings(packed, _planted(tmp_path)) == ["member[1]:2: token hosts[1]"]
     assert payload_findings(packed, None) == []
+
+
+@pytest.mark.os_agnostic
+def test_a_planted_payload_member_name_is_found_without_printing_it(tmp_path: Path) -> None:
+    packed = _packed({"pkg/clean.py": b"x = 1\n", "pkg/plantedword.py": b"x = 2\n"})
+    assert payload_findings(packed, _planted(tmp_path)) == ["member[1]: token words[1]"]
 
 
 @pytest.mark.os_agnostic
@@ -696,7 +738,7 @@ def test_a_dangling_symlink_name_is_scanned(repo: Path, tmp_path: Path) -> None:
 @pytest.mark.os_agnostic
 def test_a_symlink_target_is_scanned_as_its_blob(repo: Path, tmp_path: Path) -> None:
     _stage(repo, "120000", "link", b"/planted/dir/x")
-    assert _tree_findings(_planted(tmp_path), repo) == ["link (index):1: token paths[1]"]
+    assert _tree_findings(_planted(tmp_path), repo) == ["path[1] (index):1: token paths[1]"]
 
 
 @pytest.mark.os_agnostic
@@ -704,7 +746,7 @@ def test_a_staged_file_deleted_from_the_worktree_is_scanned(repo: Path, tmp_path
     (repo / "leak.txt").write_bytes(b"host planted-host7\n")
     _git_run(repo, "add", "leak.txt")
     (repo / "leak.txt").unlink()
-    assert _tree_findings(_planted(tmp_path), repo) == ["leak.txt (index):1: token hosts[1]"]
+    assert _tree_findings(_planted(tmp_path), repo) == ["path[1] (index):1: token hosts[1]"]
 
 
 @pytest.mark.os_agnostic
@@ -712,7 +754,7 @@ def test_staged_content_is_scanned_when_the_worktree_is_restored(repo: Path, tmp
     (repo / "leak.txt").write_bytes(b"host planted-host7\n")
     _git_run(repo, "add", "leak.txt")
     (repo / "leak.txt").write_bytes(b"nothing private\n")
-    assert _tree_findings(_planted(tmp_path), repo) == ["leak.txt (index):1: token hosts[1]"]
+    assert _tree_findings(_planted(tmp_path), repo) == ["path[1] (index):1: token hosts[1]"]
 
 
 @pytest.mark.os_agnostic
@@ -738,7 +780,7 @@ def test_positions_are_those_of_git_ls_files(repo: Path) -> None:
 @pytest.mark.os_agnostic
 def test_an_untracked_file_is_scanned(repo: Path, tmp_path: Path) -> None:
     (repo / "notes.txt").write_bytes(b"host planted-host7\n")
-    assert _tree_findings(_planted(tmp_path), repo) == ["notes.txt (worktree):1: token hosts[1]"]
+    assert _tree_findings(_planted(tmp_path), repo) == ["path[1] (worktree):1: token hosts[1]"]
 
 
 @pytest.mark.os_agnostic
@@ -761,7 +803,7 @@ def test_untracked_paths_are_indexed_after_the_tracked_ones(repo: Path, tmp_path
 def test_an_untracked_symlink_is_scanned_as_its_target(repo: Path, tmp_path: Path) -> None:
     # git stores a symlink as its target text, which is what `git add -A` would commit.
     (repo / "link").symlink_to("/planted/dir/x")
-    assert _tree_findings(_planted(tmp_path), repo) == ["link (worktree):1: token paths[1]"]
+    assert _tree_findings(_planted(tmp_path), repo) == ["path[1] (worktree):1: token paths[1]"]
 
 
 # --- what `git add -A` commits of a tracked file: its worktree copy, staged or not ----------
@@ -770,20 +812,21 @@ def test_an_untracked_symlink_is_scanned_as_its_target(repo: Path, tmp_path: Pat
 @pytest.mark.os_agnostic
 def test_an_unstaged_worktree_edit_of_a_tracked_file_is_scanned(repo: Path, tmp_path: Path) -> None:
     (repo / "clean.txt").write_bytes(b"nothing private\nhost planted-host7\n")
-    assert _tree_findings(_planted(tmp_path), repo) == ["clean.txt (worktree):2: token hosts[1]"]
+    assert _tree_findings(_planted(tmp_path), repo) == ["path[0] (worktree):2: token hosts[1]"]
     (repo / "clean.txt").write_bytes(b"nothing private\n")
     assert _tree_findings(_planted(tmp_path), repo) == []
 
 
 @pytest.mark.os_agnostic
 def test_a_worktree_copy_keeps_its_entry_position(repo: Path, tmp_path: Path) -> None:
-    # clean.txt is path[0], b.txt path[1]; the untracked file stays path[2] beside the modified copy.
+    # git ls-files sorts: b.txt is path[0], clean.txt path[1]; the modified copy of clean.txt is
+    # labelled path[1] too, and the untracked file stays path[2] beside it.
     (repo / "b.txt").write_bytes(b"b\n")
     _git_run(repo, "add", "b.txt")
     (repo / "clean.txt").write_bytes(b"host planted-host7\n")
     (repo / "c-plantedword.txt").write_bytes(b"c\n")
     found = _tree_findings(_planted(tmp_path), repo)
-    assert found == ["clean.txt (worktree):1: token hosts[1]", "path[2]: token words[1]"]
+    assert found == ["path[1] (worktree):1: token hosts[1]", "path[2]: token words[1]"]
 
 
 @pytest.mark.os_agnostic
@@ -794,7 +837,7 @@ def test_an_unstaged_repack_is_scanned_with_its_payload_decoded(repo: Path, tmp_
     _git_run(repo, "add", pack_guest.ARTEFACT.as_posix())
     artefact.write_bytes(_packed({"pkg/leak.py": b"# one\nHOST = 'planted-host7'\n"}).encode("utf-8"))
     found = _tree_findings(_planted(tmp_path), repo)
-    assert found == [f"{pack_guest.ARTEFACT.as_posix()} (worktree): pkg/leak.py:2: token hosts[1]"]
+    assert found == ["path[1] (worktree): member[0]:2: token hosts[1]"]
 
 
 # --- a failing privacy test prints no token -------------------------------------------------
@@ -845,6 +888,10 @@ _LEAK = " ".join(_PLANTED_TOKENS)
 # A refused block at the END: saferepr keeps a long argument's head and tail, so the tail prints.
 _SECOND_BLOCK = _packed({"pkg/clean.py": b"x = 1\n"}) + f"$PwshPyPayload = @'\n{_LEAK}\n'@\n"
 # One block and one sha line, but "-" is not base64: the older "not base64" refusal.
+# A name holding every planted token (the content holds them too): a content finding labelled by
+# the name would print it, the path index hides it.
+_LEAK_NAME = "plantedword/planted/dir/planted-host7-98765.txt"
+_NAMED_MEMBER = _packed({"pkg/" + _LEAK_NAME: _LEAK.encode("utf-8") + b"\n"})
 _NOT_BASE64 = f"$PwshPySha = '{'0' * 64}'\n$PwshPyPayload = @'\n{_LEAK}\n'@\nInvoke-It\n"
 
 
@@ -854,6 +901,7 @@ class _LeakCase:
     tokens_json: str  # the list the child reads
     text: str  # the packed script the payload probes read
     outcome: str  # pytest's summary for the run
+    name: str = "leak.txt"  # the staged file the tree probe finds
 
 
 _LEAK_CASES = {
@@ -868,13 +916,16 @@ _LEAK_CASES = {
     "a-second-payload-block-decoded-directly": _LeakCase("test_packer", _PLANTED_JSON, _SECOND_BLOCK, "1 failed"),
     "a-payload-not-base64": _LeakCase("test_payload", _PLANTED_JSON, _NOT_BASE64, "1 failed"),
     "a-payload-not-base64-decoded-directly": _LeakCase("test_packer", _PLANTED_JSON, _NOT_BASE64, "1 failed"),
+    "a-token-named-file-whose-content-hits": _LeakCase("test_tree", _PLANTED_JSON, "", "1 failed", _LEAK_NAME),
+    "a-token-named-member-whose-content-hits": _LeakCase("test_payload", _PLANTED_JSON, _NAMED_MEMBER, "1 failed"),
 }
 
 
 def _run_probe(repo: Path, tmp_path: Path, case: _LeakCase, options: Sequence[str]) -> str:
     """Run one probe test in a child pytest and return its whole output, lower-cased."""
-    (repo / "leak.txt").write_bytes(_LEAK.encode("utf-8") + b"x\n")
-    _git_run(repo, "add", "leak.txt")
+    (repo / case.name).parent.mkdir(parents=True, exist_ok=True)
+    (repo / case.name).write_bytes(_LEAK.encode("utf-8") + b"x\n")
+    _git_run(repo, "add", case.name)
     (tmp_path / "tokens.json").write_text(case.tokens_json, encoding="utf-8")
     (tmp_path / "packed.ps1").write_bytes(case.text.encode("utf-8"))
     (tmp_path / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
