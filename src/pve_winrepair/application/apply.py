@@ -20,6 +20,10 @@ reported as the informational ``winrepair_lock`` step and never repaired; a chan
 stop the restore of Windows Update. The profile copy is deleted at the end on every path
 (``remove_profile_copy``).
 
+The build it verifies is the one the repair run's prepare step measured from the staged image and
+recorded in the VM's receipt (:class:`ReceiptStore`). The receipt is read first, before any node or
+guest call: without one there is nothing to verify against, and the run is refused untouched.
+
 Every refusal leaves Windows Update held (the repair run held it, and only this use case's last
 step lifts it); the ``error`` step says so with ``wu_held: true``.
 
@@ -41,13 +45,15 @@ from pve_winrepair.domain.envelope import (
     GuestCallError,
     GuestProtocolError,
 )
+from pve_winrepair.domain.receipt import ReceiptError
 from pve_winrepair.domain.report import Report, RunExit, RunResult, Step
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from pve_winrepair.application.ports import GuestPort, NodePort
+    from pve_winrepair.application.ports import GuestPort, NodePort, ReceiptStore
     from pve_winrepair.domain.envelope import Fields, RunState
+    from pve_winrepair.domain.receipt import RepairReceipt
 
 __all__ = [
     "ApplyError",
@@ -57,9 +63,6 @@ __all__ = [
 
 # How many ``qm status`` reads, 5 s apart, the apply reboot's stop or start may take (5 min).
 _STATUS_TRIES = 60
-
-TARGET_BUILD = "26200"
-TARGET_UBR = 8973
 
 
 class ApplyError(RuntimeError):
@@ -321,26 +324,44 @@ def _reboot_into_newos(node: NodePort, request: ApplyRequest, guest: GuestPort, 
     rep.add("guest_back", ok=True)
 
 
-def _verify_build(after: tuple[str, int], rep: Report) -> None:
-    """Refuse a build short of the target (verdict REVERTED_OR_UNCHANGED)."""
-    if after[1] != TARGET_UBR or after[0] != TARGET_BUILD:
+def read_receipt(receipts: ReceiptStore, vmid: int, rep: Report) -> RepairReceipt:
+    """The build the VM's repair run measured; refused when there is no usable receipt."""
+    try:
+        receipt = receipts.read(vmid)
+    except ReceiptError as exc:
+        raise ApplyError(str(exc)) from exc
+    if receipt is None:
+        raise ApplyError(
+            f"no repair receipt for VM {vmid} at {receipts.path(vmid)} - run `pve-winrepair repair` for this VM "
+            f"first: apply verifies the build its prepare step measured"
+        )
+    rep.add("receipt", ok=True, path=str(receipts.path(vmid)), want=receipt.expected_build())
+    return receipt
+
+
+def _verify_build(after: tuple[str, int], receipt: RepairReceipt, rep: Report) -> None:
+    """Refuse a build other than the one the receipt recorded (verdict REVERTED_OR_UNCHANGED)."""
+    if after != (str(receipt.image_build), receipt.image_spbuild):
         # A revert carrying a successful down-level means the APPLY was cut off.
         rep.add(
             "verify_build",
             ok=False,
             got=f"{after[0]}.{after[1]}",
-            want=f"{TARGET_BUILD}.{TARGET_UBR}",
+            want=receipt.expected_build(),
             note="did not reach the target - check Panther for Setup360Result before re-diagnosing the upgrade",
         )
         raise ApplyError(
-            f"build is {after[0]}.{after[1]}, wanted {TARGET_BUILD}.{TARGET_UBR}",
+            f"build is {after[0]}.{after[1]}, wanted {receipt.expected_build()}",
             verdict="REVERTED_OR_UNCHANGED",
         )
     rep.add("verify_build", ok=True, build=f"{after[0]}.{after[1]}")
 
 
-def apply_sequence(request: ApplyRequest, node: NodePort, rep: Report) -> str:
-    """The whole sequence; returns VERIFIED or raises :class:`ApplyError` naming its verdict."""
+def apply_sequence(request: ApplyRequest, node: NodePort, rep: Report, *, receipt: RepairReceipt) -> str:
+    """The whole sequence; returns VERIFIED or raises :class:`ApplyError` naming its verdict.
+
+    ``receipt`` holds the build the guest must reach.
+    """
     guest = node.guest(request.ip)
     push_tool(guest, rep)
     before = read_build(guest)
@@ -354,26 +375,28 @@ def apply_sequence(request: ApplyRequest, node: NodePort, rep: Report) -> str:
 
     staged = stage_tool(guest, rep)
     try:
-        _verify_and_restore(staged, rep)
+        _verify_and_restore(staged, receipt, rep)
     finally:
         remove_profile_copy(staged, rep)
     return "VERIFIED"
 
 
-def _verify_and_restore(staged: GuestPort, rep: Report) -> None:
+def _verify_and_restore(staged: GuestPort, receipt: RepairReceipt, rep: Report) -> None:
     """After the apply reboot, from the verified profile copy: the lock report, the build, then restore-wu."""
     report_tool_dir_lock(staged, rep)
     after = read_build(staged)
     if after is None:
         raise ApplyError("guest answered ssh but its build could not be read")
     rep.add("build_after", ok=True, build=f"{after[0]}.{after[1]}")
-    _verify_build(after, rep)
+    _verify_build(after, receipt, rep)
 
     # Lift the WU hold LAST: only a verified build is worth patching again.
     restore_windows_update(staged, rep)
 
 
-def run_apply(request: ApplyRequest, node: NodePort, *, on_step: Callable[[Step], None]) -> RunResult:
+def run_apply(
+    request: ApplyRequest, node: NodePort, *, receipts: ReceiptStore, on_step: Callable[[Step], None]
+) -> RunResult:
     """Apply and verify, and map how it ended to an exit and a verdict.
 
     VERIFIED is OK. An :class:`ApplyError` is REFUSED with the error's own verdict, a VM that never
@@ -383,6 +406,8 @@ def run_apply(request: ApplyRequest, node: NodePort, *, on_step: Callable[[Step]
     Args:
         request: The guest and how long its apply phase may take.
         node: The PVE node the guest runs on.
+        receipts: Where the repair run recorded the build its prepare step measured; read first,
+            and a missing or unusable receipt is REFUSED (verdict ``ERROR``) before any call.
         on_step: Called with each step as it is recorded (see :class:`Report`).
 
     Returns:
@@ -392,7 +417,8 @@ def run_apply(request: ApplyRequest, node: NodePort, *, on_step: Callable[[Step]
     # restore, the last step of a successful run, lifts it.
     rep = Report(request.vmid, on_step=on_step, held_at_start=True)
     try:
-        verdict = apply_sequence(request, node, rep)
+        receipt = read_receipt(receipts, request.vmid, rep)
+        verdict = apply_sequence(request, node, rep, receipt=receipt)
     except ApplyError as exc:
         rep.failure("error", str(exc), exc)
         return RunResult(RunExit.REFUSED, exc.verdict, tuple(rep.steps))

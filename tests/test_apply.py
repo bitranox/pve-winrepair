@@ -6,6 +6,8 @@ The answers are real guest envelopes over the guest tool's own data models.
 from __future__ import annotations
 
 import ntpath
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING
 
 import pytest
 from guest_fakes import (
@@ -31,13 +33,18 @@ from guest_fakes import (
     tool_on_the_guest,
 )
 
+from pve_winrepair.adapters.receipts import FileReceiptStore
 from pve_winrepair.application import apply
 from pve_winrepair.application.apply import ApplyError, ApplyRequest, run_apply
-from pve_winrepair.domain.envelope import GuestProtocolError
-from pve_winrepair.domain.report import Report, RunExit
+from pve_winrepair.domain.envelope import WU_HELD_HINT, GuestProtocolError
+from pve_winrepair.domain.receipt import RepairReceipt
+from pve_winrepair.domain.report import Report, RunExit, Step
 from pve_winrepair_guest.probes import BuildInfo, SetupReport, StagedOs
 from pve_winrepair_guest.upgrade import LockDirsReport
 from pve_winrepair_guest.wu import RestoreReport, SearchProbe, ServiceRow, StartWrite
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 NEWOS = r"C:\$WINDOWS.~BT\NewOS\Windows\System32\winload.efi"
 
@@ -215,6 +222,18 @@ DONE_FAIL = answer("state", state_log("launching: setup.exe", "STATE=DONE-FAIL s
 NO_MARKER = answer("state", state_log("=== start", "launching: setup.exe"))
 NO_LOG = answer("state", state_log(present=False))
 REQUEST = ApplyRequest(vmid=1, ip=GUEST_IP)
+# What the repair run's prepare step measured for VM 1: the build the apply must reach.
+RECEIPT = RepairReceipt(
+    vmid=1, image_build=26200, image_spbuild=8973, written_at=datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
+)
+
+
+@pytest.fixture
+def receipts(tmp_path: Path) -> FileReceiptStore:
+    """A state directory holding :data:`RECEIPT`, the receipt a repair of VM 1 left behind."""
+    store = FileReceiptStore(tmp_path / "state")
+    store.write(RECEIPT)
+    return store
 
 
 def _apply_runner(pve: FakePve, alive: Reply, state: Reply) -> FakeRunner:
@@ -263,7 +282,7 @@ def test_apply_refuses_before_anything_stops_a_guest_whose_run_did_not_finish_ok
     rep = Report(vmid=1)
     refusal: ApplyError | None = None
     try:
-        apply.apply_sequence(REQUEST, make_node(runner), rep)
+        apply.apply_sequence(REQUEST, make_node(runner), rep, receipt=RECEIPT)
     except ApplyError as exc:
         refusal = exc
     labels = call_labels(runner.calls)
@@ -278,7 +297,7 @@ def test_apply_reads_a_finished_run_before_the_apply_reboot() -> None:
     pve = FakePve()
     runner = _apply_runner(pve, GONE, DONE_OK)
     rep = Report(vmid=1)
-    assert apply.apply_sequence(REQUEST, make_node(runner), rep) == "VERIFIED"
+    assert apply.apply_sequence(REQUEST, make_node(runner), rep, receipt=RECEIPT) == "VERIFIED"
     labels = call_labels(runner.calls)
     assert "guest setup-alive" in labels
     assert "guest state" in labels
@@ -294,31 +313,31 @@ def test_apply_reads_a_finished_run_before_the_apply_reboot() -> None:
     }
 
 
-def test_run_result_names_a_live_run_and_is_refused() -> None:
+def test_run_result_names_a_live_run_and_is_refused(receipts: FileReceiptStore) -> None:
     runner = _apply_runner(FakePve(), ALIVE, NO_MARKER)
-    result = run_apply(REQUEST, make_node(runner), on_step=lambda _s: None)
+    result = run_apply(REQUEST, make_node(runner), receipts=receipts, on_step=lambda _s: None)
     assert (result.exit, result.verdict) == (RunExit.REFUSED, "RUN_LIVE")
     assert [s["step"] for s in result.steps][-2:] == ["run_finished", "error"]
     assert result.steps[-2]["ok"] is False
 
 
-def test_run_result_names_a_failed_run() -> None:
+def test_run_result_names_a_failed_run(receipts: FileReceiptStore) -> None:
     runner = _apply_runner(FakePve(), GONE, DONE_FAIL)
-    result = run_apply(REQUEST, make_node(runner), on_step=lambda _s: None)
+    result = run_apply(REQUEST, make_node(runner), receipts=receipts, on_step=lambda _s: None)
     assert (result.exit, result.verdict) == (RunExit.REFUSED, "RUN_FAILED")
 
 
-def test_run_result_of_a_refusal_says_windows_update_is_still_held() -> None:
+def test_run_result_of_a_refusal_says_windows_update_is_still_held(receipts: FileReceiptStore) -> None:
     runner = _apply_runner(FakePve(), GONE, DONE_FAIL)
-    result = run_apply(REQUEST, make_node(runner), on_step=lambda _s: None)
+    result = run_apply(REQUEST, make_node(runner), receipts=receipts, on_step=lambda _s: None)
     error = result.steps[-1]
     assert (result.exit, error["step"], error["wu_held"]) == (RunExit.REFUSED, "error", True)
     assert "restore-wu" in str(error["message"])
 
 
-def test_apply_refuses_a_vm_that_never_reaches_the_status() -> None:
+def test_apply_refuses_a_vm_that_never_reaches_the_status(receipts: FileReceiptStore) -> None:
     runner = _apply_runner(FakePve(stuck=True), GONE, DONE_OK)
-    result = run_apply(REQUEST, make_node(runner), on_step=lambda _s: None)
+    result = run_apply(REQUEST, make_node(runner), receipts=receipts, on_step=lambda _s: None)
     assert (result.exit, result.verdict, result.steps[-1]["step"]) == (RunExit.REFUSED, "ERROR", "error")
     assert "vm 1 did not reach status stopped" in str(result.steps[-1]["message"])
     assert result.steps[-1]["wu_held"] is True
@@ -345,7 +364,7 @@ def _runs(call: list[str]) -> str:
 def _applied(runner: FakeRunner) -> tuple[str | None, list[dict[str, object]]]:
     rep = Report(vmid=1)
     try:
-        return apply.apply_sequence(REQUEST, make_node(runner), rep), rep.steps
+        return apply.apply_sequence(REQUEST, make_node(runner), rep, receipt=RECEIPT), rep.steps
     except ApplyError:
         return None, rep.steps
 
@@ -411,10 +430,72 @@ def test_a_profile_copy_left_behind_after_the_reboot_is_reported() -> None:
     assert "Zugriff verweigert" in str(left["error"])
 
 
-def test_the_wu_held_hint_names_a_verified_copy_never_the_tool_directory() -> None:
+def test_the_wu_held_hint_names_a_verified_copy_never_the_tool_directory(receipts: FileReceiptStore) -> None:
     runner = _apply_runner(FakePve(), GONE, DONE_FAIL)
-    result = run_apply(REQUEST, make_node(runner), on_step=lambda _s: None)
+    result = run_apply(REQUEST, make_node(runner), receipts=receipts, on_step=lambda _s: None)
     message = str(result.steps[-1]["message"])
     assert "certutil -hashfile" in message
     assert "ssh user's profile" in message
     assert "restore-wu" in message
+
+
+# --- the repair receipt: apply verifies the build the repair's prepare step measured ----------
+
+
+def test_apply_without_a_receipt_refuses_before_any_call(tmp_path: Path) -> None:
+    runner = _apply_runner(FakePve(), GONE, DONE_OK)
+    store = FileReceiptStore(tmp_path / "state")
+    result = run_apply(REQUEST, make_node(runner), receipts=store, on_step=lambda _s: None)
+    assert runner.calls == []
+    assert (result.exit, result.verdict) == (RunExit.REFUSED, "ERROR")
+    assert [s["step"] for s in result.steps] == ["error"]
+    assert result.steps[-1]["message"] == (
+        f"no repair receipt for VM 1 at {store.path(1)} - run `pve-winrepair repair` for this VM first: "
+        f"apply verifies the build its prepare step measured - {WU_HELD_HINT}"
+    )
+
+
+def test_apply_with_an_unreadable_receipt_refuses_naming_the_file_before_any_call(tmp_path: Path) -> None:
+    runner = _apply_runner(FakePve(), GONE, DONE_OK)
+    store = FileReceiptStore(tmp_path)
+    store.path(1).write_text("{not json", encoding="utf-8")
+    result = run_apply(REQUEST, make_node(runner), receipts=store, on_step=lambda _s: None)
+    assert runner.calls == []
+    assert (result.exit, result.verdict) == (RunExit.REFUSED, "ERROR")
+    assert str(result.steps[-1]["message"]).startswith(f"the repair receipt {store.path(1)} is not valid: ")
+
+
+@pytest.mark.parametrize(
+    ("spbuild", "exit_", "verdict"),
+    [(8973, RunExit.OK, "VERIFIED"), (9000, RunExit.REFUSED, "REVERTED_OR_UNCHANGED")],
+    ids=["build-reached", "build-short-of-the-receipt"],
+)
+def test_apply_verifies_the_build_the_receipt_recorded(
+    tmp_path: Path, spbuild: int, exit_: RunExit, verdict: str
+) -> None:
+    store = FileReceiptStore(tmp_path)
+    store.write(RECEIPT.model_copy(update={"image_spbuild": spbuild}))
+    runner = _apply_runner(FakePve(), GONE, DONE_OK)  # BUILD_AFTER is 26200.8973
+    recorded: list[Step] = []
+    result = run_apply(REQUEST, make_node(runner), receipts=store, on_step=recorded.append)
+    assert (result.exit, result.verdict) == (exit_, verdict)
+    assert recorded == list(result.steps)
+    receipt = next(s for s in result.steps if s["step"] == "receipt")
+    assert (receipt["path"], receipt["want"]) == (str(store.path(1)), f"26200.{spbuild}")
+    check = next(s for s in result.steps if s["step"] == "verify_build")
+    if verdict == "VERIFIED":
+        assert check == {"step": "verify_build", "ok": True, "build": "26200.8973"}
+        assert result.steps[-1]["step"] == "remove_profile_copy"
+    else:
+        assert (check["ok"], check["got"], check["want"]) == (False, "26200.8973", "26200.9000")
+        assert str(result.steps[-1]["message"]).startswith("build is 26200.8973, wanted 26200.9000")
+
+
+def test_run_apply_maps_an_unexpected_error_to_internal(receipts: FileReceiptStore) -> None:
+    runner = _apply_runner(FakePve(), GONE, DONE_OK)
+    runner.replies["build"] = [ValueError("a driver and tool that disagree")]
+    result = run_apply(REQUEST, make_node(runner), receipts=receipts, on_step=lambda _s: None)
+    assert (result.exit, result.verdict) == (RunExit.INTERNAL, "INTERNAL")
+    last = result.steps[-1]
+    assert (last["step"], last["ok"], last["wu_held"]) == ("internal", False, True)
+    assert str(last["message"]).startswith("ValueError('a driver and tool that disagree')")

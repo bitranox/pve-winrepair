@@ -14,6 +14,10 @@ drive letter named here would hold on one node or one guest and fail on the next
 Every in-guest step runs the packed guest tool through the :class:`GuestPort` and gates on typed
 fields of its JSON envelope.
 
+Once prepare has measured the staged image, its build is recorded in the VM's receipt
+(:class:`ReceiptStore`) before setup is launched; apply verifies against it. The previous receipt
+is removed once the last live-run guard passed, so a run that stops before prepare leaves none.
+
 Once this run has held Windows Update, a refusal, a crash or a poll ending DONE-FAIL, WORKER_GONE
 or TIMEOUT leaves the hold in place (only the apply step lifts it, after a verified build); the
 last step then says so with ``wu_held: true``.
@@ -26,6 +30,7 @@ import logging
 import re
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -43,13 +48,14 @@ from pve_winrepair.domain.envelope import (
     GuestProtocolError,
     state_marker,
 )
+from pve_winrepair.domain.receipt import ReceiptError, RepairReceipt
 from pve_winrepair.domain.report import Report, RunExit, RunResult, Step
 
 if TYPE_CHECKING:
     from collections.abc import Callable
     from ipaddress import IPv4Network
 
-    from pve_winrepair.application.ports import GuestPort, NodePort
+    from pve_winrepair.application.ports import GuestPort, NodePort, ReceiptStore
     from pve_winrepair.domain.settings import GuestSettings, RepairSettings
 
 # Progress between steps (still waiting, a read that failed and is retried) is for the operator
@@ -542,11 +548,14 @@ def _prepare_warnings(data: Fields) -> list[str]:
     return warnings
 
 
-def prepare(guest: GuestPort, rep: Report, root: str) -> None:
+def prepare(guest: GuestPort, rep: Report, root: str) -> tuple[int, int]:
     """Clear read-only, gate hard on the WIM, write the compat waiver (guest tool ``prepare``).
 
     Only the WIM gate refuses: the vTPM is ensured on the host earlier, and the TPM and waiver
     readback are reported so a later setup refusal can be read against them.
+
+    Returns:
+        The staged image's build and servicing build: the build the upgrade installs.
     """
     try:
         envelope = guest.tool("prepare", "--stage-root", root, timeout=900)
@@ -556,18 +565,41 @@ def prepare(guest: GuestPort, rep: Report, root: str) -> None:
     if envelope.gate("gate", "PASS") != "PASS":
         raise RepairError(f"guest gate refused: {data.text_or_none('reason')}")
     image, running = data.section("image"), data.section("running")
+    image_build, image_spbuild = image.integer("build"), image.integer("spbuild")
     rep.add(
         "prepare",
         ok=True,
         gate="PASS",
-        image_build=image.integer("build"),
-        image_spbuild=image.integer("spbuild"),
+        image_build=image_build,
+        image_spbuild=image_spbuild,
         running=running.text("build"),
         readonly_cleared=data.integer("readonly_cleared"),
         waiver_readback=data.integer_or_none("waiver_readback"),
         tpm_present=data.flag_or_none("tpm_present"),
         warnings=_prepare_warnings(data),
     )
+    return image_build, image_spbuild
+
+
+def forget_receipt(receipts: ReceiptStore, vmid: int) -> None:
+    """Remove the VM's previous receipt: from here on it no longer describes what is staged.
+
+    Only after the live-run guard: a run still in flight is refused there, and removing its receipt
+    earlier would make its later apply refuse for want of one.
+    """
+    try:
+        receipts.delete(vmid)
+    except ReceiptError as exc:
+        raise RepairError(str(exc)) from exc
+
+
+def record_receipt(receipts: ReceiptStore, receipt: RepairReceipt, rep: Report) -> None:
+    """Record the build prepare measured, for apply to verify; refused before setup is launched."""
+    try:
+        path = receipts.write(receipt)
+    except ReceiptError as exc:
+        raise RepairError(f"{exc} - not launching setup: apply could not verify the build it installs") from exc
+    rep.add("receipt", ok=True, path=str(path), expected_build=receipt.expected_build())
 
 
 def _launch_detail(envelope: Envelope) -> dict[str, object]:
@@ -775,9 +807,20 @@ def _media_dir(repair: RepairSettings) -> Path:
 
 
 def repair_sequence(
-    request: RepairRequest, rep: Report, node: NodePort, *, repair: RepairSettings, guest: GuestSettings
+    request: RepairRequest,
+    rep: Report,
+    node: NodePort,
+    *,
+    repair: RepairSettings,
+    guest: GuestSettings,
+    receipts: ReceiptStore,
 ) -> str:
-    """The whole sequence; returns the verdict (STATE=DONE-OK, STAGED, ...)."""
+    """The whole sequence; returns the verdict (STATE=DONE-OK, STAGED, ...).
+
+    The VM's previous receipt is removed once the live-run guard passed for the last time, so a
+    run refused after that, or a stage-only run, leaves none for apply to trust; the new one is
+    written once prepare has measured the image, before setup is launched.
+    """
     media = _media_dir(repair)
     network = guest.network()
     if vm_status(node, request.vmid) == "running":
@@ -794,6 +837,7 @@ def repair_sequence(
     # stale copy; the live-run check guards the restaging as well as the launch.
     push_tool(target, rep)
     refuse_live_run(target, rep)
+    forget_receipt(receipts, request.vmid)
     stage_root = pick_stage_root(target, rep, request.stage_root, repair=repair)
     lock_dirs(target, rep, stage_root)
     stage_media(target, rep, stage_root, media=media)
@@ -802,7 +846,12 @@ def repair_sequence(
     quiesce_windows_update(target, rep)
     if request.stage_only:
         return "STAGED"
-    prepare(target, rep, stage_root)
+    image_build, image_spbuild = prepare(target, rep, stage_root)
+    written_at = datetime.fromtimestamp(node.clock(), tz=timezone.utc)
+    receipt = RepairReceipt(
+        vmid=request.vmid, image_build=image_build, image_spbuild=image_spbuild, written_at=written_at
+    )
+    record_receipt(receipts, receipt, rep)
     launch(target, rep, stage_root)
     return poll(target, rep, request.hours, clock=node.clock, sleep=node.sleep)
 
@@ -813,6 +862,7 @@ def run_repair(
     *,
     repair: RepairSettings,
     guest: GuestSettings,
+    receipts: ReceiptStore,
     on_step: Callable[[Step], None],
 ) -> RunResult:
     """Run the repair and map how it ended to an exit and a verdict.
@@ -828,6 +878,7 @@ def run_repair(
         node: The PVE node the guest runs on.
         repair: ``[repair]``: the media directory and the free-space floors.
         guest: ``[guest]``: the subnet the guest's LAN address is picked from.
+        receipts: Where the build prepare measured is recorded for apply (one receipt per VM).
         on_step: Called with each step as it is recorded (see :class:`Report`).
 
     Returns:
@@ -835,7 +886,7 @@ def run_repair(
     """
     rep = Report(vmid=request.vmid, on_step=on_step)
     try:
-        verdict = repair_sequence(request, rep, node, repair=repair, guest=guest)
+        verdict = repair_sequence(request, rep, node, repair=repair, guest=guest, receipts=receipts)
     except (RepairError, VmStatusTimeoutError) as exc:
         rep.failure("error", str(exc), exc)
         return RunResult(RunExit.REFUSED, "ERROR", tuple(rep.steps))

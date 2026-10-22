@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from ..domain.enums import DeployTarget, OutputFormat
     from ..domain.envelope import Envelope, Fields
     from ..domain.guest_tool import PackedTool, Pushed
+    from ..domain.receipt import RepairReceipt
 
 
 class GetConfig(Protocol):
@@ -159,6 +160,29 @@ class NodePort(Protocol):
         ...
 
 
+class ReceiptStore(Protocol):
+    """Where a repair leaves the build its prepare step measured, one receipt per VM, for apply to verify.
+
+    Every failure to write, read or remove a receipt is a ``ReceiptError`` naming the file.
+    """
+
+    def write(self, receipt: RepairReceipt) -> Path:
+        """Replace the receipt of ``receipt.vmid``; return where it is kept."""
+        ...
+
+    def read(self, vmid: int) -> RepairReceipt | None:
+        """The receipt of ``vmid``; None when there is none, ``ReceiptError`` when it is unreadable or invalid."""
+        ...
+
+    def path(self, vmid: int) -> Path:
+        """Where the receipt of ``vmid`` is kept."""
+        ...
+
+    def delete(self, vmid: int) -> None:
+        """Remove the receipt of ``vmid``; an absent one is fine, one that cannot be removed a ``ReceiptError``."""
+        ...
+
+
 __all__ = [
     "CheckLoggingConfig",
     "DeployConfiguration",
@@ -168,4 +192,5 @@ __all__ = [
     "GuestPort",
     "InitLogging",
     "NodePort",
+    "ReceiptStore",
 ]

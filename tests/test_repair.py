@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 import pytest
@@ -36,9 +37,11 @@ from guest_fakes import (
     tool_on_the_guest,
 )
 
+from pve_winrepair.adapters.receipts import FileReceiptStore
 from pve_winrepair.application import repair
 from pve_winrepair.application.repair import RepairError, RepairRequest, run_repair
 from pve_winrepair.domain.envelope import GuestProtocolError
+from pve_winrepair.domain.receipt import RepairReceipt
 from pve_winrepair.domain.report import Report, RunExit, RunResult, Step
 from pve_winrepair.domain.settings import GuestSettings, RepairSettings
 from pve_winrepair_guest.probes import BuildInfo, Drive, DriveReport, ServicingReport, SetupReport
@@ -614,7 +617,12 @@ def test_a_rerun_over_a_live_run_refuses_before_anything_stops_the_guest(tmp_pat
     runner, clock = _live_run_runner(pve), FakeClock()
     with pytest.raises(RepairError, match="SetupHost is running"):
         repair.repair_sequence(
-            _request(ip=ip), Report(vmid=1), make_node(runner, clock), repair=_repair_settings(tmp_path), guest=GUEST
+            _request(ip=ip),
+            Report(vmid=1),
+            make_node(runner, clock),
+            repair=_repair_settings(tmp_path),
+            guest=GUEST,
+            receipts=FileReceiptStore(tmp_path / "state"),
         )
     labels = call_labels(runner.calls)
     assert [label for label in labels if label.split()[-1] in MUTATING_QM] == []
@@ -636,7 +644,12 @@ def test_an_agentless_run_clears_the_guard_before_its_offline_snapshot(tmp_path:
     )
     rep = Report(vmid=1)
     verdict = repair.repair_sequence(
-        _request(ip=GUEST_IP), rep, make_node(runner, FakeClock()), repair=_repair_settings(tmp_path), guest=GUEST
+        _request(ip=GUEST_IP),
+        rep,
+        make_node(runner, FakeClock()),
+        repair=_repair_settings(tmp_path),
+        guest=GUEST,
+        receipts=FileReceiptStore(tmp_path / "state"),
     )
     assert verdict == "STAGED"
     labels = call_labels(runner.calls)
@@ -707,23 +720,36 @@ def _agent_runner(pve: FakePve, **overrides: Answer) -> FakeRunner:
 
 
 def _run(
-    runner: FakeRunner, media: Path, *, ip: str | None = None, hours: float = 6.0
+    runner: FakeRunner,
+    media: Path,
+    *,
+    ip: str | None = None,
+    hours: float = 6.0,
+    stage_only: bool = False,
+    receipts: FileReceiptStore | None = None,
 ) -> tuple[RunResult, list[dict[str, object]]]:
-    """Run the whole repair (not stage-only) on a fake node; return the result and its steps."""
-    request = RepairRequest(vmid=1, snapshot_name="pre_kb_test", hours=hours, ip=ip)
+    """Run the whole repair (not stage-only by default) on a fake node; return the result and its steps.
+
+    The receipts go to ``receipts``, by default a state directory beside ``media``.
+    """
+    request = RepairRequest(vmid=1, snapshot_name="pre_kb_test", hours=hours, ip=ip, stage_only=stage_only)
     result = run_repair(
         request,
         make_node(runner, FakeClock()),
         repair=_repair_settings(media),
         guest=GUEST,
+        receipts=receipts or FileReceiptStore(media.parent / "state"),
         on_step=lambda _s: None,
     )
     return result, list(result.steps)
 
 
 def _media(tmp_path: Path) -> Path:
-    (tmp_path / "setup.exe").write_bytes(b"MZ")
-    return tmp_path
+    """A media directory holding only ``setup.exe``, apart from the state directory :func:`_run` uses."""
+    media = tmp_path / "media"
+    media.mkdir()
+    (media / "setup.exe").write_bytes(b"MZ")
+    return media
 
 
 def test_main_runs_the_whole_agent_path_to_done_ok(tmp_path: Path) -> None:
@@ -732,17 +758,18 @@ def test_main_runs_the_whole_agent_path_to_done_ok(tmp_path: Path) -> None:
     assert [s["step"] for s in steps] == [
         "running", "push_tool", "no_live_run", "quiesce_wu", "servicing_idle", "vtpm", "running",
         "snapshot", "push_tool", "no_live_run", "stage_root", "lock_dirs", "stage_media", "quiesce_wu",
-        "prepare", "launch", "poll",
+        "prepare", "receipt", "launch", "poll",
     ]  # fmt: skip
 
 
-def test_an_unconfigured_media_dir_is_refused_before_any_call() -> None:
+def test_an_unconfigured_media_dir_is_refused_before_any_call(tmp_path: Path) -> None:
     runner = FakeRunner()
     result = run_repair(
         RepairRequest(vmid=1, snapshot_name="pre_kb_test"),
         make_node(runner, FakeClock()),
         repair=RepairSettings(media_dir=""),
         guest=GUEST,
+        receipts=FileReceiptStore(tmp_path),
         on_step=lambda _s: None,
     )
     assert (result.exit, result.verdict) == (RunExit.REFUSED, "ERROR")
@@ -812,6 +839,7 @@ def test_on_step_sees_the_hold_flagged_on_the_failed_poll_it_already_received(tm
         make_node(runner, FakeClock()),
         repair=_repair_settings(_media(tmp_path)),
         guest=GUEST,
+        receipts=FileReceiptStore(tmp_path / "state"),
         on_step=recorded.append,
     )
     polls = [step for step in recorded if step["step"] == "poll"]
@@ -931,3 +959,110 @@ def test_main_lock_dirs_refusal_copies_no_media_and_says_wu_is_held(tmp_path: Pa
     )
     assert "S-1-5-21-9" in str(steps[-1]["message"])
     assert not any(_media_scp(cmd) for cmd in runner.calls)
+
+
+# --- the repair receipt: the image build prepare measured, for apply to verify ---------------
+
+OLD_RECEIPT = RepairReceipt(
+    vmid=1, image_build=26200, image_spbuild=7462, written_at=datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
+)
+
+
+class _RecordingStore(FileReceiptStore):
+    """A file store that notes how many runner calls (and what time) had passed when it was written."""
+
+    def __init__(self, state_dir: Path, runner: FakeRunner, clock: FakeClock) -> None:
+        super().__init__(state_dir)
+        self._runner, self._clock = runner, clock
+        self.calls_at_write: list[int] = []
+        self.time_at_write: list[float] = []
+
+    def write(self, receipt: RepairReceipt) -> Path:
+        self.calls_at_write.append(len(self._runner.calls))
+        self.time_at_write.append(self._clock.now)
+        return super().write(receipt)
+
+
+def _seeded(tmp_path: Path) -> FileReceiptStore:
+    """A state directory holding an earlier repair's receipt for VM 1 and one for VM 2."""
+    store = FileReceiptStore(tmp_path / "state")
+    store.write(OLD_RECEIPT)
+    store.write(OLD_RECEIPT.model_copy(update={"vmid": 2}))
+    return store
+
+
+def test_repair_writes_the_receipt_after_prepare_and_before_launch(tmp_path: Path) -> None:
+    runner, clock = _agent_runner(FakePve()), FakeClock()
+    store = _RecordingStore(tmp_path / "state", runner, clock)
+    store.write(OLD_RECEIPT)
+    result = run_repair(
+        RepairRequest(vmid=1, snapshot_name="pre_kb_test"),
+        make_node(runner, clock),
+        repair=_repair_settings(_media(tmp_path)),
+        guest=GUEST,
+        receipts=store,
+        on_step=lambda _s: None,
+    )
+    assert (result.exit, result.verdict) == (RunExit.OK, "STATE=DONE-OK")
+    labels = call_labels(runner.calls)
+    assert len(store.calls_at_write) == 2  # the seeding write, then the run's own
+    assert labels.index("guest prepare") < store.calls_at_write[1] <= labels.index("guest launch")
+    written_at = datetime.fromtimestamp(store.time_at_write[1], tz=timezone.utc)
+    assert store.read(1) == RepairReceipt(
+        vmid=1, image_build=IMAGE.build, image_spbuild=IMAGE.spbuild, written_at=written_at
+    )
+    step = next(s for s in result.steps if s["step"] == "receipt")
+    assert step == {"step": "receipt", "ok": True, "path": str(store.path(1)), "expected_build": "26200.8973"}
+
+
+def test_a_stage_only_repair_leaves_no_receipt(tmp_path: Path) -> None:
+    store = _seeded(tmp_path)
+    result, _steps = _run(_agent_runner(FakePve()), _media(tmp_path), stage_only=True, receipts=store)
+    assert (result.exit, result.verdict) == (RunExit.OK, "STAGED")
+    assert store.read(1) is None
+    assert store.read(2) == OLD_RECEIPT.model_copy(update={"vmid": 2})
+
+
+def test_a_repair_refused_before_prepare_leaves_no_stale_receipt(tmp_path: Path) -> None:
+    store = _seeded(tmp_path)
+    runner = _agent_runner(FakePve(), drives=answer("drives", _drives(C=10.0)))
+    result, steps = _run(runner, _media(tmp_path), receipts=store)
+    assert (result.exit, result.verdict) == (RunExit.REFUSED, "ERROR")
+    assert str(steps[-1]["message"]).startswith(
+        "C: has 10.0 GB free, below the 25.0 GB an in-place upgrade needs - free space before retrying"
+    )
+    assert "guest prepare" not in call_labels(runner.calls)
+    assert store.read(1) is None
+
+
+@pytest.mark.parametrize("status", ["running", "stopped"])
+def test_a_repair_refused_by_the_live_run_guard_keeps_the_receipt(tmp_path: Path, status: str) -> None:
+    store = _seeded(tmp_path)
+    runner = _agent_runner(FakePve(status=status), **{"setup-alive": ALIVE})
+    result, steps = _run(runner, _media(tmp_path), receipts=store)
+    assert (result.exit, result.verdict) == (RunExit.REFUSED, "ERROR")
+    assert steps[-1]["message"] == "SetupHost is running - an upgrade is live; poll it instead of relaunching"
+    assert store.read(1) == OLD_RECEIPT
+
+
+def test_a_receipt_that_cannot_be_removed_refuses_the_repair_before_staging(tmp_path: Path) -> None:
+    store = FileReceiptStore(tmp_path / "state")
+    store.path(1).mkdir(parents=True)  # a directory where the receipt file goes: unlink fails
+    runner = _agent_runner(FakePve())
+    result, steps = _run(runner, _media(tmp_path), receipts=store)
+    assert (result.exit, result.verdict) == (RunExit.REFUSED, "ERROR")
+    assert str(steps[-1]["message"]).startswith(f"cannot remove the repair receipt {store.path(1)}: ")
+    assert "guest drives" not in call_labels(runner.calls)
+
+
+def test_a_receipt_that_cannot_be_written_refuses_the_repair_before_launch(tmp_path: Path) -> None:
+    blocker = tmp_path / "state"
+    blocker.write_text("", encoding="utf-8")  # a file where the state directory goes
+    store = FileReceiptStore(blocker)
+    runner = _agent_runner(FakePve())
+    result, steps = _run(runner, _media(tmp_path), receipts=store)
+    assert (result.exit, result.verdict) == (RunExit.REFUSED, "ERROR")
+    assert str(steps[-1]["message"]).startswith(f"cannot write the repair receipt {store.path(1)}: ")
+    labels = call_labels(runner.calls)
+    assert "guest prepare" in labels
+    assert "guest launch" not in labels
