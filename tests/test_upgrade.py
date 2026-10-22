@@ -17,8 +17,10 @@ import importlib.util
 import io
 import json
 import ntpath
+import os
 import shutil
 import stat
+import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -140,6 +142,9 @@ class FakeUpgradeHost:
         self.existing.add(path)
         self.locked.append(path)
         return True
+
+    def name_taken(self, path: str) -> bool:
+        return path in self.existing
 
     def tree(self, root: str) -> Iterable[lockdown.TreeEntry]:
         if self.walk_fails:
@@ -1111,6 +1116,28 @@ def test_pwshpy_host_whoami_reports_a_missing_pywin32_as_oserror() -> None:
     assert isinstance(caught.value.__cause__, ImportError)
 
 
+def test_pwshpy_host_name_taken_is_true_for_anything_with_the_name(tmp_path: Path) -> None:
+    (tmp_path / "file").write_bytes(b"x")
+    taken = upgrade.PwshpyHost().name_taken
+    assert (taken(str(tmp_path)), taken(str(tmp_path / "file"))) == (True, True)
+    # Absent, and under a file (NotADirectoryError on POSIX): no such name can exist.
+    assert (taken(str(tmp_path / "missing")), taken(str(tmp_path / "file" / "below"))) == (False, False)
+
+
+def test_pwshpy_host_name_taken_raises_when_the_name_cannot_be_looked_up(tmp_path: Path) -> None:
+    # os.path.lexists would answer False here, and lock-dirs --no-create would report ABSENT.
+    if sys.platform == "win32" or os.geteuid() == 0:
+        pytest.skip("needs a POSIX parent this process cannot search (root searches every directory)")
+    closed = tmp_path / "closed"
+    (closed / "inner").mkdir(parents=True)
+    closed.chmod(0)
+    try:
+        with pytest.raises(PermissionError):
+            upgrade.PwshpyHost().name_taken(str(closed / "inner"))
+    finally:
+        closed.chmod(stat.S_IRWXU)
+
+
 # --- lock-dirs: both directories are locked before anything is copied into them ------------------
 
 
@@ -1151,6 +1178,33 @@ def test_lock_dirs_leaves_an_exactly_locked_directory_and_its_content_alone(host
     assert _actions(envelope) == [(r"C:\winrepair", "ALREADY_LOCKED"), (r"D:\upgrade", "ALREADY_LOCKED")]
     data = _data(envelope)
     assert (data["tool_present"], data["tool_sha256"]) == (True, hashlib.sha256(TOOL_BYTES).hexdigest())
+
+
+# --no-create is apply's after-reboot report: it says a directory is gone instead of making it.
+
+
+def test_lock_dirs_no_create_reports_an_absent_directory_and_creates_nothing(fresh: FakeUpgradeHost) -> None:
+    code, envelope = _lock_dirs(fresh, "--no-create")
+    assert code == 0
+    assert fresh.calls == []
+    assert _actions(envelope) == [(r"C:\winrepair", "ABSENT")]
+
+
+def test_lock_dirs_no_create_still_judges_an_existing_directory(host: FakeUpgradeHost) -> None:
+    code, envelope = _lock_dirs(host, "--no-create")
+    assert code == 0
+    assert host.calls == []
+    assert _actions(envelope) == [(r"C:\winrepair", "ALREADY_LOCKED")]
+
+
+def test_lock_dirs_no_create_refuses_an_existing_unlocked_directory_as_without_it(fresh: FakeUpgradeHost) -> None:
+    fresh.existing.add(r"C:\winrepair")
+
+    code, envelope = _lock_dirs(fresh, "--no-create")
+
+    assert code == 1
+    assert fresh.calls == []
+    _lock_refused(fresh, envelope, r"C:\winrepair existed before lock-dirs and is not locked as lock-dirs creates it")
 
 
 def _lock_refused(host: FakeUpgradeHost, envelope: dict[str, object], fragment: str) -> None:

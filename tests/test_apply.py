@@ -47,7 +47,7 @@ from pve_winrepair.domain.envelope import WU_HELD_HINT, GuestProtocolError
 from pve_winrepair.domain.receipt import RepairReceipt
 from pve_winrepair.domain.report import Report, RunExit, Step
 from pve_winrepair_guest.probes import BuildInfo, StagedOs
-from pve_winrepair_guest.upgrade import LockDirsReport
+from pve_winrepair_guest.upgrade import DirectoryLock, LockDirsReport
 from pve_winrepair_guest.wu import SearchProbe
 
 if TYPE_CHECKING:
@@ -366,14 +366,35 @@ def test_a_changed_winrepair_lock_after_the_upgrade_is_reported_and_still_lifts_
     assert next(s for s in steps if s["step"] == "restore_wu")["ok"] is True
 
 
-def test_a_profile_copy_that_is_not_the_tool_after_the_reboot_runs_nothing_and_is_deleted() -> None:
+def test_an_absent_winrepair_dir_after_the_upgrade_is_reported_absent_not_created() -> None:
+    runner = apply_runner(FakePve(), GONE, DONE_OK)
+    gone = LockDirsReport(TOOL_PATH, False, None, (DirectoryLock("C:\\winrepair", "ABSENT"),), "OK", None)
+    runner.replies["lock-dirs"] = [lock_dirs_reply, answer("lock-dirs", gone)]
+    verdict, steps = _applied(runner)
+    assert verdict == "VERIFIED"
+    after_lock = next(call for call in _after_reboot(runner) if route(call) == "lock-dirs")
+    assert "--no-create" in after_lock
+    lock = next(s for s in steps if s["step"] == "winrepair_lock")
+    assert (lock["ok"], lock["action"]) == (True, "ABSENT")
+    assert str(lock["note"]) == r"C:\winrepair is gone after the upgrade; the next repair creates it locked"
+
+
+def test_a_profile_copy_that_is_not_the_tool_after_the_reboot_runs_nothing_and_is_deleted(
+    receipts: FileReceiptStore,
+) -> None:
     runner = apply_runner(FakePve(), GONE, DONE_OK)
     wrong = Reply(0, certutil_output("0" * 64))
     replies: list[Answer] = [hashes_to(TOOL_DIR / "winrepair_guest.ps1")] * 2
     runner.replies["certutil"] = [*replies, wrong]
-    verdict, _steps = _applied(runner)
-    assert verdict is None
+    # Through run_apply: the refusal's "error" step is recorded there, not by apply_sequence.
+    result = run_apply(REQUEST, make_node(runner), receipts=receipts, on_step=lambda _s: None)
+    assert (result.exit, result.verdict) == (RunExit.REFUSED, "ERROR")
     assert [route(call) for call in _after_reboot(runner)] == ["scp", "certutil", "del"]
+    error = result.steps[-1]
+    assert error["step"] == "error"
+    # "the profile copy": the copy in place C:\winrepair\<STAGED> has the same file name, and a
+    # refusal of it (at the pre-reboot push) must not satisfy this.
+    assert f"the profile copy {STAGED} hashes to {'0' * 64}" in str(error["message"])
 
 
 def test_a_failure_after_the_reboot_still_deletes_the_profile_copy() -> None:

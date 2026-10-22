@@ -7,11 +7,12 @@ Python, so it runs for real in the tests too.
 * ``prepare --stage-root D:\upgrade``: clear read-only (inherited from the source medium), gate
   hard on the WIM (a bad WIM must stop the run, not surface hours later), write the MoSetup
   waiver, report TPM and free space.
-* ``lock-dirs --tool C:\winrepair\winrepair_guest-<sha16>.ps1 [--stage-root D:\upgrade]``: create
+* ``lock-dirs --tool C:\winrepair\winrepair_guest-<sha16>.ps1 [--stage-root D:\upgrade] [--no-create]``: create
   both directories with a DACL restricted to SYSTEM and Administrators already in place
   (``lockdown``; read back), before the driver copies the tool or the media in; accept an existing
   one only when it is exactly locked with nothing below it a non-admin can change, and a tool
-  already there only when it matches its name.
+  already there only when it matches its name. ``--no-create`` reports an absent directory as
+  ABSENT instead of creating it (the node's report after the upgrade).
 * ``launch --stage-root D:\upgrade``: first a preflight that changes nothing: the tool must be the
   content-addressed copy in ``C:\winrepair`` and the stage root ``<letter>:\upgrade``, the tool,
   ``setup.exe`` and powershell.exe must exist, the tool's bytes must match its content address,
@@ -328,6 +329,14 @@ class UpgradeHost(Protocol):
         """
         ...
 
+    def name_taken(self, path: str) -> bool:
+        """Return whether anything has that name (a directory, a file, a link even when dangling).
+
+        The same question :meth:`create_locked_dir` answers with False, asked without creating:
+        only a name nothing has reads as absent. Raises OSError when the name cannot be looked up.
+        """
+        ...
+
     def read_acl(self, path: str) -> AclReading:
         """Return a file's or directory's owner and DACL; raises OSError when unreadable."""
         ...
@@ -439,6 +448,18 @@ class PwshpyHost:
     def create_locked_dir(self, path: str) -> bool:
         """See :meth:`UpgradeHost.create_locked_dir`."""
         return create_locked_dir(_win32()[0], _win32file(), path)
+
+    def name_taken(self, path: str) -> bool:
+        """See :meth:`UpgradeHost.name_taken`.
+
+        lstat, not ``os.path.lexists``: lexists answers False on every OSError, so a name that
+        cannot be looked up (access denied on a parent) would read as absent.
+        """
+        try:
+            os.lstat(path)
+        except (FileNotFoundError, NotADirectoryError):  # a file as a parent: the name cannot exist
+            return False
+        return True
 
     def inspect_lock_target(self, path: str) -> LockTarget:
         """See :meth:`UpgradeHost.inspect_lock_target`."""
@@ -1238,8 +1259,9 @@ class DirectoryLock:
 
     Attributes:
         path: The directory.
-        action: CREATED (made with the lock in place) or ALREADY_LOCKED (existed, exactly locked,
-            nothing below it a non-admin can change; nothing written, content kept).
+        action: CREATED (made with the lock in place), ALREADY_LOCKED (existed, exactly locked,
+            nothing below it a non-admin can change; nothing written, content kept) or ABSENT
+            (``--no-create`` only: nothing has that name, and nothing was created).
     """
 
     path: str
@@ -1296,9 +1318,19 @@ def _secure(host: UpgradeHost, directory: str, *, created: bool) -> tuple[str, s
     return ("CREATED" if created else "ALREADY_LOCKED"), None
 
 
-def _create_and_secure(host: UpgradeHost, directory: str) -> tuple[str, str | None]:
+def _judge_directory(host: UpgradeHost, directory: str, *, create: bool) -> tuple[str, str | None]:
+    """(action, problem): create an absent directory locked, or with ``create`` off report it ABSENT.
+
+    An existing directory is judged by :func:`_secure` either way, so ``create`` never changes the
+    verdict on one; with it off nothing is written at all.
+    """
     try:
-        created = host.create_locked_dir(directory)
+        if create:
+            created = host.create_locked_dir(directory)
+        elif host.name_taken(directory):
+            created = False
+        else:
+            return "ABSENT", None
         return _secure(host, directory, created=created)
     except (OSError, PwshPyError) as exc:
         return "", str(exc)
@@ -1320,7 +1352,7 @@ def _lock_refused(tool: str, done: Sequence[DirectoryLock], reason: str, *, pres
     return Outcome(ok=False, data=LockDirsReport(tool, present, None, tuple(done), "FAILED", reason))
 
 
-def run_lock_dirs(host: UpgradeHost, tool: str, stage_root: str | None) -> Outcome:
+def run_lock_dirs(host: UpgradeHost, tool: str, stage_root: str | None, *, create: bool = True) -> Outcome:
     r"""Create and lock ``C:\winrepair`` (and ``stage_root``) before anything is copied into them.
 
     Each directory absent is created with the lock already in place (``lockdown.create_locked_dir``:
@@ -1339,13 +1371,18 @@ def run_lock_dirs(host: UpgradeHost, tool: str, stage_root: str | None) -> Outco
     non-admin owns). If a tool is already at ``tool``, its bytes must match its name and only
     trusted accounts may own or write it: the driver then runs that copy as an elevated admin
     instead of pushing its own.
+
+    With ``create`` off (``--no-create``, the node's report after the upgrade) an absent directory
+    is reported ABSENT and nothing is created: making one there would be a side effect of a
+    read-only report, and its CREATED would hide that the upgrade removed it. An existing one is
+    judged exactly as above.
     """
     scope = lock_scope_problem(tool, stage_root)
     if scope is not None:
         return _lock_refused(tool, (), scope)
     done: list[DirectoryLock] = []
     for directory in (ntpath.dirname(tool), *(() if stage_root is None else (stage_root,))):
-        action, problem = _create_and_secure(host, directory)
+        action, problem = _judge_directory(host, directory, create=create)
         if problem is not None:
             return _lock_refused(tool, done, problem)
         done.append(DirectoryLock(directory, action))
@@ -1590,6 +1627,12 @@ def _configure_lock_dirs(parser: argparse.ArgumentParser) -> None:
         help=r"the content address the driver pushes to, e.g. C:\winrepair\winrepair_guest-<sha>.ps1",
     )
     parser.add_argument("--stage-root", default=None, help=r"the stage root to lock as well, e.g. D:\upgrade")
+    parser.add_argument(
+        "--no-create",
+        dest="create",
+        action="store_false",
+        help="report an absent directory as ABSENT instead of creating it; an existing one is judged as without it",
+    )
 
 
 def _configure_run(parser: argparse.ArgumentParser) -> None:
@@ -1616,7 +1659,7 @@ def commands(host_factory: Callable[[], UpgradeHost] = PwshpyHost) -> tuple[Comm
         Command(
             "lock-dirs",
             r"create C:\winrepair (and the stage root) already locked, before anything is copied into them",
-            lambda a: run_lock_dirs(host_factory(), a.tool, a.stage_root),
+            lambda a: run_lock_dirs(host_factory(), a.tool, a.stage_root, create=a.create),
             _configure_lock_dirs,
         ),
         Command(

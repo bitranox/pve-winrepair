@@ -124,19 +124,23 @@ def report_tool_dir_lock(staged: GuestPort, rep: Report) -> None:
     lock-dirs writes no DACL onto a directory that exists: it reuses one that is exactly locked and
     refuses any other. A refusal here means the upgrade changed the lock; nothing runs from that
     directory any more in this run, and the next repair run would refuse it, so the step says to
-    remove it. Whatever the answer, Windows Update is still restored.
+    remove it. ``--no-create`` keeps this report read-only: a directory the upgrade removed comes
+    back ABSENT instead of being created (and reported CREATED, which would hide that it was gone);
+    the next repair creates it locked. Whatever the answer, Windows Update is still restored.
     """
     # The directory of the tool's content address: the one the ssh adapter pushes into.
     tool_dir = ntpath.dirname(staged.packed.guest_path)
     try:
-        envelope = staged.tool("lock-dirs", "--tool", staged.packed.guest_path, timeout=PROBE_TIMEOUT)
+        envelope = staged.tool("lock-dirs", "--tool", staged.packed.guest_path, "--no-create", timeout=PROBE_TIMEOUT)
         verdict = envelope.gate("verdict", "OK")
     except GuestCallError as exc:
         rep.add("winrepair_lock", ok=False, note=f"could not read the lock (informational): {exc}")
         return
     if verdict == "OK":
         actions = [d.text("action") for d in envelope.data.sections("directories")]
-        rep.add("winrepair_lock", ok=True, action=actions[0] if actions else None)
+        action = actions[0] if actions else None
+        gone = {"note": f"{tool_dir} is gone after the upgrade; the next repair creates it locked"}
+        rep.add("winrepair_lock", ok=True, action=action, **(gone if action == "ABSENT" else {}))
         return
     rep.add(
         "winrepair_lock",
