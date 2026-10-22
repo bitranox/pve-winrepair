@@ -18,20 +18,23 @@ the gitignored one in the checkout and the maintainer's tracked canonical copy k
 repository.
 
 What is scanned: every entry ``git ls-files`` lists, as the bytes a commit stores (the index blob,
-so a symlink's target too, never the worktree), then every untracked file that is not ignored
-(``git ls-files -o --exclude-standard``, read from the worktree, a symlink as its target): bmk's
-``make push`` runs the tests and THEN ``git add -A``, which commits those too. Each is scanned in
+so a symlink's target too), then every untracked file that is not ignored
+(``git ls-files -o --exclude-standard``, read from the worktree, a symlink as its target), and the
+worktree copy of every tracked file changed but not staged (``git ls-files -m``; a deleted one has
+none): bmk's ``make push`` runs the tests and THEN ``git add -A``, which commits those too. A
+content finding says which version hit, ``(index)`` or ``(worktree)``. Each is scanned in
 every rendering (UTF-8, else latin-1; plus UTF-16-LE at both byte alignments whenever the bytes
 hold a NUL), and every listed path name. ``uv.lock``'s content is skipped (machine-written hashes
 and sizes; a size can equal a VM id) but its name is scanned. A gitlink's content is another
 repository; only its name is scanned here. The packed guest tool is scanned without its base64
 payload, which can spell a token by chance and changes on every repack; the payload is scanned
-DECODED, member by member.
+DECODED, member by member (the index copy by its own tests, a worktree copy with the tree).
 
-A finding names the file, the line and the pattern or the token's list position
-(``token words[2]``), never the matched text, so a failing log does not publish what it found; a
-path finding names the path's index (``path[7]``): the tracked entries in ``git ls-files`` order
-first, then the untracked ones in ``git ls-files -o`` order. The list object prints only its counts.
+A finding names the file, the version (``leak.txt (worktree):3: ...``), the line and the pattern or
+the token's list position (``token words[2]``), never the matched text, so a failing log does not
+publish what it found; a path finding names the path's index (``path[7]``): the tracked entries in
+``git ls-files`` order first, then the untracked ones in ``git ls-files -o`` order; a modified
+file's worktree copy keeps its tracked entry's index. The list object prints only its counts.
 pytest's long tracebacks print every shown frame's arguments, and ``-l`` its locals: every helper
 holding scanned text or list content hides its frame (``__tracebackhide__``), and a refused payload
 is re-raised as a message-only :class:`PayloadError` with its chain dropped.
@@ -384,41 +387,74 @@ def _blobs(project: Path, object_ids: Sequence[str]) -> dict[str, bytes]:
     return found
 
 
+def _listed(project: Path, *args: str) -> list[str]:
+    """The names ``git ls-files -z <args>`` prints, in its order."""
+    __tracebackhide__ = True
+    return list(filter(None, _git_run(project, "ls-files", "-z", *args).decode("utf-8", "surrogateescape").split("\0")))
+
+
+def _worktree_bytes(path: Path) -> bytes | None:
+    """What ``git add`` would store for ``path``: a symlink's target, a file's bytes; None for neither."""
+    __tracebackhide__ = True
+    if path.is_symlink():
+        return os.fsencode(path.readlink())  # git stores a symlink as its target
+    if path.is_file():
+        return path.read_bytes()
+    return None  # absent, or "<dir>/": a nested repository, which its own scan covers
+
+
 def _untracked(project: Path) -> list[tuple[str, bytes]]:
     """Every untracked, not-ignored path as (name, worktree bytes), in ``git ls-files -o`` order."""
     __tracebackhide__ = True
-    listing = _git_run(project, "ls-files", "-z", "-o", "--exclude-standard").decode("utf-8", "surrogateescape")
     found: list[tuple[str, bytes]] = []
-    for name in filter(None, listing.split("\0")):
-        path = project / name
-        if name in CONTENT_EXCLUDED:
-            data = b""
-        elif path.is_symlink():
-            data = os.fsencode(path.readlink())  # git stores a symlink as its target
-        elif path.is_file():
-            data = path.read_bytes()
-        else:
-            data = b""  # "<dir>/": a nested repository, which its own scan covers
-        found.append((name, data))
+    for name in _listed(project, "-o", "--exclude-standard"):
+        data = None if name in CONTENT_EXCLUDED else _worktree_bytes(project / name)
+        found.append((name, data or b""))
+    return found
+
+
+def _modified(project: Path) -> dict[str, bytes]:
+    """The worktree bytes of every tracked file changed but not staged (``git ls-files -m``).
+
+    bmk's ``make push`` runs ``git add -A`` after the tests, so it commits these worktree bytes, not
+    the index blob :func:`_staged` reads. A deleted file is listed too but has no worktree content
+    (``git add -A`` stages the deletion), so it is skipped, as are ``uv.lock`` and a gitlink's
+    directory. An unmerged path is listed once per stage; the dict keeps it once.
+    """
+    __tracebackhide__ = True
+    found: dict[str, bytes] = {}
+    for name in _listed(project, "-m"):
+        data = None if name in CONTENT_EXCLUDED else _worktree_bytes(project / name)
+        if data is not None:
+            found[name] = data
     return found
 
 
 def _tracked(project: Path = pack_guest.PROJECT) -> list[tuple[str, bytes]]:
-    """Every index entry, then every untracked, not-ignored path, as (name, bytes to scan).
-
-    The bytes are what a commit stores, read from the INDEX, never the worktree: a staged file
-    deleted or restored in the worktree, a dangling symlink and a symlink's target (the blob of a
-    mode-120000 entry) are all scanned. No entry is dropped, so a position here is the position in
-    ``git ls-files``. A gitlink (mode 160000, a submodule) comes with empty bytes: its content is
-    another repository, which its own scan covers; its name is still scanned. ``uv.lock`` comes with
-    empty bytes too (its content is excluded, its name is not); the packed tool comes as its wrapper
-    without the payload, whose base64 is never scanned as text.
+    """Every index entry (:func:`_staged`), then every untracked, not-ignored path, as (name, bytes).
 
     The untracked, not-ignored paths follow (``git ls-files -o --exclude-standard`` order, read from
     the worktree): bmk's ``make push`` runs the tests and then ``git add -A``, which commits them. So
     positions ``0..n-1`` are the ``git ls-files`` positions of the n index entries and position
-    ``n + k`` is the k-th untracked path. An untracked file is scanned as it is, the packed tool
-    included (its payload is decoded only from the index), and ``uv.lock``'s content stays excluded.
+    ``n + k`` is the k-th untracked path. An untracked file comes as it is (:func:`_tree_findings`
+    scans an untracked packed tool as its wrapper plus its decoded payload), and ``uv.lock``'s
+    content stays excluded. The worktree copies of modified tracked files (:func:`_modified`) are
+    not listed here: they keep their index entry's position.
+    """
+    __tracebackhide__ = True
+    return _staged(project) + _untracked(project)
+
+
+def _staged(project: Path) -> list[tuple[str, bytes]]:
+    """Every index entry as (name, bytes to scan), in ``git ls-files`` order.
+
+    The bytes are what a commit of the index stores, read from the INDEX: a staged file deleted or
+    restored in the worktree, a dangling symlink and a symlink's target (the blob of a mode-120000
+    entry) are all scanned. No entry is dropped, so a position here is the position in
+    ``git ls-files``. A gitlink (mode 160000, a submodule) comes with empty bytes: its content is
+    another repository, which its own scan covers; its name is still scanned. ``uv.lock`` comes with
+    empty bytes too (its content is excluded, its name is not); the packed tool comes as its wrapper
+    without the payload, whose base64 is never scanned as text.
     """
     __tracebackhide__ = True
     entries = _index(project)
@@ -434,7 +470,7 @@ def _tracked(project: Path = pack_guest.PROJECT) -> list[tuple[str, bytes]]:
             tracked.append((name, wrapper.encode("utf-8")))
         else:
             tracked.append((name, blobs[object_id]))
-    return tracked + _untracked(project)
+    return tracked
 
 
 def _artefact_text() -> str:
@@ -443,15 +479,39 @@ def _artefact_text() -> str:
     return _git_run(pack_guest.PROJECT, "cat-file", "blob", f":{pack_guest.ARTEFACT.as_posix()}").decode("utf-8")
 
 
-def _tree_findings(private: PrivateList | None, project: Path = pack_guest.PROJECT) -> list[str]:
+def _worktree_findings(name: str, data: bytes, private: PrivateList | None) -> list[str]:
+    """The findings in a worktree copy, each labelled ``<name> (worktree)``.
+
+    The packed tool is scanned as its wrapper plus its DECODED payload (a repack not yet staged is
+    what ``git add -A`` commits); a refused payload raises :class:`PayloadError`, never a skip.
+    """
     __tracebackhide__ = True
-    tracked = _tracked(project)
-    assert tracked, "the scan listed no tracked file: it examined nothing"
-    return [
-        f
-        for i, (name, data) in enumerate(tracked)
-        for f in (*path_findings(i, name, private), *file_findings(name, data, private))
-    ]
+    label = f"{name} (worktree)"
+    if name != pack_guest.ARTEFACT.as_posix():
+        return file_findings(label, data, private)
+    text = data.decode("utf-8")
+    wrapper = pack_guest.wrapper_without_payload(text).encode("utf-8")
+    return [*file_findings(label, wrapper, private), *(f"{label}: {f}" for f in payload_findings(text, private))]
+
+
+def _tree_findings(private: PrivateList | None, project: Path = pack_guest.PROJECT) -> list[str]:
+    """Path findings by position; content findings tagged with the version that hit.
+
+    An index entry's content is labelled ``<name> (index)``; the worktree copy of a modified tracked
+    file (:func:`_modified`) is scanned too, at the same position, labelled ``<name> (worktree)``,
+    as is every untracked path.
+    """
+    __tracebackhide__ = True
+    staged, untracked, modified = _staged(project), _untracked(project), _modified(project)
+    assert staged or untracked, "the scan listed no tracked file: it examined nothing"
+    found: list[str] = []
+    for i, (name, data) in enumerate(staged):
+        found += [*path_findings(i, name, private), *file_findings(f"{name} (index)", data, private)]
+        if name in modified:
+            found += _worktree_findings(name, modified.pop(name), private)
+    for i, (name, data) in enumerate(untracked, start=len(staged)):
+        found += [*path_findings(i, name, private), *_worktree_findings(name, data, private)]
+    return found
 
 
 @pytest.fixture
@@ -636,7 +696,7 @@ def test_a_dangling_symlink_name_is_scanned(repo: Path, tmp_path: Path) -> None:
 @pytest.mark.os_agnostic
 def test_a_symlink_target_is_scanned_as_its_blob(repo: Path, tmp_path: Path) -> None:
     _stage(repo, "120000", "link", b"/planted/dir/x")
-    assert _tree_findings(_planted(tmp_path), repo) == ["link:1: token paths[1]"]
+    assert _tree_findings(_planted(tmp_path), repo) == ["link (index):1: token paths[1]"]
 
 
 @pytest.mark.os_agnostic
@@ -644,7 +704,7 @@ def test_a_staged_file_deleted_from_the_worktree_is_scanned(repo: Path, tmp_path
     (repo / "leak.txt").write_bytes(b"host planted-host7\n")
     _git_run(repo, "add", "leak.txt")
     (repo / "leak.txt").unlink()
-    assert _tree_findings(_planted(tmp_path), repo) == ["leak.txt:1: token hosts[1]"]
+    assert _tree_findings(_planted(tmp_path), repo) == ["leak.txt (index):1: token hosts[1]"]
 
 
 @pytest.mark.os_agnostic
@@ -652,7 +712,7 @@ def test_staged_content_is_scanned_when_the_worktree_is_restored(repo: Path, tmp
     (repo / "leak.txt").write_bytes(b"host planted-host7\n")
     _git_run(repo, "add", "leak.txt")
     (repo / "leak.txt").write_bytes(b"nothing private\n")
-    assert _tree_findings(_planted(tmp_path), repo) == ["leak.txt:1: token hosts[1]"]
+    assert _tree_findings(_planted(tmp_path), repo) == ["leak.txt (index):1: token hosts[1]"]
 
 
 @pytest.mark.os_agnostic
@@ -678,7 +738,7 @@ def test_positions_are_those_of_git_ls_files(repo: Path) -> None:
 @pytest.mark.os_agnostic
 def test_an_untracked_file_is_scanned(repo: Path, tmp_path: Path) -> None:
     (repo / "notes.txt").write_bytes(b"host planted-host7\n")
-    assert _tree_findings(_planted(tmp_path), repo) == ["notes.txt:1: token hosts[1]"]
+    assert _tree_findings(_planted(tmp_path), repo) == ["notes.txt (worktree):1: token hosts[1]"]
 
 
 @pytest.mark.os_agnostic
@@ -701,7 +761,40 @@ def test_untracked_paths_are_indexed_after_the_tracked_ones(repo: Path, tmp_path
 def test_an_untracked_symlink_is_scanned_as_its_target(repo: Path, tmp_path: Path) -> None:
     # git stores a symlink as its target text, which is what `git add -A` would commit.
     (repo / "link").symlink_to("/planted/dir/x")
-    assert _tree_findings(_planted(tmp_path), repo) == ["link:1: token paths[1]"]
+    assert _tree_findings(_planted(tmp_path), repo) == ["link (worktree):1: token paths[1]"]
+
+
+# --- what `git add -A` commits of a tracked file: its worktree copy, staged or not ----------
+
+
+@pytest.mark.os_agnostic
+def test_an_unstaged_worktree_edit_of_a_tracked_file_is_scanned(repo: Path, tmp_path: Path) -> None:
+    (repo / "clean.txt").write_bytes(b"nothing private\nhost planted-host7\n")
+    assert _tree_findings(_planted(tmp_path), repo) == ["clean.txt (worktree):2: token hosts[1]"]
+    (repo / "clean.txt").write_bytes(b"nothing private\n")
+    assert _tree_findings(_planted(tmp_path), repo) == []
+
+
+@pytest.mark.os_agnostic
+def test_a_worktree_copy_keeps_its_entry_position(repo: Path, tmp_path: Path) -> None:
+    # clean.txt is path[0], b.txt path[1]; the untracked file stays path[2] beside the modified copy.
+    (repo / "b.txt").write_bytes(b"b\n")
+    _git_run(repo, "add", "b.txt")
+    (repo / "clean.txt").write_bytes(b"host planted-host7\n")
+    (repo / "c-plantedword.txt").write_bytes(b"c\n")
+    found = _tree_findings(_planted(tmp_path), repo)
+    assert found == ["clean.txt (worktree):1: token hosts[1]", "path[2]: token words[1]"]
+
+
+@pytest.mark.os_agnostic
+def test_an_unstaged_repack_is_scanned_with_its_payload_decoded(repo: Path, tmp_path: Path) -> None:
+    artefact = repo / pack_guest.ARTEFACT
+    artefact.parent.mkdir(parents=True)
+    artefact.write_bytes(_packed({"pkg/clean.py": b"x = 1\n"}).encode("utf-8"))
+    _git_run(repo, "add", pack_guest.ARTEFACT.as_posix())
+    artefact.write_bytes(_packed({"pkg/leak.py": b"# one\nHOST = 'planted-host7'\n"}).encode("utf-8"))
+    found = _tree_findings(_planted(tmp_path), repo)
+    assert found == [f"{pack_guest.ARTEFACT.as_posix()} (worktree): pkg/leak.py:2: token hosts[1]"]
 
 
 # --- a failing privacy test prints no token -------------------------------------------------
