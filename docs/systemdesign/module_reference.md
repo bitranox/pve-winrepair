@@ -39,6 +39,10 @@ moves or removes a module, a CLI option or a public name.
   - `commands/info.py`  -  info, hello, fail commands
   - `commands/config.py`  -  config, config-deploy, config-generate-examples commands
   - `commands/logging.py`  -  logdemo command
+  - `commands/repair.py`  -  `repair --vmid N [--stage-only] [--snapshot-name S] [--hours H] [--ip IP] [--stage-root X:] [--tpm-storage S] [--json]`; `--snapshot-name` defaults to `[repair] snapshot_name` and is validated by its rule
+  - `commands/apply.py`  -  `apply --vmid N --ip IP [--apply-minutes M] [--json]`
+  - `commands/guest_tool.py`  -  `guest-tool path` (the packed tool) and `guest-tool sha256` (`<sha256>  <content address>`); neither reads the configuration
+  - `commands/runs.py`  -  What `repair` and `apply` share: settings (exit 78), the checks before any call (`[ssh] key` set, `[node] state_dir` a directory or creatable as one; exit 1), steps and progress lines on stderr, the `--json` envelope `{ok, command, vmid, verdict, steps}` or `vm <vmid>: <verdict>` on stdout; exit 0 OK, 1 refused, 2 internal
 
 ### Adapters Layer (In-Memory / Testing)
 - `src/pve_winrepair/adapters/memory/__init__.py`  -  Public facade + Protocol conformance assertions
@@ -46,7 +50,7 @@ moves or removes a module, a CLI option or a public name.
 - `src/pve_winrepair/adapters/memory/logging.py`  -  In-memory logging (a quiet lib_log_rich runtime for tests)
 
 ### Composition Layer
-- `src/pve_winrepair/composition/__init__.py`  -  Wires adapters to ports
+- `src/pve_winrepair/composition/__init__.py`  -  Wires adapters to ports; `build_testing(make_node=..., make_receipts=...)` takes a node on a fake runner, and its default node refuses to run anything
 
 ### Entry Points
 - `src/pve_winrepair/entry.py`  -  Console-script entry point; wires production services before invoking the CLI
@@ -69,7 +73,10 @@ moves or removes a module, a CLI option or a public name.
 - `tests/test_cache_effectiveness.py`  -  Configuration loading returns consistent (cached) results
 - `tests/test_cli_config.py`  -  `config`, `config-deploy`, `config-generate-examples` commands
 - `tests/test_cli_config_errors.py`  -  A configuration that cannot be loaded: who reports it, and who still runs
+- `tests/test_cli_apply.py`  -  `apply` through `main()`: the receipt from `[node] state_dir`, refusals before any call, output and exit codes
 - `tests/test_cli_core.py`  -  Traceback, main entry, help, hello, fail, info, unknown command
+- `tests/test_cli_guest_tool.py`  -  `guest-tool path` and `guest-tool sha256`
+- `tests/test_cli_repair.py`  -  `repair` through `main()`: options, settings, refusals before any call, progress lines on stderr, output and exit codes
 - `tests/test_cli_env_file.py`  -  `--env-file` path passing, validation and value override
 - `tests/test_cli_exit_codes.py`  -  Exit codes through the CLI
 - `tests/test_cli_main_exit.py`  -  Exit codes and stderr through the real `main()` entry point
@@ -82,7 +89,7 @@ moves or removes a module, a CLI option or a public name.
 - `tests/test_display.py`  -  Config display formatting tests
 - `tests/test_enums.py`  -  Domain enum tests
 - `tests/test_errors.py`  -  Domain error types
-- `tests/guest_fakes.py`  -  A fake ssh/scp runner answering with the guest tool's real envelopes, plus fake `qm` and clock
+- `tests/guest_fakes.py`  -  A fake ssh/scp runner answering with the guest tool's real envelopes, plus fake `qm` and clock, the whole-run guests of a repair and an apply, and `run_cli` (the real `main()` with a node on the fake runner)
 - `tests/test_guest_ssh.py`  -  The ssh adapter: the argv it builds from `SshSettings`, the arguments it refuses, the push and its hashes, how it reads an answer
 - `tests/test_logging.py`  -  Logging configuration model
 - `tests/test_logging_dotenv_isolation.py`  -  Only `LOG_*` lines of a `.env` reach the environment; an invalid `[lib_log_rich]` section or `LOG_*` variable is a configuration failure that leaves logging running

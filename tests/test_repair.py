@@ -14,9 +14,13 @@ from typing import TYPE_CHECKING
 
 import pytest
 from guest_fakes import (
+    ALIVE,
+    GONE,
     GUEST_IP,
+    IMAGE,
     LAN_IP,
     MUTATING_QM,
+    NO_LOG,
     TOOL_DIR,
     TOOL_PATH,
     USER,
@@ -25,14 +29,20 @@ from guest_fakes import (
     FakePve,
     FakeRunner,
     Reply,
+    agent_runner,
     answer,
     call_labels,
     crashed,
+    drive_report,
     hashes_to,
+    launch_report,
     lock_dirs_reply,
     locked,
     make_guest,
     make_node,
+    prepare_report,
+    quiesce_report,
+    servicing_report,
     state_log,
     tool_on_the_guest,
 )
@@ -44,15 +54,11 @@ from pve_winrepair.domain.envelope import GuestProtocolError
 from pve_winrepair.domain.receipt import RepairReceipt
 from pve_winrepair.domain.report import Report, RunExit, RunResult, Step
 from pve_winrepair.domain.settings import GuestSettings, RepairSettings
-from pve_winrepair_guest.probes import BuildInfo, Drive, DriveReport, ServicingReport, SetupReport
-from pve_winrepair_guest.upgrade import LaunchReport, LaunchWait, LockDirsReport, PrepareReport, TaskCleanup
-from pve_winrepair_guest.wim import WimImage
-from pve_winrepair_guest.wu import QuiesceReport, ServiceRow, StartWrite, StopIssued, StopWait
+from pve_winrepair_guest.probes import SetupReport
+from pve_winrepair_guest.upgrade import LaunchReport, LockDirsReport, TaskCleanup
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-GIB = 1024**3
 
 
 def _repair_settings(media: Path) -> RepairSettings:
@@ -100,22 +106,8 @@ def test_a_report_without_a_quiesce_step_is_not_held() -> None:
 # --- quiesce-wu -----------------------------------------------------------------------------
 
 
-def _quiesce(verdict: str, *, running: tuple[str, ...] = ()) -> QuiesceReport:
-    rows = (ServiceRow("wuauserv", "Disabled", "Running" if running else "Stopped"),)
-    return QuiesceReport(
-        previous_start_modes={"wuauserv": "Manual", "UsoSvc": "Auto"},
-        writes=(StartWrite("wuauserv", 4, "WRITTEN", None),),
-        stops=(StopIssued("wuauserv", 0, None),),
-        wait=StopWait(10.0, False, running),
-        services=rows,
-        not_disabled=(),
-        still_running=running,
-        verdict=verdict,
-    )
-
-
 def test_quiesce_ok_records_the_previous_start_modes() -> None:
-    runner = FakeRunner().on("quiesce-wu", answer("quiesce-wu", _quiesce("OK")))
+    runner = FakeRunner().on("quiesce-wu", answer("quiesce-wu", quiesce_report("OK")))
     rep = Report(vmid=1)
     repair.quiesce_windows_update(make_guest(runner), rep)
     step = _step(rep, "quiesce_wu")
@@ -125,7 +117,7 @@ def test_quiesce_ok_records_the_previous_start_modes() -> None:
 
 
 def test_quiesce_fail_refuses_naming_what_still_runs() -> None:
-    reply = answer("quiesce-wu", _quiesce("FAIL", running=("wuauserv",)), ok=False)
+    reply = answer("quiesce-wu", quiesce_report("FAIL", running=("wuauserv",)), ok=False)
     runner = FakeRunner().on("quiesce-wu", reply)
     with pytest.raises(RepairError, match=r"not held: FAIL.*wuauserv"):
         repair.quiesce_windows_update(make_guest(runner), Report(vmid=1))
@@ -138,7 +130,7 @@ def test_quiesce_without_an_answer_refuses() -> None:
 
 
 def test_quiesce_ok_flag_contradicting_the_verdict_is_a_protocol_error() -> None:
-    runner = FakeRunner().on("quiesce-wu", answer("quiesce-wu", _quiesce("FAIL"), ok=True))
+    runner = FakeRunner().on("quiesce-wu", answer("quiesce-wu", quiesce_report("FAIL"), ok=True))
     with pytest.raises(GuestProtocolError):
         repair.quiesce_windows_update(make_guest(runner), Report(vmid=1))
 
@@ -146,16 +138,8 @@ def test_quiesce_ok_flag_contradicting_the_verdict_is_a_protocol_error() -> None
 # --- drives / stage root --------------------------------------------------------------------
 
 
-def _drives(**free_gib: float) -> DriveReport:
-    return DriveReport(
-        drives=tuple(
-            Drive(letter, int(gib * GIB), int(gib * GIB) * 2, round(gib, 1)) for letter, gib in sorted(free_gib.items())
-        )
-    )
-
-
 def test_stage_root_prefers_a_non_system_drive_with_room() -> None:
-    runner = FakeRunner().on("drives", answer("drives", _drives(C=40.0, D=200.0)))
+    runner = FakeRunner().on("drives", answer("drives", drive_report(C=40.0, D=200.0)))
     rep = Report(vmid=1)
     assert repair.pick_stage_root(make_guest(runner), rep, None, repair=REPAIR) == "D:\\upgrade"
     assert _step(rep, "stage_root")["drives"] == {"C": 40.0, "D": 200.0}
@@ -163,31 +147,31 @@ def test_stage_root_prefers_a_non_system_drive_with_room() -> None:
 
 def test_stage_root_gates_on_exact_bytes_not_the_rounded_figure() -> None:
     # 14.96 GiB rounds to 15.0 in free_gb but is below the 15 GB floor.
-    runner = FakeRunner().on("drives", answer("drives", _drives(C=40.0, D=14.96)))
+    runner = FakeRunner().on("drives", answer("drives", drive_report(C=40.0, D=14.96)))
     assert repair.pick_stage_root(make_guest(runner), Report(vmid=1), None, repair=REPAIR) == "C:\\upgrade"
 
 
 def test_stage_root_refuses_a_full_system_drive() -> None:
-    runner = FakeRunner().on("drives", answer("drives", _drives(C=10.0, D=200.0)))
+    runner = FakeRunner().on("drives", answer("drives", drive_report(C=10.0, D=200.0)))
     with pytest.raises(RepairError, match=r"C: has 10.0 GB free"):
         repair.pick_stage_root(make_guest(runner), Report(vmid=1), None, repair=REPAIR)
 
 
 def test_stage_root_refuses_a_drive_the_guest_does_not_have() -> None:
-    runner = FakeRunner().on("drives", answer("drives", _drives(C=80.0)))
+    runner = FakeRunner().on("drives", answer("drives", drive_report(C=80.0)))
     with pytest.raises(RepairError, match="E: which the guest does not have"):
         repair.pick_stage_root(make_guest(runner), Report(vmid=1), "E:", repair=REPAIR)
 
 
 def test_stage_root_gates_on_the_configured_system_floor() -> None:
-    runner = FakeRunner().on("drives", answer("drives", _drives(C=40.0, D=200.0)))
+    runner = FakeRunner().on("drives", answer("drives", drive_report(C=40.0, D=200.0)))
     floors = RepairSettings(system_free_gb=50.0)
     with pytest.raises(RepairError, match=r"^C: has 40.0 GB free, below the 50.0 GB an in-place upgrade needs"):
         repair.pick_stage_root(make_guest(runner), Report(vmid=1), None, repair=floors)
 
 
 def test_stage_root_gates_on_the_configured_stage_floor() -> None:
-    runner = FakeRunner().on("drives", answer("drives", _drives(C=60.0, D=200.0)))
+    runner = FakeRunner().on("drives", answer("drives", drive_report(C=60.0, D=200.0)))
     floors = RepairSettings(stage_free_gb=250.0)
     with pytest.raises(RepairError, match=r"^D: has only 200.0 GB free, need 250.0$"):
         repair.pick_stage_root(make_guest(runner), Report(vmid=1), "D:", repair=floors)
@@ -202,16 +186,12 @@ def test_drives_unreadable_refuses_naming_the_guest_error() -> None:
 # --- servicing idle -------------------------------------------------------------------------
 
 
-def _servicing(total: int) -> ServicingReport:
-    return ServicingReport(counts={"TiWorker": total, "TrustedInstaller": 0}, total=total, active=total > 0)
-
-
 def test_servicing_idle_retries_a_failed_read_instead_of_calling_it_idle() -> None:
     runner = FakeRunner().on(
         "servicing-active",
         Reply(255, "", "timeout"),
-        answer("servicing-active", _servicing(1)),
-        answer("servicing-active", _servicing(0)),
+        answer("servicing-active", servicing_report(1)),
+        answer("servicing-active", servicing_report(0)),
     )
     clock, rep = FakeClock(), Report(vmid=1)
     repair.wait_servicing_idle(make_guest(runner), rep, clock=clock.time, sleep=clock.sleep)
@@ -220,7 +200,7 @@ def test_servicing_idle_retries_a_failed_read_instead_of_calling_it_idle() -> No
 
 
 def test_servicing_still_active_at_the_deadline_is_reported() -> None:
-    runner = FakeRunner().on("servicing-active", answer("servicing-active", _servicing(2)))
+    runner = FakeRunner().on("servicing-active", answer("servicing-active", servicing_report(2)))
     clock, rep = FakeClock(), Report(vmid=1)
     repair.wait_servicing_idle(make_guest(runner), rep, minutes=1.0, clock=clock.time, sleep=clock.sleep)
     assert _step(rep, "servicing_idle")["ok"] is False
@@ -267,29 +247,9 @@ def test_live_run_check_refuses_when_it_cannot_ask() -> None:
 
 # --- prepare --------------------------------------------------------------------------------
 
-IMAGE = WimImage(1, "Windows 11 Pro", "Professional", 26200, 8973, ("de-DE",), "de-DE")
-RUNNING = BuildInfo("26200", 7462, "26200.7462")
-
-
-def _prepare(gate: str, reason: str | None = None, *, tpm: bool | None = True) -> PrepareReport:
-    passed = gate == "PASS"
-    return PrepareReport(
-        "D:\\upgrade",
-        12,
-        0,
-        "D:\\upgrade\\sources\\install.wim",
-        gate,
-        reason,
-        IMAGE,
-        RUNNING,
-        1 if passed else None,
-        tpm if passed else None,
-        (),
-    )
-
 
 def test_prepare_pass_reports_the_image_and_the_waiver() -> None:
-    runner = FakeRunner().on("prepare", answer("prepare", _prepare("PASS")))
+    runner = FakeRunner().on("prepare", answer("prepare", prepare_report("PASS")))
     rep = Report(vmid=1)
     repair.prepare(make_guest(runner), rep, "D:\\upgrade")
     step = _step(rep, "prepare")
@@ -304,14 +264,14 @@ def test_prepare_pass_reports_the_image_and_the_waiver() -> None:
 
 
 def test_prepare_fail_refuses_with_the_guest_reason() -> None:
-    reply = answer("prepare", _prepare("FAIL", "image SPBuild 8973 older than running 9711"), ok=False)
+    reply = answer("prepare", prepare_report("FAIL", "image SPBuild 8973 older than running 9711"), ok=False)
     runner = FakeRunner().on("prepare", reply)
     with pytest.raises(RepairError, match="guest gate refused: image SPBuild 8973 older than running 9711"):
         repair.prepare(make_guest(runner), Report(vmid=1), "D:\\upgrade")
 
 
 def test_prepare_reports_an_absent_tpm_without_refusing() -> None:
-    runner = FakeRunner().on("prepare", answer("prepare", _prepare("PASS", tpm=False)))
+    runner = FakeRunner().on("prepare", answer("prepare", prepare_report("PASS", tpm=False)))
     rep = Report(vmid=1)
     repair.prepare(make_guest(runner), rep, "D:\\upgrade")
     assert _step(rep, "prepare")["ok"] is True
@@ -320,34 +280,11 @@ def test_prepare_reports_an_absent_tpm_without_refusing() -> None:
 
 # --- launch ---------------------------------------------------------------------------------
 
-DISARMED = TaskCleanup("DISARM", None, False, True, None)
 REMOVED = TaskCleanup("REMOVE", True, False, True, None)
 
 
-def _launch(
-    verdict: str,
-    reason: str | None = None,
-    *,
-    wait: str | None = "LAUNCHED",
-    setuphost: int | None = 1,
-    cleanup: TaskCleanup = DISARMED,
-) -> LaunchReport:
-    return LaunchReport(
-        "OVMRepairUpgrade",
-        f"powershell -File {TOOL_PATH} upgrade-run",
-        False,
-        True,
-        None if wait is None else LaunchWait(wait, 42.0, None),
-        setuphost,
-        state_log("launching: setup.exe"),
-        cleanup,
-        verdict,
-        reason,
-    )
-
-
 def test_launch_points_the_system_task_at_the_pushed_tool() -> None:
-    runner = FakeRunner().on("launch", answer("launch", _launch("OK")))
+    runner = FakeRunner().on("launch", answer("launch", launch_report("OK")))
     repair.launch(make_guest(runner), Report(vmid=1), "D:\\upgrade")
     argv = runner.calls[0]
     assert argv[argv.index("-File") + 1] == TOOL_PATH
@@ -356,7 +293,7 @@ def test_launch_points_the_system_task_at_the_pushed_tool() -> None:
 
 
 def test_launch_ok_records_the_step() -> None:
-    runner = FakeRunner().on("launch", answer("launch", _launch("OK")))
+    runner = FakeRunner().on("launch", answer("launch", launch_report("OK")))
     rep = Report(vmid=1)
     assert repair.launch(make_guest(runner), rep, "D:\\upgrade") is None
     step = _step(rep, "launch")
@@ -366,9 +303,9 @@ def test_launch_ok_records_the_step() -> None:
 @pytest.mark.parametrize(
     ("report", "fragment"),
     [
-        (_launch("SUSPECT", "setup already gone, read the state verdict", setuphost=0), "SUSPECT"),
+        (launch_report("SUSPECT", "setup already gone, read the state verdict", setuphost=0), "SUSPECT"),
         (
-            _launch(
+            launch_report(
                 "SUSPECT",
                 "the run ended before launching setup",
                 wait="ENDED",
@@ -378,7 +315,7 @@ def test_launch_ok_records_the_step() -> None:
             "SUSPECT",
         ),
         (
-            _launch(
+            launch_report(
                 "NO_START",
                 "no 'launching' line within 600 s",
                 wait="TIMEOUT",
@@ -388,7 +325,7 @@ def test_launch_ok_records_the_step() -> None:
             "NO_START",
         ),
         (
-            _launch("FAILED", "the task could not be registered: x", wait=None, setuphost=None, cleanup=REMOVED),
+            launch_report("FAILED", "the task could not be registered: x", wait=None, setuphost=None, cleanup=REMOVED),
             "FAILED",
         ),
     ],
@@ -401,7 +338,7 @@ def test_launch_without_a_running_setup_refuses(report: LaunchReport, fragment: 
 
 def test_launch_task_left_after_disarm_keeps_polling() -> None:
     left = TaskCleanup("DISARM", None, True, False, "delete: access denied")
-    report = _launch("TASK_LEFT", "OK; the task \\OVMRepairUpgrade could not be disarmed: x", cleanup=left)
+    report = launch_report("TASK_LEFT", "OK; the task \\OVMRepairUpgrade could not be disarmed: x", cleanup=left)
     runner = FakeRunner().on("launch", answer("launch", report, ok=False))
     rep = Report(vmid=1)
     repair.launch(make_guest(runner), rep, "D:\\upgrade")  # no raise: setup IS running
@@ -414,7 +351,7 @@ def test_launch_task_left_after_disarm_does_not_claim_setup_is_running() -> None
     # _settle can find SetupHost gone (SUSPECT) after a DISARM, which _louder turns into TASK_LEFT.
     left = TaskCleanup("DISARM", None, True, False, "delete: access denied")
     reason = "SUSPECT: setup already gone, read the state verdict; the task could not be disarmed: x"
-    report = _launch("TASK_LEFT", reason, setuphost=0, cleanup=left)
+    report = launch_report("TASK_LEFT", reason, setuphost=0, cleanup=left)
     runner = FakeRunner().on("launch", answer("launch", report, ok=False))
     rep = Report(vmid=1)
     repair.launch(make_guest(runner), rep, "D:\\upgrade")
@@ -425,7 +362,7 @@ def test_launch_task_left_after_disarm_does_not_claim_setup_is_running() -> None
 
 def test_launch_task_left_after_remove_refuses_with_the_manual_cleanup() -> None:
     left = TaskCleanup("REMOVE", False, True, False, "end: still running 30 s after the end request")
-    report = _launch("TASK_LEFT", "NO_START: no 'launching' line", wait="TIMEOUT", setuphost=None, cleanup=left)
+    report = launch_report("TASK_LEFT", "NO_START: no 'launching' line", wait="TIMEOUT", setuphost=None, cleanup=left)
     runner = FakeRunner().on("launch", answer("launch", report, ok=False))
     with pytest.raises(RepairError, match=r"TASK_LEFT.*schtasks /End"):
         repair.launch(make_guest(runner), Report(vmid=1), "D:\\upgrade")
@@ -438,7 +375,7 @@ def test_launch_with_no_answer_refuses_and_warns_against_a_relaunch() -> None:
 
 
 def test_launch_unknown_verdict_is_a_protocol_error() -> None:
-    runner = FakeRunner().on("launch", answer("launch", _launch("MAYBE"), ok=False))
+    runner = FakeRunner().on("launch", answer("launch", launch_report("MAYBE"), ok=False))
     with pytest.raises(GuestProtocolError, match="MAYBE"):
         repair.launch(make_guest(runner), Report(vmid=1), "D:\\upgrade")
 
@@ -452,8 +389,6 @@ def _poll(runner: FakeRunner, hours: float = 6.0) -> tuple[str, Report, FakeCloc
     return verdict, rep, clock
 
 
-ALIVE = answer("setup-alive", SetupReport(1, True))
-GONE = answer("setup-alive", SetupReport(0, False))
 RUNNING_LOG = answer("state", state_log("launching: setup.exe"))
 
 
@@ -639,8 +574,8 @@ def test_an_agentless_run_clears_the_guard_before_its_offline_snapshot(tmp_path:
         .on("hostname", Reply(0, "GUEST\r\n"))
         .on("setup-alive", GONE)
         .on("state", answer("state", state_log(present=False)))
-        .on("drives", answer("drives", _drives(C=60.0)))
-        .on("quiesce-wu", answer("quiesce-wu", _quiesce("OK")))
+        .on("drives", answer("drives", drive_report(C=60.0)))
+        .on("quiesce-wu", answer("quiesce-wu", quiesce_report("OK")))
     )
     rep = Report(vmid=1)
     verdict = repair.repair_sequence(
@@ -692,32 +627,6 @@ def test_guest_ip_with_no_address_in_the_subnet_retries_then_refuses() -> None:
 
 # --- run_repair: the result and the whole agent path ----------------------------------------------
 
-NO_LOG = answer("state", state_log(present=False))
-DONE_OK = answer("state", state_log("launching: setup.exe", "STATE=DONE-OK setup exit=0x00000000"))
-
-
-def _agent_runner(pve: FakePve, **overrides: Answer) -> FakeRunner:
-    """A healthy agent guest with no run on it: every step of a full repair answers OK."""
-    answers: dict[str, list[Answer]] = {
-        "qm": [pve],
-        "lock-dirs": [lock_dirs_reply],
-        "certutil": [hashes_to(TOOL_DIR / "winrepair_guest.ps1")],
-        "del": [Reply(0)],
-        "setup-alive": [GONE],
-        "state": [NO_LOG, NO_LOG, DONE_OK],
-        "quiesce-wu": [answer("quiesce-wu", _quiesce("OK"))],
-        "servicing-active": [answer("servicing-active", _servicing(0))],
-        "drives": [answer("drives", _drives(C=60.0, D=200.0))],
-        "scp": [Reply(0)],
-        "prepare": [answer("prepare", _prepare("PASS"))],
-        "launch": [answer("launch", _launch("OK"))],
-    }
-    answers.update({key: [value] for key, value in overrides.items()})
-    runner = FakeRunner()
-    for key, replies in answers.items():
-        runner.on(key, *replies)
-    return runner
-
 
 def _run(
     runner: FakeRunner,
@@ -753,7 +662,7 @@ def _media(tmp_path: Path) -> Path:
 
 
 def test_main_runs_the_whole_agent_path_to_done_ok(tmp_path: Path) -> None:
-    result, steps = _run(_agent_runner(FakePve()), _media(tmp_path))
+    result, steps = _run(agent_runner(FakePve()), _media(tmp_path))
     assert (result.exit, result.verdict) == (RunExit.OK, "STATE=DONE-OK")
     assert [s["step"] for s in steps] == [
         "running", "push_tool", "no_live_run", "quiesce_wu", "servicing_idle", "vtpm", "running",
@@ -789,15 +698,15 @@ def test_a_missing_media_dir_is_refused_naming_it(tmp_path: Path) -> None:
 
 
 def test_main_refusal_after_the_wu_hold_says_wu_is_still_held(tmp_path: Path) -> None:
-    refused = answer("prepare", _prepare("FAIL", "image SPBuild 8973 older than running 9711"), ok=False)
-    result, steps = _run(_agent_runner(FakePve(), prepare=refused), _media(tmp_path))
+    refused = answer("prepare", prepare_report("FAIL", "image SPBuild 8973 older than running 9711"), ok=False)
+    result, steps = _run(agent_runner(FakePve(), prepare=refused), _media(tmp_path))
     error = steps[-1]
     assert (result.exit, result.verdict, error["step"], error["wu_held"]) == (RunExit.REFUSED, "ERROR", "error", True)
     assert "restore-wu" in str(error["message"])
 
 
 def test_main_refusal_before_the_wu_hold_does_not_claim_a_hold(tmp_path: Path) -> None:
-    runner = _agent_runner(FakePve(), **{"setup-alive": ALIVE})
+    runner = agent_runner(FakePve(), **{"setup-alive": ALIVE})
     result, steps = _run(runner, _media(tmp_path))
     assert (result.exit, steps[-1]["step"]) == (RunExit.REFUSED, "error")
     assert "wu_held" not in steps[-1]
@@ -822,7 +731,7 @@ def test_main_failed_poll_after_the_wu_hold_says_wu_is_still_held(
     hours: float,
     verdict: str,
 ) -> None:
-    runner = _agent_runner(FakePve())
+    runner = agent_runner(FakePve())
     runner.replies["state"] = list(state)
     result, steps = _run(runner, _media(tmp_path), hours=hours)
     last = steps[-1]
@@ -831,7 +740,7 @@ def test_main_failed_poll_after_the_wu_hold_says_wu_is_still_held(
 
 
 def test_on_step_sees_the_hold_flagged_on_the_failed_poll_it_already_received(tmp_path: Path) -> None:
-    runner = _agent_runner(FakePve())
+    runner = agent_runner(FakePve())
     runner.replies["state"] = [NO_LOG, NO_LOG, DONE_FAIL]
     recorded: list[Step] = []
     result = run_repair(
@@ -852,14 +761,14 @@ def test_on_step_sees_the_hold_flagged_on_the_failed_poll_it_already_received(tm
 
 
 def test_main_done_ok_does_not_flag_the_hold_as_a_leftover(tmp_path: Path) -> None:
-    _result, steps = _run(_agent_runner(FakePve()), _media(tmp_path))
+    _result, steps = _run(agent_runner(FakePve()), _media(tmp_path))
     assert "wu_held" not in steps[-1]
 
 
 def test_main_carries_the_guest_traceback_into_the_error_step(tmp_path: Path) -> None:
     trace = "Traceback (most recent call last):\nOSError: [WinError 1060] Dienst nicht vorhanden"
     crash = Reply(2, crashed("quiesce-wu", OSError("wmi")).stdout, trace)
-    runner = _agent_runner(FakePve(), **{"quiesce-wu": crash})
+    runner = agent_runner(FakePve(), **{"quiesce-wu": crash})
     result, steps = _run(runner, _media(tmp_path))
     assert result.exit is RunExit.REFUSED
     assert steps[-1]["guest_stderr"] == trace.splitlines()
@@ -867,7 +776,7 @@ def test_main_carries_the_guest_traceback_into_the_error_step(tmp_path: Path) ->
 
 
 def test_repair_refuses_a_vm_that_never_reaches_the_status(tmp_path: Path) -> None:
-    runner = _agent_runner(FakePve(status="stopped", stuck=True))
+    runner = agent_runner(FakePve(status="stopped", stuck=True))
     result, steps = _run(runner, _media(tmp_path))
     assert (result.exit, result.verdict, steps[-1]["step"]) == (RunExit.REFUSED, "ERROR", "error")
     assert steps[-1]["message"] == "vm 1 did not reach status running"
@@ -878,7 +787,7 @@ def test_repair_refuses_a_vm_that_never_reaches_the_status(tmp_path: Path) -> No
 
 
 def test_main_driver_tool_mismatch_is_exit_2_internal(tmp_path: Path) -> None:
-    runner = _agent_runner(FakePve(), state=answer("state", {"present": True}))
+    runner = agent_runner(FakePve(), state=answer("state", {"present": True}))
     result, steps = _run(runner, _media(tmp_path))
     assert (result.exit, result.verdict, steps[-1]["step"]) == (RunExit.INTERNAL, "INTERNAL", "internal")
 
@@ -926,7 +835,7 @@ def _media_scp(cmd: list[str]) -> bool:
 
 def test_main_locks_each_directory_before_anything_is_copied_into_it(tmp_path: Path) -> None:
     pushing = answer("lock-dirs", locked(present=False))
-    runner = _agent_runner(FakePve(), copy=Reply(0), move=Reply(0))
+    runner = agent_runner(FakePve(), copy=Reply(0), move=Reply(0))
     runner.replies["lock-dirs"] = [pushing, pushing, lock_dirs_reply]
     result, _steps = _run(runner, _media(tmp_path))
     assert result.exit is RunExit.OK
@@ -949,7 +858,7 @@ def test_main_lock_dirs_refusal_copies_no_media_and_says_wu_is_held(tmp_path: Pa
     def lock_dirs(cmd: list[str]) -> Reply:
         return answer("lock-dirs", refused, ok=False) if "--stage-root" in cmd else lock_dirs_reply(cmd)
 
-    runner = _agent_runner(FakePve(), **{"lock-dirs": lock_dirs})
+    runner = agent_runner(FakePve(), **{"lock-dirs": lock_dirs})
     result, steps = _run(runner, _media(tmp_path))
     assert (result.exit, result.verdict, steps[-1]["step"], steps[-1]["wu_held"]) == (
         RunExit.REFUSED,
@@ -992,7 +901,7 @@ def _seeded(tmp_path: Path) -> FileReceiptStore:
 
 
 def test_repair_writes_the_receipt_after_prepare_and_before_launch(tmp_path: Path) -> None:
-    runner, clock = _agent_runner(FakePve()), FakeClock()
+    runner, clock = agent_runner(FakePve()), FakeClock()
     store = _RecordingStore(tmp_path / "state", runner, clock)
     store.write(OLD_RECEIPT)
     result = run_repair(
@@ -1017,7 +926,7 @@ def test_repair_writes_the_receipt_after_prepare_and_before_launch(tmp_path: Pat
 
 def test_a_stage_only_repair_leaves_no_receipt(tmp_path: Path) -> None:
     store = _seeded(tmp_path)
-    result, _steps = _run(_agent_runner(FakePve()), _media(tmp_path), stage_only=True, receipts=store)
+    result, _steps = _run(agent_runner(FakePve()), _media(tmp_path), stage_only=True, receipts=store)
     assert (result.exit, result.verdict) == (RunExit.OK, "STAGED")
     assert store.read(1) is None
     assert store.read(2) == OLD_RECEIPT.model_copy(update={"vmid": 2})
@@ -1025,7 +934,7 @@ def test_a_stage_only_repair_leaves_no_receipt(tmp_path: Path) -> None:
 
 def test_a_repair_refused_before_prepare_leaves_no_stale_receipt(tmp_path: Path) -> None:
     store = _seeded(tmp_path)
-    runner = _agent_runner(FakePve(), drives=answer("drives", _drives(C=10.0)))
+    runner = agent_runner(FakePve(), drives=answer("drives", drive_report(C=10.0)))
     result, steps = _run(runner, _media(tmp_path), receipts=store)
     assert (result.exit, result.verdict) == (RunExit.REFUSED, "ERROR")
     assert str(steps[-1]["message"]).startswith(
@@ -1038,7 +947,7 @@ def test_a_repair_refused_before_prepare_leaves_no_stale_receipt(tmp_path: Path)
 @pytest.mark.parametrize("status", ["running", "stopped"])
 def test_a_repair_refused_by_the_live_run_guard_keeps_the_receipt(tmp_path: Path, status: str) -> None:
     store = _seeded(tmp_path)
-    runner = _agent_runner(FakePve(status=status), **{"setup-alive": ALIVE})
+    runner = agent_runner(FakePve(status=status), **{"setup-alive": ALIVE})
     result, steps = _run(runner, _media(tmp_path), receipts=store)
     assert (result.exit, result.verdict) == (RunExit.REFUSED, "ERROR")
     assert steps[-1]["message"] == "SetupHost is running - an upgrade is live; poll it instead of relaunching"
@@ -1048,7 +957,7 @@ def test_a_repair_refused_by_the_live_run_guard_keeps_the_receipt(tmp_path: Path
 def test_a_receipt_that_cannot_be_removed_refuses_the_repair_before_staging(tmp_path: Path) -> None:
     store = FileReceiptStore(tmp_path / "state")
     store.path(1).mkdir(parents=True)  # a directory where the receipt file goes: unlink fails
-    runner = _agent_runner(FakePve())
+    runner = agent_runner(FakePve())
     result, steps = _run(runner, _media(tmp_path), receipts=store)
     assert (result.exit, result.verdict) == (RunExit.REFUSED, "ERROR")
     assert str(steps[-1]["message"]).startswith(f"cannot remove the repair receipt {store.path(1)}: ")
@@ -1059,7 +968,7 @@ def test_a_receipt_that_cannot_be_written_refuses_the_repair_before_launch(tmp_p
     blocker = tmp_path / "state"
     blocker.write_text("", encoding="utf-8")  # a file where the state directory goes
     store = FileReceiptStore(blocker)
-    runner = _agent_runner(FakePve())
+    runner = agent_runner(FakePve())
     result, steps = _run(runner, _media(tmp_path), receipts=store)
     assert (result.exit, result.verdict) == (RunExit.REFUSED, "ERROR")
     assert str(steps[-1]["message"]).startswith(f"cannot write the repair receipt {store.path(1)}: ")

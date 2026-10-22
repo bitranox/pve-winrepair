@@ -50,10 +50,13 @@ UNREADABLE = PermissionError(13, "Permission denied", "/etc/xdg/app/config.toml"
 #: added without an entry fails ``test_every_command_is_classified``, so nobody can add one
 #: that silently reads an empty configuration after a load failure.
 NEEDS_CONFIG: dict[str, list[str]] = {
+    "apply": ["apply", "--vmid", "1", "--ip", "192.0.2.10"],
     "config": ["config"],
+    "repair": ["repair", "--vmid", "1"],
 }
 RUNS_WITHOUT_CONFIG: dict[str, list[str]] = {
     "config-deploy": ["config-deploy", "--target", "user"],
+    "guest-tool": ["guest-tool", "path"],
     "hello": ["hello"],
     "info": ["info"],
 }

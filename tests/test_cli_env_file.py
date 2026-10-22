@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -43,13 +44,9 @@ def inject_config_with_dotenv_capture(
             return config
 
         prod = build_production()
-        test_services = AppServices(
+        test_services = dataclasses.replace(
+            prod,
             get_config=_capturing_get_config,
-            get_default_config_path=prod.get_default_config_path,
-            deploy_configuration=prod.deploy_configuration,
-            display_config=prod.display_config,
-            init_logging=prod.init_logging,
-            check_logging_config=prod.check_logging_config,
         )
         return lambda: test_services
 

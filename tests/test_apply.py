@@ -11,8 +11,13 @@ from typing import TYPE_CHECKING
 
 import pytest
 from guest_fakes import (
+    ALIVE,
+    DONE_OK,
+    GONE,
     GUEST_IP,
     MUTATING_QM,
+    NEWOS,
+    NO_LOG,
     TOOL_DIR,
     TOOL_PATH,
     Answer,
@@ -21,6 +26,7 @@ from guest_fakes import (
     FakeRunner,
     Reply,
     answer,
+    apply_runner,
     call_labels,
     certutil_output,
     crashed,
@@ -28,6 +34,7 @@ from guest_fakes import (
     lock_dirs_reply,
     make_guest,
     make_node,
+    restore_report,
     route,
     state_log,
     tool_on_the_guest,
@@ -39,14 +46,12 @@ from pve_winrepair.application.apply import ApplyError, ApplyRequest, run_apply
 from pve_winrepair.domain.envelope import WU_HELD_HINT, GuestProtocolError
 from pve_winrepair.domain.receipt import RepairReceipt
 from pve_winrepair.domain.report import Report, RunExit, Step
-from pve_winrepair_guest.probes import BuildInfo, SetupReport, StagedOs
+from pve_winrepair_guest.probes import BuildInfo, StagedOs
 from pve_winrepair_guest.upgrade import LockDirsReport
-from pve_winrepair_guest.wu import RestoreReport, SearchProbe, ServiceRow, StartWrite
+from pve_winrepair_guest.wu import SearchProbe
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-NEWOS = r"C:\$WINDOWS.~BT\NewOS\Windows\System32\winload.efi"
 
 
 # --- build ----------------------------------------------------------------------------------
@@ -106,24 +111,8 @@ def test_gate_staged_present_flag_contradicting_the_verdict_is_a_protocol_error(
 # --- restore-wu -----------------------------------------------------------------------------
 
 
-TIMED_OUT = SearchProbe("TIMEOUT", None, (), None, 180.0)
-
-
-def _restore(verdict: str, still: tuple[str, ...] = (), search: SearchProbe = TIMED_OUT) -> RestoreReport:
-    rows = tuple(
-        ServiceRow(name, "Disabled" if name in still else "Manual", "Stopped") for name in ("wuauserv", "UsoSvc")
-    )
-    return RestoreReport(
-        writes=(StartWrite("wuauserv", 3, "WRITTEN", None),),
-        services=rows,
-        still_disabled=still,
-        verdict=verdict,
-        search=search,
-    )
-
-
 def test_restore_wu_restored_is_ok() -> None:
-    runner = FakeRunner().on("restore-wu", answer("restore-wu", _restore("RESTORED")))
+    runner = FakeRunner().on("restore-wu", answer("restore-wu", restore_report("RESTORED")))
     rep = Report(vmid=1)
     apply.restore_windows_update(make_guest(runner), rep)
     assert rep.steps[0]["ok"] is True
@@ -132,7 +121,7 @@ def test_restore_wu_restored_is_ok() -> None:
 
 
 def test_restore_wu_search_timeout_is_explained_as_no_verdict() -> None:
-    runner = FakeRunner().on("restore-wu", answer("restore-wu", _restore("RESTORED")))
+    runner = FakeRunner().on("restore-wu", answer("restore-wu", restore_report("RESTORED")))
     rep = Report(vmid=1)
     apply.restore_windows_update(make_guest(runner), rep)
     assert rep.steps[0]["ok"] is True
@@ -144,7 +133,7 @@ def test_restore_wu_search_timeout_is_explained_as_no_verdict() -> None:
 
 def test_restore_wu_search_ok_records_the_pending_count() -> None:
     found = SearchProbe("OK", 2, ("KB1", "KB2"), None, 180.0)
-    runner = FakeRunner().on("restore-wu", answer("restore-wu", _restore("RESTORED", search=found)))
+    runner = FakeRunner().on("restore-wu", answer("restore-wu", restore_report("RESTORED", search=found)))
     rep = Report(vmid=1)
     apply.restore_windows_update(make_guest(runner), rep)
     assert (rep.steps[0]["ok"], rep.steps[0]["search"], rep.steps[0]["search_pending"]) == (True, "OK", 2)
@@ -153,14 +142,14 @@ def test_restore_wu_search_ok_records_the_pending_count() -> None:
 
 def test_restore_wu_search_failure_is_recorded_and_still_ok() -> None:
     failed = SearchProbe("FAILED", None, (), "com_error: 0x8024401c", 180.0)
-    runner = FakeRunner().on("restore-wu", answer("restore-wu", _restore("RESTORED", search=failed)))
+    runner = FakeRunner().on("restore-wu", answer("restore-wu", restore_report("RESTORED", search=failed)))
     rep = Report(vmid=1)
     apply.restore_windows_update(make_guest(runner), rep)
     assert (rep.steps[0]["ok"], rep.steps[0]["search_error"]) == (True, "com_error: 0x8024401c")
 
 
 def test_restore_wu_still_disabled_refuses_naming_the_services() -> None:
-    reply = answer("restore-wu", _restore("STILL_DISABLED", ("UsoSvc",)), ok=False)
+    reply = answer("restore-wu", restore_report("STILL_DISABLED", ("UsoSvc",)), ok=False)
     runner = FakeRunner().on("restore-wu", reply)
     rep = Report(vmid=1)
     with pytest.raises(ApplyError, match="Windows Update left disabled: UsoSvc"):
@@ -169,7 +158,7 @@ def test_restore_wu_still_disabled_refuses_naming_the_services() -> None:
 
 
 def test_restore_wu_unknown_refuses_rather_than_reading_as_restored() -> None:
-    runner = FakeRunner().on("restore-wu", answer("restore-wu", _restore("UNKNOWN"), ok=False))
+    runner = FakeRunner().on("restore-wu", answer("restore-wu", restore_report("UNKNOWN"), ok=False))
     with pytest.raises(ApplyError, match="could not be verified"):
         apply.restore_windows_update(make_guest(runner), Report(vmid=1))
 
@@ -215,12 +204,8 @@ def test_push_tool_step_reports_a_profile_copy_it_could_not_delete() -> None:
 
 # --- orchestration: nothing stops the guest until its upgrade run has finished OK -----------
 
-ALIVE = answer("setup-alive", SetupReport(1, True))
-GONE = answer("setup-alive", SetupReport(0, False))
-DONE_OK = answer("state", state_log("launching: setup.exe", "STATE=DONE-OK setup exit=0x00000000"))
 DONE_FAIL = answer("state", state_log("launching: setup.exe", "STATE=DONE-FAIL setup exit=0xC1900200"))
 NO_MARKER = answer("state", state_log("=== start", "launching: setup.exe"))
-NO_LOG = answer("state", state_log(present=False))
 REQUEST = ApplyRequest(vmid=1, ip=GUEST_IP)
 # What the repair run's prepare step measured for VM 1: the build the apply must reach.
 RECEIPT = RepairReceipt(
@@ -234,23 +219,6 @@ def receipts(tmp_path: Path) -> FileReceiptStore:
     store = FileReceiptStore(tmp_path / "state")
     store.write(RECEIPT)
     return store
-
-
-def _apply_runner(pve: FakePve, alive: Reply, state: Reply) -> FakeRunner:
-    """A guest one apply away from the target: down-level staged, NewOS present."""
-    return (
-        tool_on_the_guest(FakeRunner())
-        .on("qm", pve)
-        .on("build", answer("build", BuildInfo("26200", 7462, "26200.7462")), answer("build", BUILD_AFTER))
-        .on("setup-alive", alive)
-        .on("state", state)
-        .on("staged-os", answer("staged-os", StagedOs(NEWOS, True, "REARMABLE")))
-        .on("hostname", Reply(0, "GUEST\r\n"))
-        .on("restore-wu", answer("restore-wu", _restore("RESTORED")))
-    )
-
-
-BUILD_AFTER = BuildInfo("26200", 8973, "26200.8973")
 
 
 @pytest.mark.parametrize(
@@ -278,7 +246,7 @@ def test_apply_refuses_before_anything_stops_a_guest_whose_run_did_not_finish_ok
     alive: Reply, state: Reply, verdict: str, reason: str
 ) -> None:
     pve = FakePve()
-    runner = _apply_runner(pve, alive, state)
+    runner = apply_runner(pve, alive, state)
     rep = Report(vmid=1)
     refusal: ApplyError | None = None
     try:
@@ -295,7 +263,7 @@ def test_apply_refuses_before_anything_stops_a_guest_whose_run_did_not_finish_ok
 
 def test_apply_reads_a_finished_run_before_the_apply_reboot() -> None:
     pve = FakePve()
-    runner = _apply_runner(pve, GONE, DONE_OK)
+    runner = apply_runner(pve, GONE, DONE_OK)
     rep = Report(vmid=1)
     assert apply.apply_sequence(REQUEST, make_node(runner), rep, receipt=RECEIPT) == "VERIFIED"
     labels = call_labels(runner.calls)
@@ -314,7 +282,7 @@ def test_apply_reads_a_finished_run_before_the_apply_reboot() -> None:
 
 
 def test_run_result_names_a_live_run_and_is_refused(receipts: FileReceiptStore) -> None:
-    runner = _apply_runner(FakePve(), ALIVE, NO_MARKER)
+    runner = apply_runner(FakePve(), ALIVE, NO_MARKER)
     result = run_apply(REQUEST, make_node(runner), receipts=receipts, on_step=lambda _s: None)
     assert (result.exit, result.verdict) == (RunExit.REFUSED, "RUN_LIVE")
     assert [s["step"] for s in result.steps][-2:] == ["run_finished", "error"]
@@ -322,13 +290,13 @@ def test_run_result_names_a_live_run_and_is_refused(receipts: FileReceiptStore) 
 
 
 def test_run_result_names_a_failed_run(receipts: FileReceiptStore) -> None:
-    runner = _apply_runner(FakePve(), GONE, DONE_FAIL)
+    runner = apply_runner(FakePve(), GONE, DONE_FAIL)
     result = run_apply(REQUEST, make_node(runner), receipts=receipts, on_step=lambda _s: None)
     assert (result.exit, result.verdict) == (RunExit.REFUSED, "RUN_FAILED")
 
 
 def test_run_result_of_a_refusal_says_windows_update_is_still_held(receipts: FileReceiptStore) -> None:
-    runner = _apply_runner(FakePve(), GONE, DONE_FAIL)
+    runner = apply_runner(FakePve(), GONE, DONE_FAIL)
     result = run_apply(REQUEST, make_node(runner), receipts=receipts, on_step=lambda _s: None)
     error = result.steps[-1]
     assert (result.exit, error["step"], error["wu_held"]) == (RunExit.REFUSED, "error", True)
@@ -336,7 +304,7 @@ def test_run_result_of_a_refusal_says_windows_update_is_still_held(receipts: Fil
 
 
 def test_apply_refuses_a_vm_that_never_reaches_the_status(receipts: FileReceiptStore) -> None:
-    runner = _apply_runner(FakePve(stuck=True), GONE, DONE_OK)
+    runner = apply_runner(FakePve(stuck=True), GONE, DONE_OK)
     result = run_apply(REQUEST, make_node(runner), receipts=receipts, on_step=lambda _s: None)
     assert (result.exit, result.verdict, result.steps[-1]["step"]) == (RunExit.REFUSED, "ERROR", "error")
     assert "vm 1 did not reach status stopped" in str(result.steps[-1]["message"])
@@ -370,7 +338,7 @@ def _applied(runner: FakeRunner) -> tuple[str | None, list[dict[str, object]]]:
 
 
 def test_after_the_apply_reboot_build_and_restore_wu_run_from_the_verified_profile_copy() -> None:
-    runner = _apply_runner(FakePve(), GONE, DONE_OK)
+    runner = apply_runner(FakePve(), GONE, DONE_OK)
     verdict, steps = _applied(runner)
     after = _after_reboot(runner)
     assert verdict == "VERIFIED"
@@ -384,7 +352,7 @@ def test_after_the_apply_reboot_build_and_restore_wu_run_from_the_verified_profi
 
 
 def test_a_changed_winrepair_lock_after_the_upgrade_is_reported_and_still_lifts_the_wu_hold() -> None:
-    runner = _apply_runner(FakePve(), GONE, DONE_OK)
+    runner = apply_runner(FakePve(), GONE, DONE_OK)
     reason = r"C:\winrepair existed before lock-dirs and is not locked as lock-dirs creates it (owner)"
     changed = answer("lock-dirs", LockDirsReport(TOOL_PATH, True, None, (), "FAILED", reason), ok=False)
     runner.replies["lock-dirs"] = [lock_dirs_reply, changed]
@@ -399,7 +367,7 @@ def test_a_changed_winrepair_lock_after_the_upgrade_is_reported_and_still_lifts_
 
 
 def test_a_profile_copy_that_is_not_the_tool_after_the_reboot_runs_nothing_and_is_deleted() -> None:
-    runner = _apply_runner(FakePve(), GONE, DONE_OK)
+    runner = apply_runner(FakePve(), GONE, DONE_OK)
     wrong = Reply(0, certutil_output("0" * 64))
     replies: list[Answer] = [hashes_to(TOOL_DIR / "winrepair_guest.ps1")] * 2
     runner.replies["certutil"] = [*replies, wrong]
@@ -409,7 +377,7 @@ def test_a_profile_copy_that_is_not_the_tool_after_the_reboot_runs_nothing_and_i
 
 
 def test_a_failure_after_the_reboot_still_deletes_the_profile_copy() -> None:
-    runner = _apply_runner(FakePve(), GONE, DONE_OK)
+    runner = apply_runner(FakePve(), GONE, DONE_OK)
     runner.replies["build"] = [
         answer("build", BuildInfo("26200", 7462, "26200.7462")),
         answer("build", BuildInfo("26200", 7462, "26200.7462")),
@@ -421,7 +389,7 @@ def test_a_failure_after_the_reboot_still_deletes_the_profile_copy() -> None:
 
 
 def test_a_profile_copy_left_behind_after_the_reboot_is_reported() -> None:
-    runner = _apply_runner(FakePve(), GONE, DONE_OK)
+    runner = apply_runner(FakePve(), GONE, DONE_OK)
     runner.replies["del"] = [Reply(0), Reply(1, "", "Zugriff verweigert")]
     verdict, steps = _applied(runner)
     assert verdict == "VERIFIED"
@@ -431,7 +399,7 @@ def test_a_profile_copy_left_behind_after_the_reboot_is_reported() -> None:
 
 
 def test_the_wu_held_hint_names_a_verified_copy_never_the_tool_directory(receipts: FileReceiptStore) -> None:
-    runner = _apply_runner(FakePve(), GONE, DONE_FAIL)
+    runner = apply_runner(FakePve(), GONE, DONE_FAIL)
     result = run_apply(REQUEST, make_node(runner), receipts=receipts, on_step=lambda _s: None)
     message = str(result.steps[-1]["message"])
     assert "certutil -hashfile" in message
@@ -443,7 +411,7 @@ def test_the_wu_held_hint_names_a_verified_copy_never_the_tool_directory(receipt
 
 
 def test_apply_without_a_receipt_refuses_before_any_call(tmp_path: Path) -> None:
-    runner = _apply_runner(FakePve(), GONE, DONE_OK)
+    runner = apply_runner(FakePve(), GONE, DONE_OK)
     store = FileReceiptStore(tmp_path / "state")
     result = run_apply(REQUEST, make_node(runner), receipts=store, on_step=lambda _s: None)
     assert runner.calls == []
@@ -456,7 +424,7 @@ def test_apply_without_a_receipt_refuses_before_any_call(tmp_path: Path) -> None
 
 
 def test_apply_with_an_unreadable_receipt_refuses_naming_the_file_before_any_call(tmp_path: Path) -> None:
-    runner = _apply_runner(FakePve(), GONE, DONE_OK)
+    runner = apply_runner(FakePve(), GONE, DONE_OK)
     store = FileReceiptStore(tmp_path)
     store.path(1).write_text("{not json", encoding="utf-8")
     result = run_apply(REQUEST, make_node(runner), receipts=store, on_step=lambda _s: None)
@@ -475,7 +443,7 @@ def test_apply_verifies_the_build_the_receipt_recorded(
 ) -> None:
     store = FileReceiptStore(tmp_path)
     store.write(RECEIPT.model_copy(update={"image_spbuild": spbuild}))
-    runner = _apply_runner(FakePve(), GONE, DONE_OK)  # BUILD_AFTER is 26200.8973
+    runner = apply_runner(FakePve(), GONE, DONE_OK)  # BUILD_AFTER is 26200.8973
     recorded: list[Step] = []
     result = run_apply(REQUEST, make_node(runner), receipts=store, on_step=recorded.append)
     assert (result.exit, result.verdict) == (exit_, verdict)
@@ -492,7 +460,7 @@ def test_apply_verifies_the_build_the_receipt_recorded(
 
 
 def test_run_apply_maps_an_unexpected_error_to_internal(receipts: FileReceiptStore) -> None:
-    runner = _apply_runner(FakePve(), GONE, DONE_OK)
+    runner = apply_runner(FakePve(), GONE, DONE_OK)
     runner.replies["build"] = [ValueError("a driver and tool that disagree")]
     result = run_apply(REQUEST, make_node(runner), receipts=receipts, on_step=lambda _s: None)
     assert (result.exit, result.verdict) == (RunExit.INTERNAL, "INTERNAL")

@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     from ..domain.envelope import Envelope, Fields
     from ..domain.guest_tool import PackedTool, Pushed
     from ..domain.receipt import RepairReceipt
+    from ..domain.settings import Settings, SshSettings
 
 
 class GetConfig(Protocol):
@@ -89,6 +90,28 @@ class CheckLoggingConfig(Protocol):
     """
 
     def __call__(self, config: Config) -> None: ...
+
+
+class LoadSettings(Protocol):
+    """Validate the node CLI's sections of a loaded configuration into typed settings.
+
+    Raises ``SettingsError`` (one ``<section>.<field>: <reason>`` line per problem) for a value the
+    settings refuse.
+    """
+
+    def __call__(self, config: Config, /) -> Settings: ...
+
+
+class MakeNode(Protocol):
+    """The PVE node this command runs on, reaching its guests with the given ``[ssh]`` settings."""
+
+    def __call__(self, ssh: SshSettings, /) -> NodePort: ...
+
+
+class MakeReceipts(Protocol):
+    """The receipt store kept in the given ``[node] state_dir``."""
+
+    def __call__(self, state_dir: Path, /) -> ReceiptStore: ...
 
 
 class GuestPort(Protocol):
@@ -191,6 +214,9 @@ __all__ = [
     "GetDefaultConfigPath",
     "GuestPort",
     "InitLogging",
+    "LoadSettings",
+    "MakeNode",
+    "MakeReceipts",
     "NodePort",
     "ReceiptStore",
 ]

@@ -1,0 +1,62 @@
+"""``pve-winrepair apply``: apply a staged repair upgrade and verify the build its repair run recorded.
+
+Thin: it reads the settings, refuses what :mod:`.runs` checks before any call, builds the
+:class:`~pve_winrepair.application.apply.ApplyRequest`, runs the use case on the composition's node
+and receipt store, and prints the result (exit 0 verified, 1 refused, 2 internal; 78 when the
+configuration does not load or validate).
+
+Contents:
+    * :func:`cli_apply` - the ``apply`` command.
+"""
+
+from __future__ import annotations
+
+import lib_log_rich.runtime
+import rich_click as click
+
+from pve_winrepair.application.apply import ApplyRequest, run_apply
+
+from ..constants import CLICK_CONTEXT_SETTINGS
+from ..context import get_cli_context
+from ..typed_click import option
+from .runs import PreflightError, check_node, echo_step, finish, load_run_settings, operator_progress, refused
+
+__all__ = ["cli_apply"]
+
+
+@click.command("apply", context_settings=CLICK_CONTEXT_SETTINGS)
+@option("--vmid", type=click.IntRange(min=1), required=True, help="The guest's VMID on this node.")
+@option("--ip", required=True, help="The guest's address.")
+@option(
+    "--apply-minutes",
+    type=float,
+    default=90.0,
+    show_default=True,
+    help="How long the apply phase may take before it is reported as overrun.",
+)
+@option("--json", "as_json", is_flag=True, default=False, help="Print a JSON envelope on stdout.")
+@click.pass_context
+def cli_apply(ctx: click.Context, *, vmid: int, ip: str, apply_minutes: float, as_json: bool) -> None:
+    """Apply the upgrade a repair run staged, and verify the build it recorded.
+
+    Refuses unless the guest's upgrade run finished OK, reboots it cleanly into the new OS, waits
+    for it to answer ssh, checks its build against the repair's receipt in [node] state_dir, and
+    lifts the Windows Update hold. Exit 0 when verified, 1 when refused, 2 on an internal error,
+    78 when the configuration does not load.
+    """
+    cli_ctx = get_cli_context(ctx)
+    settings = load_run_settings(ctx, cli_ctx)
+    with lib_log_rich.runtime.bind(job_id="cli-apply", extra={"command": "apply", "vmid": vmid}):
+        try:
+            check_node(settings)
+        except PreflightError as refusal:
+            # The repair run held Windows Update and only a verified apply lifts it.
+            finish(ctx, refused(vmid, refusal, wu_held=True), command="apply", vmid=vmid, as_json=as_json)
+        with operator_progress():
+            result = run_apply(
+                ApplyRequest(vmid=vmid, ip=ip, apply_minutes=apply_minutes),
+                cli_ctx.services.make_node(settings.ssh),
+                receipts=cli_ctx.services.make_receipts(settings.node.state_dir),
+                on_step=echo_step,
+            )
+        finish(ctx, result, command="apply", vmid=vmid, as_json=as_json)

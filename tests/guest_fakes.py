@@ -9,20 +9,52 @@ renamed on the guest side breaks these tests instead of passing against a hand-t
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import subprocess
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
+from click.testing import CliRunner
+from lib_layered_config import Config
+
+from pve_winrepair.adapters.cli.main import main
 from pve_winrepair.adapters.guest_ssh import Guest
 from pve_winrepair.adapters.node import Node
+from pve_winrepair.composition import AppServices, build_testing
 from pve_winrepair.domain.settings import SshSettings
 from pve_winrepair_guest.envelope import Outcome, build, internal_error, render
-from pve_winrepair_guest.probes import StateLog, state_verdict
-from pve_winrepair_guest.upgrade import DirectoryLock, LockDirsReport
+from pve_winrepair_guest.probes import (
+    BuildInfo,
+    Drive,
+    DriveReport,
+    ServicingReport,
+    SetupReport,
+    StagedOs,
+    StateLog,
+    state_verdict,
+)
+from pve_winrepair_guest.upgrade import (
+    DirectoryLock,
+    LaunchReport,
+    LaunchWait,
+    LockDirsReport,
+    PrepareReport,
+    TaskCleanup,
+)
+from pve_winrepair_guest.wim import WimImage
+from pve_winrepair_guest.wu import (
+    QuiesceReport,
+    RestoreReport,
+    SearchProbe,
+    ServiceRow,
+    StartWrite,
+    StopIssued,
+    StopWait,
+)
 
 if TYPE_CHECKING:
     from pve_winrepair.domain.envelope import Runner
@@ -239,3 +271,217 @@ def call_labels(calls: list[list[str]]) -> list[str]:
         else:
             labels.append(f"guest {route(cmd)}")
     return labels
+
+
+# --- whole runs: a guest every step of a repair or an apply answers OK -----------------------
+# Shared by the use-case tests and the CLI tests, so one fake guest decides both.
+
+GIB = 1024**3
+
+
+def quiesce_report(verdict: str, *, running: tuple[str, ...] = ()) -> QuiesceReport:
+    """quiesce-wu's answer with ``verdict``; ``running`` names the services still running."""
+    rows = (ServiceRow("wuauserv", "Disabled", "Running" if running else "Stopped"),)
+    return QuiesceReport(
+        previous_start_modes={"wuauserv": "Manual", "UsoSvc": "Auto"},
+        writes=(StartWrite("wuauserv", 4, "WRITTEN", None),),
+        stops=(StopIssued("wuauserv", 0, None),),
+        wait=StopWait(10.0, False, running),
+        services=rows,
+        not_disabled=(),
+        still_running=running,
+        verdict=verdict,
+    )
+
+
+def drive_report(**free_gib: float) -> DriveReport:
+    """drives' answer: one fixed drive per keyword, with that many GiB free."""
+    return DriveReport(
+        drives=tuple(
+            Drive(letter, int(gib * GIB), int(gib * GIB) * 2, round(gib, 1)) for letter, gib in sorted(free_gib.items())
+        )
+    )
+
+
+def servicing_report(total: int) -> ServicingReport:
+    """servicing-active's answer with ``total`` servicing processes."""
+    return ServicingReport(counts={"TiWorker": total, "TrustedInstaller": 0}, total=total, active=total > 0)
+
+
+IMAGE = WimImage(1, "Windows 11 Pro", "Professional", 26200, 8973, ("de-DE",), "de-DE")
+RUNNING_BUILD = BuildInfo("26200", 7462, "26200.7462")
+
+
+def prepare_report(gate: str, reason: str | None = None, *, tpm: bool | None = True) -> PrepareReport:
+    """prepare's answer for :data:`IMAGE` staged on ``D:\\upgrade``: ``gate`` PASS or FAIL with ``reason``."""
+    passed = gate == "PASS"
+    return PrepareReport(
+        "D:\\upgrade",
+        12,
+        0,
+        "D:\\upgrade\\sources\\install.wim",
+        gate,
+        reason,
+        IMAGE,
+        RUNNING_BUILD,
+        1 if passed else None,
+        tpm if passed else None,
+        (),
+    )
+
+
+DISARMED = TaskCleanup("DISARM", None, False, True, None)
+
+
+def launch_report(
+    verdict: str,
+    reason: str | None = None,
+    *,
+    wait: str | None = "LAUNCHED",
+    setuphost: int | None = 1,
+    cleanup: TaskCleanup = DISARMED,
+) -> LaunchReport:
+    """launch's answer with ``verdict``: the SYSTEM task points at the pushed tool."""
+    return LaunchReport(
+        "OVMRepairUpgrade",
+        f"powershell -File {TOOL_PATH} upgrade-run",
+        False,
+        True,
+        None if wait is None else LaunchWait(wait, 42.0, None),
+        setuphost,
+        state_log("launching: setup.exe"),
+        cleanup,
+        verdict,
+        reason,
+    )
+
+
+ALIVE = answer("setup-alive", SetupReport(1, True))
+GONE = answer("setup-alive", SetupReport(0, False))
+NO_LOG = answer("state", state_log(present=False))
+DONE_OK = answer("state", state_log("launching: setup.exe", "STATE=DONE-OK setup exit=0x00000000"))
+
+
+def agent_runner(pve: FakePve, **overrides: Answer) -> FakeRunner:
+    """A healthy agent guest with no run on it: every step of a full repair answers OK."""
+    answers: dict[str, list[Answer]] = {
+        "qm": [pve],
+        "lock-dirs": [lock_dirs_reply],
+        "certutil": [hashes_to(TOOL_DIR / "winrepair_guest.ps1")],
+        "del": [Reply(0)],
+        "setup-alive": [GONE],
+        "state": [NO_LOG, NO_LOG, DONE_OK],
+        "quiesce-wu": [answer("quiesce-wu", quiesce_report("OK"))],
+        "servicing-active": [answer("servicing-active", servicing_report(0))],
+        "drives": [answer("drives", drive_report(C=60.0, D=200.0))],
+        "scp": [Reply(0)],
+        "prepare": [answer("prepare", prepare_report("PASS"))],
+        "launch": [answer("launch", launch_report("OK"))],
+    }
+    answers.update({key: [value] for key, value in overrides.items()})
+    runner = FakeRunner()
+    for key, replies in answers.items():
+        runner.on(key, *replies)
+    return runner
+
+
+NEWOS = r"C:\$WINDOWS.~BT\NewOS\Windows\System32\winload.efi"
+TIMED_OUT = SearchProbe("TIMEOUT", None, (), None, 180.0)
+
+
+def restore_report(verdict: str, still: tuple[str, ...] = (), search: SearchProbe = TIMED_OUT) -> RestoreReport:
+    """restore-wu's answer with ``verdict``; ``still`` names the services left disabled."""
+    rows = tuple(
+        ServiceRow(name, "Disabled" if name in still else "Manual", "Stopped") for name in ("wuauserv", "UsoSvc")
+    )
+    return RestoreReport(
+        writes=(StartWrite("wuauserv", 3, "WRITTEN", None),),
+        services=rows,
+        still_disabled=still,
+        verdict=verdict,
+        search=search,
+    )
+
+
+def apply_runner(pve: FakePve, alive: Reply, state: Reply) -> FakeRunner:
+    """A guest one apply away from the target: down-level staged, NewOS present."""
+    return (
+        tool_on_the_guest(FakeRunner())
+        .on("qm", pve)
+        .on("build", answer("build", BuildInfo("26200", 7462, "26200.7462")), answer("build", BUILD_AFTER))
+        .on("setup-alive", alive)
+        .on("state", state)
+        .on("staged-os", answer("staged-os", StagedOs(NEWOS, True, "REARMABLE")))
+        .on("hostname", Reply(0, "GUEST\r\n"))
+        .on("restore-wu", answer("restore-wu", restore_report("RESTORED")))
+    )
+
+
+BUILD_AFTER = BuildInfo("26200", 8973, "26200.8973")
+
+
+# --- the CLI: ``main()`` over the testing composition, with the fake node injected ----------------
+
+
+@dataclass(frozen=True)
+class CliRun:
+    """How one ``main()`` run ended: its exit code and what it wrote to stdout and stderr."""
+
+    exit_code: int
+    stdout: str
+    stderr: str
+
+
+def cli_config(tmp_path: Path) -> dict[str, dict[str, object]]:
+    """The node CLI sections for a run on the fake node: :data:`SSH`, a media dir, a state dir in ``tmp_path``.
+
+    The media directory holds only ``setup.exe``; the state directory does not exist yet (the first
+    receipt creates it).
+    """
+    media = tmp_path / "media"
+    media.mkdir(exist_ok=True)
+    (media / "setup.exe").write_bytes(b"MZ")
+    return {
+        "ssh": {"key": KEY, "user": USER},
+        "guest": {"subnet": "192.0.2.0/24"},
+        "repair": {"media_dir": str(media)},
+        "node": {"state_dir": str(tmp_path / "state")},
+    }
+
+
+def run_cli(argv: Sequence[str], config: Mapping[str, object], runner: Runner) -> CliRun:
+    """Run ``pve-winrepair <argv>`` through the real ``main()`` with ``config`` and a node on ``runner``.
+
+    The configuration is injected as the template's CLI tests inject it (``get_config``), the node
+    through ``build_testing(make_node=...)``: it gets the ``[ssh]`` settings the command read, the
+    fake runner, a fake clock and the 83-byte stand-in tool.
+    """
+    loaded = Config(dict(config), {})
+    clock = FakeClock()
+
+    def get_config(**_kwargs: object) -> Config:
+        return loaded
+
+    def make_node(ssh: SshSettings) -> Node:
+        return Node(ssh=ssh, runner=runner, clock=clock.time, sleep=clock.sleep, tool_dir=TOOL_DIR)
+
+    def services() -> AppServices:
+        return dataclasses.replace(build_testing(make_node=make_node), get_config=get_config)
+
+    with CliRunner().isolation() as (stdout, stderr, _output):
+        exit_code = main(list(argv), services_factory=services)
+    return CliRun(exit_code, stdout.getvalue().decode("utf-8"), stderr.getvalue().decode("utf-8"))
+
+
+def json_envelope(stdout: str) -> dict[str, object]:
+    """The --json envelope: the WHOLE of stdout must parse as one object, so nothing else went there."""
+    parsed: object = json.loads(stdout)
+    assert isinstance(parsed, dict)
+    return cast("dict[str, object]", parsed)
+
+
+def envelope_steps(envelope: dict[str, object]) -> list[dict[str, object]]:
+    """The envelope's ``steps``, each a step object."""
+    steps = envelope["steps"]
+    assert isinstance(steps, list)
+    return cast("list[dict[str, object]]", steps)

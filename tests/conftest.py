@@ -8,6 +8,7 @@ Centralizes test infrastructure following clean architecture principles:
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import os
 import re
@@ -363,18 +364,16 @@ def inject_config(
             assert "key" in result.output
     """
     from pve_winrepair.adapters.memory import check_logging_config_in_memory, init_logging_in_memory
-    from pve_winrepair.composition import AppServices, build_production
+    from pve_winrepair.composition import build_production
 
     def _inject(config: Config) -> Callable[[], AppServices]:
         def _fake_get_config(**_kwargs: Any) -> Config:
             return config
 
         prod = build_production()
-        test_services = AppServices(
+        test_services = dataclasses.replace(
+            prod,
             get_config=_fake_get_config,
-            get_default_config_path=prod.get_default_config_path,
-            deploy_configuration=prod.deploy_configuration,
-            display_config=prod.display_config,
             # The quiet runtime: production init_logging queues INFO lines that race into
             # CliRunner's stderr, so a stderr assertion would depend on timing.
             init_logging=init_logging_in_memory,
@@ -415,7 +414,7 @@ def inject_config_with_profile_capture(
             assert captured == ["staging"]
     """
     from pve_winrepair.adapters.memory import check_logging_config_in_memory, init_logging_in_memory
-    from pve_winrepair.composition import AppServices, build_production
+    from pve_winrepair.composition import build_production
 
     def _inject(config: Config, captured_profiles: list[str | None]) -> Callable[[], AppServices]:
         def _capturing_get_config(*, profile: str | None = None, **_kwargs: Any) -> Config:
@@ -423,11 +422,9 @@ def inject_config_with_profile_capture(
             return config
 
         prod = build_production()
-        test_services = AppServices(
+        test_services = dataclasses.replace(
+            prod,
             get_config=_capturing_get_config,
-            get_default_config_path=prod.get_default_config_path,
-            deploy_configuration=prod.deploy_configuration,
-            display_config=prod.display_config,
             # The quiet runtime: production init_logging queues INFO lines that race into
             # CliRunner's stderr, so a stderr assertion would depend on timing.
             init_logging=init_logging_in_memory,
@@ -468,7 +465,7 @@ def inject_deploy_with_profile_capture(
             assert captured == ["prod"]
     """
     from pve_winrepair.adapters.memory import check_logging_config_in_memory, init_logging_in_memory
-    from pve_winrepair.composition import AppServices, build_production
+    from pve_winrepair.composition import build_production
 
     def _inject(deployed_path: Path, captured_profiles: list[str | None]) -> Callable[[], AppServices]:
         def _capturing_deploy(
@@ -485,11 +482,9 @@ def inject_deploy_with_profile_capture(
             return [deployed_path]
 
         prod = build_production()
-        test_services = AppServices(
-            get_config=prod.get_config,
-            get_default_config_path=prod.get_default_config_path,
+        test_services = dataclasses.replace(
+            prod,
             deploy_configuration=_capturing_deploy,
-            display_config=prod.display_config,
             # The quiet runtime: production init_logging queues INFO lines that race into
             # CliRunner's stderr, so a stderr assertion would depend on timing.
             init_logging=init_logging_in_memory,
@@ -526,15 +521,13 @@ def inject_deploy_configuration() -> Callable[[Callable[..., list[Path]]], Calla
             assert len(calls) == 1
     """
     from pve_winrepair.adapters.memory import check_logging_config_in_memory, init_logging_in_memory
-    from pve_winrepair.composition import AppServices, build_production
+    from pve_winrepair.composition import build_production
 
     def _inject(deploy_fn: Callable[..., list[Path]]) -> Callable[[], AppServices]:
         prod = build_production()
-        test_services = AppServices(
-            get_config=prod.get_config,
-            get_default_config_path=prod.get_default_config_path,
+        test_services = dataclasses.replace(
+            prod,
             deploy_configuration=deploy_fn,
-            display_config=prod.display_config,
             # The quiet runtime: production init_logging queues INFO lines that race into
             # CliRunner's stderr, so a stderr assertion would depend on timing.
             init_logging=init_logging_in_memory,
@@ -599,7 +592,7 @@ def config_cli_context(
             assert "key" in result.output
     """
     from pve_winrepair.adapters.memory import check_logging_config_in_memory, init_logging_in_memory
-    from pve_winrepair.composition import AppServices, build_production
+    from pve_winrepair.composition import build_production
 
     def _create(config_data: dict[str, Any]) -> Callable[[], AppServices]:
         config = Config(config_data, {})
@@ -608,11 +601,9 @@ def config_cli_context(
         def _fake_get_config(**_kwargs: Any) -> Config:
             return config
 
-        test_services = AppServices(
+        test_services = dataclasses.replace(
+            prod,
             get_config=_fake_get_config,
-            get_default_config_path=prod.get_default_config_path,
-            deploy_configuration=prod.deploy_configuration,
-            display_config=prod.display_config,
             # The quiet runtime: production init_logging queues INFO lines that race into
             # CliRunner's stderr, so a stderr assertion would depend on timing.
             init_logging=init_logging_in_memory,

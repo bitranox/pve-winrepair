@@ -6,13 +6,14 @@ the CLI, and delivered to deploy_configuration.
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import pytest
 
 from pve_winrepair.adapters import cli as cli_mod
-from pve_winrepair.composition import AppServices, build_production
+from pve_winrepair.composition import build_production
 from pve_winrepair.domain.enums import DeployTarget
 
 if TYPE_CHECKING:
@@ -68,13 +69,9 @@ def inject_deploy_with_permission_capture(
             return [deployed_path]
 
         prod = build_production()
-        test_services = AppServices(
-            get_config=prod.get_config,
-            get_default_config_path=prod.get_default_config_path,
+        test_services = dataclasses.replace(
+            prod,
             deploy_configuration=_capturing_deploy,
-            display_config=prod.display_config,
-            init_logging=prod.init_logging,
-            check_logging_config=prod.check_logging_config,
         )
         return lambda: test_services
 
