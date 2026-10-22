@@ -353,6 +353,10 @@ def test_drives_without_free_space_is_skipped_and_none_left_is_an_error() -> Non
 
 # --- verify-runners -------------------------------------------------------------------------
 
+# The three boot tasks and the count an operator of a runner host passes; most tests below use them.
+RUNNER_ARGS = ("--task", "runner", "--task", "runner-toolcache", "--task", "runner-toolcache-python")
+EXPECTED_ARGS = ("--expected", "18")
+
 
 def _runner_host(containers: int, **overrides: object) -> FakeHost:
     stdout = "\n".join(_container(f"runner-{i}") for i in range(containers)) + "\n"
@@ -370,7 +374,7 @@ def _runner_host(containers: int, **overrides: object) -> FakeHost:
 def test_verify_runners_ok_at_the_expected_count() -> None:
     host = _runner_host(18)
 
-    code, envelope = _run(host, "verify-runners")
+    code, envelope = _run(host, "verify-runners", *RUNNER_ARGS, *EXPECTED_ARGS)
 
     assert code == 0
     data = _data(envelope)
@@ -381,7 +385,7 @@ def test_verify_runners_ok_at_the_expected_count() -> None:
 
 
 def test_verify_runners_reports_missing_tasks_and_matches_names_case_insensitively() -> None:
-    _, envelope = _run(_runner_host(18), "verify-runners")
+    _, envelope = _run(_runner_host(18), "verify-runners", *RUNNER_ARGS, *EXPECTED_ARGS)
 
     tasks = _data(envelope)["tasks"]
     assert tasks == [
@@ -416,21 +420,21 @@ def test_verify_runners_reports_missing_tasks_and_matches_names_case_insensitive
 
 
 def test_verify_runners_short_count_is_refused() -> None:
-    code, envelope = _run(_runner_host(17), "verify-runners")
+    code, envelope = _run(_runner_host(17), "verify-runners", *RUNNER_ARGS, *EXPECTED_ARGS)
 
     assert code == 1
     assert (_data(envelope)["verdict"], _data(envelope)["count"]) == ("SHORT", 17)
 
 
 def test_verify_runners_expected_is_configurable() -> None:
-    code, envelope = _run(_runner_host(3), "verify-runners", "--expected", "3")
+    code, envelope = _run(_runner_host(3), "verify-runners", *RUNNER_ARGS, "--expected", "3")
 
     assert code == 0
     assert _data(envelope)["expected"] == 3
 
 
 def test_verify_runners_timeout_is_unknown_never_zero() -> None:
-    code, envelope = _run(_runner_host(18, fail={"exec"}), "verify-runners")
+    code, envelope = _run(_runner_host(18, fail={"exec"}), "verify-runners", *RUNNER_ARGS, *EXPECTED_ARGS)
 
     assert code == 1
     data = _data(envelope)
@@ -441,7 +445,7 @@ def test_verify_runners_timeout_is_unknown_never_zero() -> None:
 def test_verify_runners_failing_docker_cli_is_unknown_never_zero() -> None:
     failed = ProcessResult(argv=["docker"], exit_code=1, stderr="error during connect: pipe not found")
 
-    code, envelope = _run(_runner_host(0, docker=failed), "verify-runners")
+    code, envelope = _run(_runner_host(0, docker=failed), "verify-runners", *RUNNER_ARGS, *EXPECTED_ARGS)
 
     assert code == 1
     assert _data(envelope)["verdict"] == "UNKNOWN"
@@ -449,7 +453,7 @@ def test_verify_runners_failing_docker_cli_is_unknown_never_zero() -> None:
 
 
 def test_verify_runners_task_run_info_failure_is_skipped_not_fatal() -> None:
-    code, envelope = _run(_runner_host(18, fail={"task_run_info"}), "verify-runners")
+    code, envelope = _run(_runner_host(18, fail={"task_run_info"}), "verify-runners", *RUNNER_ARGS, *EXPECTED_ARGS)
 
     assert code == 0
     assert {"item": "runner run info", "reason": "task_run_info unavailable"} in items(envelope, "skipped")
@@ -459,7 +463,7 @@ def test_verify_runners_ignores_lines_that_are_not_container_objects() -> None:
     stdout = _container("a") + "\nWARNING: something\n\n42\n" + _container("b") + "\n"
     host = _runner_host(0, docker=ProcessResult(argv=["docker"], exit_code=0, stdout=stdout))
 
-    _, envelope = _run(host, "verify-runners", "--expected", "2")
+    _, envelope = _run(host, "verify-runners", *RUNNER_ARGS, "--expected", "2")
 
     assert _data(envelope)["count"] == 2
     assert _data(envelope)["containers"] == [
@@ -469,10 +473,36 @@ def test_verify_runners_ignores_lines_that_are_not_container_objects() -> None:
 
 
 def test_verify_runners_rejects_a_negative_expected_count() -> None:
-    code, envelope = _run(_runner_host(18), "verify-runners", "--expected", "-1")
+    code, envelope = _run(_runner_host(18), "verify-runners", *RUNNER_ARGS, "--expected", "-1")
 
     assert code == 2
     assert _data(envelope)["error_type"] == "UsageError"
+
+
+def test_verify_runners_checks_exactly_the_named_tasks() -> None:
+    _, envelope = _run(_runner_host(18), "verify-runners", "--task", "runner-a", "--task", "runner-b")
+
+    assert [at(t, "name") for t in items(envelope, "data", "tasks")] == ["runner-a", "runner-b"]
+
+
+def test_verify_runners_without_tasks_checks_none() -> None:
+    _, envelope = _run(_runner_host(18), "verify-runners")
+
+    assert items(envelope, "data", "tasks") == []
+
+
+def test_verify_runners_default_count_accepts_any_readable_count() -> None:
+    code, envelope = _run(_runner_host(0), "verify-runners")
+
+    assert (code, at(envelope, "data", "verdict")) == (0, "OK")
+
+
+def test_verify_runners_refuses_a_task_name_with_shell_characters() -> None:
+    code, envelope = _run(_runner_host(18), "verify-runners", "--task", "a&b")
+
+    assert code == 2
+    # The message pins the cause: an unknown --task flag would also exit 2 as a UsageError.
+    assert "not a task name" in str(at(envelope, "data", "error"))
 
 
 # --- servicing-active / setup-alive ---------------------------------------------------------

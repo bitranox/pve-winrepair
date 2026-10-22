@@ -221,7 +221,7 @@ admin:
 |------------------------------------------------------------|-------------------------------------------------------------------------------------------------------|-------------------------------|
 | `detect-lp-defect`                                         | is this guest affected by the orphaned language pack: AFFECTED, CLEAN or UNKNOWN                      | UNKNOWN                       |
 | `drives`                                                   | free bytes per fixed drive (an unparsable volume is skipped)                                          | never (2 when no drive reads) |
-| `verify-runners [--expected N]`                            | did the runner containers and their boot tasks come back after a reboot: OK, SHORT or UNKNOWN         | SHORT or UNKNOWN              |
+| `verify-runners [--task NAME]... [--expected N]`           | did the runner containers and their boot tasks come back after a reboot: OK, SHORT or UNKNOWN         | SHORT or UNKNOWN              |
 | `build`                                                    | CurrentBuild and UBR                                                                                  | never                         |
 | `staged-os`                                                | is the staged NewOS still there: REARMABLE (apply) or RERUN (a rollback deleted it)                   | never (2 when it cannot look) |
 | `servicing-active`                                         | are TiWorker / TrustedInstaller running                                                               | never                         |

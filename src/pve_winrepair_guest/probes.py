@@ -78,8 +78,6 @@ DEFAULT_STATE_LOG = r"C:\upgrade-state.log"
 NEWOS_WINLOAD = r"C:\$WINDOWS.~BT\NewOS\Windows\System32\winload.efi"
 # The newest 600 Setup events: enough to span the failed CU attempts on every affected guest seen.
 SETUP_LOG_EVENTS = 600
-RUNNER_TASKS = ("runner", "runner-toolcache", "runner-toolcache-python")
-EXPECTED_RUNNERS = 18
 # docker ps answers in seconds on a healthy runner host; 120 s bounds a wedged daemon.
 DOCKER_PS_TIMEOUT = 120.0
 SERVICING_PROCESSES = ("TiWorker", "TrustedInstaller")
@@ -545,10 +543,10 @@ class Container:
 
 @dataclass(frozen=True)
 class RunnerReport:
-    """Did the runner fleet come back after a reboot.
+    """Did the runner containers and their boot tasks come back after a reboot.
 
     Attributes:
-        tasks: The three boot tasks.
+        tasks: The boot tasks named on the command line, in that order (empty when none were named).
         docker_service: The docker service status, or None when it is not installed.
         dockerd_processes: Running dockerd processes.
         containers: The running containers, or None when they could not be enumerated.
@@ -641,13 +639,13 @@ def _docker_service(host: ProbeHost) -> str | None:
     return str(service.status.value) if service else None
 
 
-def _run_verify_runners(host: ProbeHost, expected: int) -> Outcome:
+def _run_verify_runners(host: ProbeHost, expected: int, names: Sequence[str]) -> Outcome:
     skipped: list[Skip] = []
     tasks = list(host.scheduled_tasks())
     containers = _containers(host, skipped)
     count = None if containers is None else len(containers)
     report = RunnerReport(
-        tasks=tuple(_task_report(host, name, tasks, skipped) for name in RUNNER_TASKS),
+        tasks=tuple(_task_report(host, name, tasks, skipped) for name in names),
         docker_service=_docker_service(host),
         dockerd_processes=count_processes(host.processes(), ("dockerd",))["dockerd"],
         containers=containers,
@@ -665,12 +663,28 @@ def _non_negative_int(text: str) -> int:
     return int(text)
 
 
+def _task_name(text: str) -> str:
+    """Argparse type for a scheduled task name: letters, digits and ``_ . -`` only."""
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", text):
+        raise argparse.ArgumentTypeError(f"not a task name: {text!r}")
+    return text
+
+
 def _configure_verify_runners(parser: argparse.ArgumentParser) -> None:
+    # default None, not []: argparse appends into a list default and would share it across parses.
+    parser.add_argument(
+        "--task",
+        dest="tasks",
+        type=_task_name,
+        action="append",
+        default=None,
+        help="a boot task to check (repeatable; none = no task check)",
+    )
     parser.add_argument(
         "--expected",
         type=_non_negative_int,
-        default=EXPECTED_RUNNERS,
-        help=f"containers that mean OK (default {EXPECTED_RUNNERS})",
+        default=0,
+        help="containers that mean OK (default 0: any readable count)",
     )
 
 
@@ -824,8 +838,8 @@ def commands(
         Command("drives", "free space per fixed drive", lambda _a: _run_drives(host_factory())),
         Command(
             "verify-runners",
-            "did the runner fleet come back after a reboot",
-            lambda a: _run_verify_runners(host_factory(), a.expected),
+            "did the runner containers and their boot tasks come back after a reboot",
+            lambda a: _run_verify_runners(host_factory(), a.expected, tuple(a.tasks or ())),
             _configure_verify_runners,
         ),
         Command("build", "CurrentBuild and UBR", lambda _a: _run_build(host_factory())),
