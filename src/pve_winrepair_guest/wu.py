@@ -65,7 +65,7 @@ __all__ = [
 ]
 
 TARGETS = ("wuauserv", "UsoSvc", "BITS", "WaaSMedicSvc")
-# The modes measured on the fleet BEFORE quiescing (wuauserv Manual, UsoSvc Auto, BITS Auto);
+# The modes measured on test guests BEFORE quiescing (wuauserv Manual, UsoSvc Auto, BITS Auto);
 # WaaSMedicSvc ships Manual. 2 = Automatic, 3 = Manual.
 RESTORE_START = (("wuauserv", 3), ("UsoSvc", 2), ("BITS", 2), ("WaaSMedicSvc", 3))
 DISABLED = 4
@@ -455,7 +455,7 @@ class RestoreReport:
     """restore-wu's answer.
 
     Attributes:
-        writes: The registry Start writes back to the fleet defaults.
+        writes: The registry Start writes back to the modes in :data:`RESTORE_START`.
         services: The verified state afterwards.
         still_disabled: Services still Disabled (this machine would never patch again).
         verdict: RESTORED, STILL_DISABLED, or UNKNOWN (no target service readable).

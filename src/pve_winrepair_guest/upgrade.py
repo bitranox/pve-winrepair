@@ -23,8 +23,8 @@ Python, so it runs for real in the tests too.
   task has NO trigger (registered through the Task Scheduler COM API; ``schtasks /Create`` insists
   on one): launch starts it on demand, so a definition left behind by a launch that was killed
   mid-wait can never start setup again by itself. Then a bounded wait for the run's own
-  "launching" line, and only after it the 150 s SetupHost check: both compat aborts seen on the
-  fleet died inside 90 s, and a first SYSTEM run of the packed tool may spend minutes
+  "launching" line, and only after it the 150 s SetupHost check: both compat aborts seen on test
+  guests died inside 90 s, and a first SYSTEM run of the packed tool may spend minutes
   bootstrapping uv and Python before setup even starts. The task is not left behind either: once
   the run is launching its definition is deleted (the instance keeps running), and on every other
   outcome the instance is ended and the task deleted.
@@ -181,7 +181,7 @@ SETUP_FLAGS = (
     "/auto", "upgrade", "/quiet", "/eula", "accept", "/noreboot",
     "/compat", "ignorewarning", "/dynamicupdate", "disable",
 )  # fmt: skip
-# 3010 is ERROR_SUCCESS_REBOOT_REQUIRED. 0x3010 counts as success too: every state log the fleet
+# 3010 is ERROR_SUCCESS_REBOOT_REQUIRED. 0x3010 counts as success too: every state log this tool
 # has written judged it so, and a reader must keep reading those logs the same way.
 SUCCESS_CODES = frozenset({0, 3010, 0x3010})
 _LAUNCHING = re.compile(r"(?:^|\s)launching: ")
@@ -523,7 +523,7 @@ def token_account(security: Win32Security, api: Win32Api) -> str:
 
     Not ``GetUserNameEx(NameSamCompatible)``: under the SYSTEM task on a domain member that names
     the computer account (``EXAMPLE\WIN-HOST$``, measured on a test guest), so the state log never
-    showed that the run is SYSTEM. The name is localised (a German guest says NT-AUTORITAET with
+    showed that the run is SYSTEM. The name is localised (a German Windows says NT-AUTORITAET with
     an umlaut), so the SID is added as the part a reader can match on.
 
     Args:
@@ -1505,8 +1505,8 @@ def _free_c_gb(host: UpgradeHost) -> str:
     drive = drive_from_cim(disks[0]) if disks else None
     if drive is None:
         raise ValueError("no C: drive")
-    # str(float) always writes a dot, whatever the guest locale; a German decimal comma once broke
-    # a host-side parse of a number like this one.
+    # str(float) always writes a dot, whatever the guest locale; a decimal comma (as a German locale
+    # renders one) would break a host-side parse of a number like this one.
     return str(drive.free_gb)
 
 

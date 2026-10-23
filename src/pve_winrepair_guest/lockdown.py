@@ -9,7 +9,7 @@ moment in which they are open), before anything is copied in; ``launch`` checks 
 exactly that DACL, walks the tree below them, and checks the tool's bytes against the sha256 its
 name carries.
 
-Principals are named by SID, never by name: the guests run German, where "Administrators" is
+Principals are named by SID, never by name: on a German-language Windows "Administrators" is
 "Administratoren" and a by-name grant fails. The ACL is built and read through pywin32's native
 calls, not by parsing ``icacls`` output, which is localised too.
 

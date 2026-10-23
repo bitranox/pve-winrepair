@@ -2,7 +2,7 @@
 
 Replaces ``Get-WindowsImage`` for the one question the repair asks of its media: which build,
 servicing build (UBR) and language does each image carry. pwshpy has no Get-WindowsImage verb,
-and the DISM cmdlets need a .NET runtime the guests do not have.
+and the DISM cmdlets need a .NET runtime the guest tool cannot count on.
 
 Only two structures are read, both documented in Microsoft's WIM format specification
 (WIMHEADER_V1_PACKED and RESHDR_DISK_SHORT): the fixed 208-byte header at offset 0, and the XML

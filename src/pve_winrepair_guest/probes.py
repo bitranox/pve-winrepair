@@ -245,7 +245,7 @@ class BuildInfo:
 
     Attributes:
         current_build: CurrentBuild (REG_SZ, e.g. "26200").
-        ubr: UBR as a decimal integer (``reg query`` prints it as hex, which once broke a gate).
+        ubr: UBR as a decimal integer (``reg query`` prints it as hex, which a decimal comparison misreads).
         build: "<current_build>.<ubr>".
     """
 

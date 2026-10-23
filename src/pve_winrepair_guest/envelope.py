@@ -4,7 +4,7 @@ Every subcommand answers with exactly one line on stdout,
 ``{"ok": bool, "command": str, "data": {...}, "skipped": [...]}``, and exits 0 (ok), 1 (refused:
 the command's own gate said no, or it could not decide) or 2 (internal error, still with an
 envelope). The host drivers parse that line instead of regex-matching KEY=VALUE text, which a
-German guest's locale breaks (a decimal comma once broke a parse).
+guest's locale breaks (a German decimal comma, for one, breaks a number parse).
 
 This module is the seam the feature modules plug into: each module builds a tuple of
 :class:`Command`, and the entry script registers them. It lives apart from ``winrepair_guest.py``
