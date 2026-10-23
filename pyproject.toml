@@ -1,7 +1,7 @@
 [project]
 name = "pve-winrepair"
-version = "2.4.3"
-description = "Template CLI application with configuration management and structured logging"
+version = "1.0.0"
+description = "Repair Windows guests on Proxmox VE whose cumulative updates fail, with an offline in-place repair upgrade driven from the node"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -18,7 +18,7 @@ dependencies = [
 ]
 license = { text = "MIT" }
 authors = [{ name = "bitranox", email = "bitranox@gmail.com" }]
-keywords = ["cli", "template", "config", "logging", "layered-config", "rich-click"]
+keywords = ["proxmox", "pve", "windows", "repair", "in-place-upgrade", "windows-update", "qemu"]
 classifiers = [
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3 :: Only",

@@ -38,9 +38,12 @@ __all__ = [
 #: Distribution name declared in ``pyproject.toml``.
 name = "pve-winrepair"
 #: Human-readable summary shown in CLI help output.
-title = "Template CLI application with configuration management and structured logging"
+title = (
+    "Repair Windows guests on Proxmox VE whose cumulative updates fail, "
+    "with an offline in-place repair upgrade driven from the node"
+)
 #: Current release version pulled from ``pyproject.toml`` by automation.
-version = "2.4.3"
+version = "1.0.0"
 #: Repository homepage presented to users.
 homepage = "https://github.com/bitranox/pve-winrepair"
 #: Author attribution surfaced in CLI output.

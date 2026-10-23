@@ -1,5 +1,5 @@
 # ====================================
-# PYCHARM SPEZIFISCH: Git commands you might run once
+# PYCHARM SPECIFIC: Git commands you might run once
 # git add .gitignore && git commit -m "Ignore IDE settings"
 # git push
 # git rm -r --cached .idea

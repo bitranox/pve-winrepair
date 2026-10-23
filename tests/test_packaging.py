@@ -43,9 +43,9 @@ REQUIRED_TOP_LEVEL = frozenset({"PKG-INFO", "pyproject.toml", "src", "scripts", 
 # artefact), but never in the wheel: the node package carries only the packed .ps1.
 GUEST_PACKAGE = "pve_winrepair_guest"
 
-# Files and directories that exist in working trees and must never ship. Tracked ones are
-# named in the repository; the others are hidden locally through .git/info/exclude.
-DECOY_FILES = ("handover.md", "OPEN-WORK.md", "EXECUTION-USER-REVIEW.md", "reset_git_history.sh", ".private/notes.txt")
+# Files and directories a working tree can hold that must never ship: review notes hidden
+# locally through .git/info/exclude, and a root-level helper script.
+DECOY_FILES = ("handover.md", "OPEN-WORK.md", "EXECUTION-USER-REVIEW.md", "local_helper.sh", ".private/notes.txt")
 
 REQUIRED_WHEEL_DATA = (
     f"{PACKAGE}/py.typed",
