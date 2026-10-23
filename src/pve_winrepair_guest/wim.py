@@ -149,7 +149,9 @@ def _decode(raw: bytes) -> str:
 def _parse_xml(text: str) -> WimInfo:
     """Parse the XML document into :class:`WimInfo`."""
     # stdlib expat, not defusedxml: the media is our own downloaded Microsoft image, expat never
-    # fetches external entities, and the size cap above bounds what an entity bomb could expand.
+    # fetches an external entity (it stays undefined), and expat 2.4 and later refuse an entity bomb
+    # by its amplification limit; tests/test_wim.py pins both. The size cap above does not bound a
+    # bomb: a few hundred bytes expand to gigabytes.
     try:
         root = ET.fromstring(text)  # noqa: S314 - defusedxml would be a new guest dependency  # nosec B314
     except ET.ParseError as exc:

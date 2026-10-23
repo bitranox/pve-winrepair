@@ -315,7 +315,7 @@ def host(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FakeUpgradeHost:
     if sys.platform == "win32":
         # On Windows an absolute name replaces the base: tmp_path / TOOL IS C:\winrepair\..., so
         # there is no cwd to map the guest's paths into, and launch would act on the machine's own
-        # files. Every test on this host is therefore POSIX-only.
+        # files. A test that never reaches a fixed path uses fileless_host and runs there.
         pytest.skip("maps absolute Windows paths onto file names in the cwd, which only POSIX allows")
     monkeypatch.chdir(tmp_path)
     (tmp_path / TOOL).write_bytes(TOOL_BYTES)
@@ -332,22 +332,54 @@ def host(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FakeUpgradeHost:
 
 @pytest.fixture
 def fresh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FakeUpgradeHost:
-    """A guest the driver has not touched yet: no C:\\winrepair, no stage root, no tool."""
+    """A guest the driver has not touched yet: no C:\\winrepair, no stage root, no tool.
+
+    The directories are the fake's, but lock-dirs looks for a tool already at its fixed path on
+    the real file system: in the cwd on POSIX, the machine's own C:\\winrepair on Windows. A test
+    that gets that far carries :data:`READS_THE_REAL_TOOL_PATH`; the state log is under tmp_path.
+    """
     monkeypatch.chdir(tmp_path)
-    return FakeUpgradeHost(state_log=tmp_path / STATE_LOG)
+    return FakeUpgradeHost(state_log=tmp_path / "upgrade-state.log")
+
+
+#: Marks a ``fresh`` test whose lock-dirs run reaches the tool check at the fixed C:\winrepair path,
+#: which on Windows reads the real machine rather than the test's cwd.
+READS_THE_REAL_TOOL_PATH = pytest.mark.os_posix
+
+
+@pytest.fixture
+def fileless_host(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FakeUpgradeHost:
+    """The ``host`` guest with nothing at any fixed Windows path: for tests that never reach one.
+
+    prepare and upgrade-run read only the stage root and state log they are given (both under
+    ``tmp_path``), task registration only the fake scheduler, the early launch refusals stop before
+    any file is read, and two lock-dirs refusals come from the fake's entries and ACLs alone. So
+    these run on Windows too. The cwd is an empty directory: on POSIX a fixed name such a test
+    reached by mistake would resolve there and find nothing.
+    """
+    (tmp_path / "cwd").mkdir()
+    monkeypatch.chdir(tmp_path / "cwd")
+    return FakeUpgradeHost(
+        state_log=tmp_path / "upgrade-state.log",
+        existing=set(LOCK_DIRS),
+        locked=list(LOCK_DIRS),
+        entries=[TOOL, SETUP],
+    )
 
 
 # --- prepare --------------------------------------------------------------------------------
 
 
-def test_prepare_clears_read_only_on_every_file_below_the_stage_root(stage: Path, host: FakeUpgradeHost) -> None:
+def test_prepare_clears_read_only_on_every_file_below_the_stage_root(
+    stage: Path, fileless_host: FakeUpgradeHost
+) -> None:
     nested = stage / "sources" / "sxs" / "x.cab"
     nested.parent.mkdir()
     nested.write_bytes(b"cab")
     for path in (nested, stage / "setup.exe"):
         path.chmod(stat.S_IREAD)
 
-    code, envelope = _run(host, "prepare", "--stage-root", str(stage))
+    code, envelope = _run(fileless_host, "prepare", "--stage-root", str(stage))
 
     assert code == 0
     assert _data(envelope)["readonly_cleared"] == 2
@@ -356,9 +388,9 @@ def test_prepare_clears_read_only_on_every_file_below_the_stage_root(stage: Path
 
 
 def test_prepare_passes_media_newer_than_the_running_build_and_writes_the_waiver(
-    stage: Path, host: FakeUpgradeHost
+    stage: Path, fileless_host: FakeUpgradeHost
 ) -> None:
-    code, envelope = _run(host, "prepare", "--stage-root", str(stage))
+    code, envelope = _run(fileless_host, "prepare", "--stage-root", str(stage))
 
     assert code == 0
     data = _data(envelope)
@@ -373,63 +405,67 @@ def test_prepare_passes_media_newer_than_the_running_build_and_writes_the_waiver
         "default_language": "de-DE",
     }
     assert data["running"] == {"current_build": "26200", "ubr": 8875, "build": "26200.8875"}
-    assert host.calls == ["create MoSetup", f"set {WAIVER}=1"]
+    assert fileless_host.calls == ["create MoSetup", f"set {WAIVER}=1"]
     assert (data["waiver_readback"], data["tpm_present"]) == (1, True)
     assert [at(d, "letter") for d in items(data, "drives")] == ["C", "D"]
 
 
-def test_prepare_passes_media_equal_to_the_running_build(stage: Path, host: FakeUpgradeHost) -> None:
-    host.ubr = 8973
+def test_prepare_passes_media_equal_to_the_running_build(stage: Path, fileless_host: FakeUpgradeHost) -> None:
+    fileless_host.ubr = 8973
 
-    code, envelope = _run(host, "prepare", "--stage-root", str(stage))
+    code, envelope = _run(fileless_host, "prepare", "--stage-root", str(stage))
 
     assert (code, _data(envelope)["gate"]) == (0, "PASS")
 
 
-def test_prepare_refuses_media_older_than_the_running_build(stage: Path, host: FakeUpgradeHost) -> None:
-    host.ubr = 9711
+def test_prepare_refuses_media_older_than_the_running_build(stage: Path, fileless_host: FakeUpgradeHost) -> None:
+    fileless_host.ubr = 9711
 
-    code, envelope = _run(host, "prepare", "--stage-root", str(stage))
+    code, envelope = _run(fileless_host, "prepare", "--stage-root", str(stage))
 
     assert code == 1
     data = _data(envelope)
     assert (data["gate"], data["reason"]) == ("FAIL", "image 26200.8973 older than running 26200.9711")
-    assert host.calls == []  # nothing changed on a refused gate
+    assert fileless_host.calls == []  # nothing changed on a refused gate
 
 
-def test_prepare_refuses_media_of_an_older_build_whatever_its_spbuild(stage: Path, host: FakeUpgradeHost) -> None:
+def test_prepare_refuses_media_of_an_older_build_whatever_its_spbuild(
+    stage: Path, fileless_host: FakeUpgradeHost
+) -> None:
     # The fixture's image is 26200.8973: its SPBuild beats UBR 100, its build does not beat 26300.
-    host.current_build, host.ubr = "26300", 100
+    fileless_host.current_build, fileless_host.ubr = "26300", 100
 
-    code, envelope = _run(host, "prepare", "--stage-root", str(stage))
+    code, envelope = _run(fileless_host, "prepare", "--stage-root", str(stage))
 
     assert code == 1
     data = _data(envelope)
     assert (data["gate"], data["reason"]) == ("FAIL", "image 26200.8973 older than running 26300.100")
-    assert host.calls == []
+    assert fileless_host.calls == []
 
 
-def test_prepare_passes_media_of_a_newer_build_whatever_its_spbuild(stage: Path, host: FakeUpgradeHost) -> None:
-    host.current_build, host.ubr = "26100", 9999
+def test_prepare_passes_media_of_a_newer_build_whatever_its_spbuild(
+    stage: Path, fileless_host: FakeUpgradeHost
+) -> None:
+    fileless_host.current_build, fileless_host.ubr = "26100", 9999
 
-    code, envelope = _run(host, "prepare", "--stage-root", str(stage))
+    code, envelope = _run(fileless_host, "prepare", "--stage-root", str(stage))
 
     assert (code, _data(envelope)["gate"]) == (0, "PASS")
 
 
-def test_prepare_refuses_a_missing_wim(stage: Path, host: FakeUpgradeHost) -> None:
+def test_prepare_refuses_a_missing_wim(stage: Path, fileless_host: FakeUpgradeHost) -> None:
     (stage / "sources" / "install.wim").unlink()
 
-    code, envelope = _run(host, "prepare", "--stage-root", str(stage))
+    code, envelope = _run(fileless_host, "prepare", "--stage-root", str(stage))
 
     assert code == 1
     assert (_data(envelope)["gate"], _data(envelope)["reason"]) == ("FAIL", "install.wim missing")
 
 
-def test_prepare_refuses_a_wim_it_cannot_read(stage: Path, host: FakeUpgradeHost) -> None:
+def test_prepare_refuses_a_wim_it_cannot_read(stage: Path, fileless_host: FakeUpgradeHost) -> None:
     (stage / "sources" / "install.wim").write_bytes(b"NOTAWIM!" + bytes(300))
 
-    code, envelope = _run(host, "prepare", "--stage-root", str(stage))
+    code, envelope = _run(fileless_host, "prepare", "--stage-root", str(stage))
 
     assert code == 1
     reason = _data(envelope)["reason"]
@@ -437,34 +473,34 @@ def test_prepare_refuses_a_wim_it_cannot_read(stage: Path, host: FakeUpgradeHost
     assert reason.startswith("the WIM reader refused the image: ")
 
 
-def test_prepare_reports_drives_through_the_shared_parser(stage: Path, host: FakeUpgradeHost) -> None:
-    host.disks = [
+def test_prepare_reports_drives_through_the_shared_parser(stage: Path, fileless_host: FakeUpgradeHost) -> None:
+    fileless_host.disks = [
         _disk("C:", 50 * 1024**3),
         CimInstance(class_name="Win32_LogicalDisk", properties={"DeviceID": "E:", "FreeSpace": "n/a"}),
     ]
 
-    code, envelope = _run(host, "prepare", "--stage-root", str(stage))
+    code, envelope = _run(fileless_host, "prepare", "--stage-root", str(stage))
 
     assert code == 0
     assert [at(d, "letter") for d in items(envelope, "data", "drives")] == ["C"]
     assert "E:" in [at(s, "item") for s in items(envelope, "skipped")]
 
 
-def test_prepare_reports_tpm_absent_and_unknown_distinctly(stage: Path, host: FakeUpgradeHost) -> None:
-    host.tpm = []
-    _, absent = _run(host, "prepare", "--stage-root", str(stage))
-    host.tpm = None
-    code, unknown = _run(host, "prepare", "--stage-root", str(stage))
+def test_prepare_reports_tpm_absent_and_unknown_distinctly(stage: Path, fileless_host: FakeUpgradeHost) -> None:
+    fileless_host.tpm = []
+    _, absent = _run(fileless_host, "prepare", "--stage-root", str(stage))
+    fileless_host.tpm = None
+    code, unknown = _run(fileless_host, "prepare", "--stage-root", str(stage))
 
     assert _data(absent)["tpm_present"] is False
     assert (code, _data(unknown)["tpm_present"]) == (0, None)
     assert unknown["skipped"] == [{"item": "Win32_Tpm", "reason": "Zugriff verweigert"}]
 
 
-def test_prepare_reports_a_waiver_that_did_not_read_back(stage: Path, host: FakeUpgradeHost) -> None:
-    host.waiver_fails = True
+def test_prepare_reports_a_waiver_that_did_not_read_back(stage: Path, fileless_host: FakeUpgradeHost) -> None:
+    fileless_host.waiver_fails = True
 
-    code, envelope = _run(host, "prepare", "--stage-root", str(stage))
+    code, envelope = _run(fileless_host, "prepare", "--stage-root", str(stage))
 
     assert code == 0  # the old script did not gate on the waiver either; the readback says it
     assert _data(envelope)["waiver_readback"] is None
@@ -826,10 +862,10 @@ class _ComService:
         return self.definition
 
 
-def test_register_on_demand_defines_a_system_task_with_no_trigger(host: FakeUpgradeHost) -> None:
+def test_register_on_demand_defines_a_system_task_with_no_trigger(fileless_host: FakeUpgradeHost) -> None:
     service = _ComService()
 
-    upgrade.register_on_demand(lambda: service, _spec(host))
+    upgrade.register_on_demand(lambda: service, _spec(fileless_host))
 
     definition = service.definition
     assert definition.Triggers.created == []  # nothing can start it but an explicit Run
@@ -846,40 +882,40 @@ def test_register_on_demand_defines_a_system_task_with_no_trigger(host: FakeUpgr
     assert service.folder.registered == [("OVMRepairUpgrade", definition, 6, "S-1-5-18", None, 5)]
 
 
-def test_register_on_demand_raises_a_pwshpy_error_when_the_scheduler_refuses(host: FakeUpgradeHost) -> None:
+def test_register_on_demand_raises_a_pwshpy_error_when_the_scheduler_refuses(fileless_host: FakeUpgradeHost) -> None:
     with pytest.raises(NativeCallError, match="Zugriff verweigert"):
-        upgrade.register_on_demand(lambda: _ComService(fails=True), _spec(host))
+        upgrade.register_on_demand(lambda: _ComService(fails=True), _spec(fileless_host))
 
 
 def test_register_on_demand_raises_a_pwshpy_error_when_the_scheduler_is_unreachable(
-    host: FakeUpgradeHost,
+    fileless_host: FakeUpgradeHost,
 ) -> None:
     def connect() -> _ComService:
         raise OSError("Der RPC-Server ist nicht verfuegbar")
 
     with pytest.raises(NativeCallError, match="RPC-Server"):
-        upgrade.register_on_demand(connect, _spec(host))
+        upgrade.register_on_demand(connect, _spec(fileless_host))
 
 
 class _ComError(Exception):
     """Stands in for pywintypes.com_error, which derives from Exception and not from OSError."""
 
 
-def test_register_on_demand_wraps_a_com_error(host: FakeUpgradeHost) -> None:
+def test_register_on_demand_wraps_a_com_error(fileless_host: FakeUpgradeHost) -> None:
     def connect() -> _ComService:
         raise _ComError(-2147024891, "Zugriff verweigert", None, None)
 
     with pytest.raises(NativeCallError, match="Zugriff verweigert"):
-        upgrade.register_on_demand(connect, _spec(host), com_errors=(_ComError,))
+        upgrade.register_on_demand(connect, _spec(fileless_host), com_errors=(_ComError,))
 
 
-def test_register_on_demand_lets_a_programming_error_through_as_internal(host: FakeUpgradeHost) -> None:
+def test_register_on_demand_lets_a_programming_error_through_as_internal(fileless_host: FakeUpgradeHost) -> None:
     # A typo in _define must be exit 2 (internal), never a FAILED verdict that reads like a refusal.
     def connect() -> SimpleNamespace:
         return SimpleNamespace()  # no NewTask: AttributeError inside _define
 
     with pytest.raises(AttributeError):
-        upgrade.register_on_demand(connect, _spec(host), com_errors=(_ComError,))
+        upgrade.register_on_demand(connect, _spec(fileless_host), com_errors=(_ComError,))
 
 
 @pytest.mark.parametrize(
@@ -895,12 +931,14 @@ def test_register_on_demand_lets_a_programming_error_through_as_internal(host: F
         "/tmp/up",
     ],
 )
-def test_launch_refuses_a_stage_root_that_cannot_ride_in_the_task_command(host: FakeUpgradeHost, root: str) -> None:
-    code, envelope = _run(host, "launch", "--stage-root", root, "--tool", TOOL)
+def test_launch_refuses_a_stage_root_that_cannot_ride_in_the_task_command(
+    fileless_host: FakeUpgradeHost, root: str
+) -> None:
+    code, envelope = _run(fileless_host, "launch", "--stage-root", root, "--tool", TOOL)
 
     assert code == 2
     assert "stage root" in str(_data(envelope)["error"])
-    assert host.calls == []
+    assert fileless_host.calls == []
 
 
 @pytest.mark.parametrize(
@@ -913,25 +951,27 @@ def test_launch_refuses_a_stage_root_that_cannot_ride_in_the_task_command(host: 
         ("--state-log", r"C:\..\upgrade-state.log"),
     ],
 )
-def test_launch_refuses_a_relative_tool_or_state_log(host: FakeUpgradeHost, flag: str, value: str) -> None:
+def test_launch_refuses_a_relative_tool_or_state_log(fileless_host: FakeUpgradeHost, flag: str, value: str) -> None:
     # The SYSTEM task starts in System32: a relative path there names a different file.
     args = {"--tool": TOOL, "--state-log": STATE_LOG, flag: value}
-    code, envelope = _run(host, "launch", "--stage-root", r"D:\upgrade", *(x for kv in args.items() for x in kv))
+    code, envelope = _run(
+        fileless_host, "launch", "--stage-root", r"D:\upgrade", *(x for kv in args.items() for x in kv)
+    )
 
     assert code == 2
     assert repr(value) in str(_data(envelope)["error"])
-    assert host.calls == []
+    assert fileless_host.calls == []
 
 
-def test_launch_without_tool_is_a_usage_error_and_starts_nothing(host: FakeUpgradeHost) -> None:
+def test_launch_without_tool_is_a_usage_error_and_starts_nothing(fileless_host: FakeUpgradeHost) -> None:
     # No default: the tool lives under a content address only the driver knows, and a default
     # path would register a task whose action runs a file that is not there.
-    code, envelope = _run(host, "launch", "--stage-root", r"D:\upgrade", "--state-log", STATE_LOG)
+    code, envelope = _run(fileless_host, "launch", "--stage-root", r"D:\upgrade", "--state-log", STATE_LOG)
 
     assert code == 2
     assert "--tool" in str(_data(envelope))
-    assert host.calls == []
-    assert host.registered == []
+    assert fileless_host.calls == []
+    assert fileless_host.registered == []
 
 
 def test_wait_for_launch_keeps_polling_through_read_errors() -> None:
@@ -963,21 +1003,21 @@ def _log(host: FakeUpgradeHost) -> list[str]:
     return host.state_log.read_bytes().decode("utf-8").split("\r\n")[:-1]
 
 
-def test_upgrade_run_writes_the_state_log_and_marks_success(stage: Path, host: FakeUpgradeHost) -> None:
-    code, envelope = _run_upgrade(host, stage)
+def test_upgrade_run_writes_the_state_log_and_marks_success(stage: Path, fileless_host: FakeUpgradeHost) -> None:
+    code, envelope = _run_upgrade(fileless_host, stage)
 
     assert code == 0
     setup = str(stage / "setup.exe")
-    assert host.setup_argv == [
+    assert fileless_host.setup_argv == [
         setup, "/auto", "upgrade", "/quiet", "/eula", "accept", "/noreboot",
         "/compat", "ignorewarning", "/dynamicupdate", "disable", "/copylogs", f"{stage}-logs",
     ]  # fmt: skip
-    assert _log(host) == [
+    assert _log(fileless_host) == [
         "2026-10-21 10:00:00  === upgrade_run start ===",
         "2026-10-21 10:00:00  whoami=NT AUTHORITY\\SYSTEM (S-1-5-18)",
         "2026-10-21 10:00:00  build_before=26200.8875",
         "2026-10-21 10:00:00  free_C_GB=50.0",
-        f"2026-10-21 10:00:00  launching: {setup} " + " ".join(host.setup_argv[1:]),
+        f"2026-10-21 10:00:00  launching: {setup} " + " ".join(fileless_host.setup_argv[1:]),
         "2026-10-21 11:02:05  setup exit=0x00000000 (0) after 01:02:05",
         "2026-10-21 11:02:05  setup tree wait=job",
         "2026-10-21 11:02:05  build_after_downlevel=26200.8875 (unchanged until the apply reboot)",
@@ -988,69 +1028,71 @@ def test_upgrade_run_writes_the_state_log_and_marks_success(stage: Path, host: F
     data = _data(envelope)
     assert (data["verdict"], data["exit_code"], data["exit_hex"]) == ("DONE-OK", 0, "0x00000000")
     assert (data["seconds"], data["newos_staged"], data["build_before"]) == (3725.0, True, "26200.8875")
-    assert probes.read_state(host.state_log).verdict == "DONE-OK"
+    assert probes.read_state(fileless_host.state_log).verdict == "DONE-OK"
 
 
 @pytest.mark.parametrize("exit_code", [3010, 0x3010])
-def test_upgrade_run_accepts_the_reboot_required_codes(stage: Path, host: FakeUpgradeHost, exit_code: int) -> None:
-    host.setup_exit = exit_code
+def test_upgrade_run_accepts_the_reboot_required_codes(
+    stage: Path, fileless_host: FakeUpgradeHost, exit_code: int
+) -> None:
+    fileless_host.setup_exit = exit_code
 
-    code, envelope = _run_upgrade(host, stage)
+    code, envelope = _run_upgrade(fileless_host, stage)
 
     assert (code, _data(envelope)["verdict"]) == (0, "DONE-OK")
 
 
-def test_upgrade_run_marks_a_setup_failure_with_its_hresult(stage: Path, host: FakeUpgradeHost) -> None:
-    host.setup_exit = 0xC1900200  # ps.exec reports the DWORD unsigned (measured on a test guest)
-    host.setup_seconds = 30.0
+def test_upgrade_run_marks_a_setup_failure_with_its_hresult(stage: Path, fileless_host: FakeUpgradeHost) -> None:
+    fileless_host.setup_exit = 0xC1900200  # ps.exec reports the DWORD unsigned (measured on a test guest)
+    fileless_host.setup_seconds = 30.0
 
-    code, envelope = _run_upgrade(host, stage)
+    code, envelope = _run_upgrade(fileless_host, stage)
 
     assert code == 1
-    log = _log(host)
+    log = _log(fileless_host)
     assert "2026-10-21 10:00:30  setup exit=0xC1900200 (-1047526912) after 00:00:30" in log
     assert "2026-10-21 10:00:30  STATE=DONE-FAIL rc=0xC1900200" in log
     assert _data(envelope)["exit_hex"] == "0xC1900200"
-    assert probes.read_state(host.state_log).verdict == "DONE-FAIL"
+    assert probes.read_state(fileless_host.state_log).verdict == "DONE-FAIL"
 
 
-def test_upgrade_run_fails_without_setup_exe(stage: Path, host: FakeUpgradeHost) -> None:
+def test_upgrade_run_fails_without_setup_exe(stage: Path, fileless_host: FakeUpgradeHost) -> None:
     (stage / "setup.exe").unlink()
 
-    code, envelope = _run_upgrade(host, stage)
+    code, envelope = _run_upgrade(fileless_host, stage)
 
     assert code == 1
-    assert _log(host)[-1] == "2026-10-21 10:00:00  STATE=DONE-FAIL setup.exe missing"
-    assert host.setup_argv == []
+    assert _log(fileless_host)[-1] == "2026-10-21 10:00:00  STATE=DONE-FAIL setup.exe missing"
+    assert fileless_host.setup_argv == []
     assert _data(envelope)["verdict"] == "DONE-FAIL"
 
 
-def test_upgrade_run_marks_a_setup_that_could_not_start(stage: Path, host: FakeUpgradeHost) -> None:
-    host.setup_fails = True
+def test_upgrade_run_marks_a_setup_that_could_not_start(stage: Path, fileless_host: FakeUpgradeHost) -> None:
+    fileless_host.setup_fails = True
 
-    code, _ = _run_upgrade(host, stage)
+    code, _ = _run_upgrade(fileless_host, stage)
 
     assert code == 1
-    assert "STATE=DONE-FAIL setup.exe could not run: Executable not found" in _log(host)[-2]
+    assert "STATE=DONE-FAIL setup.exe could not run: Executable not found" in _log(fileless_host)[-2]
 
 
-def test_upgrade_run_leaves_a_fail_marker_when_it_crashes(stage: Path, host: FakeUpgradeHost) -> None:
-    host.setup_crash = True
+def test_upgrade_run_leaves_a_fail_marker_when_it_crashes(stage: Path, fileless_host: FakeUpgradeHost) -> None:
+    fileless_host.setup_crash = True
 
-    code, envelope = _run_upgrade(host, stage)
+    code, envelope = _run_upgrade(fileless_host, stage)
 
     assert (code, envelope["ok"]) == (2, False)
-    assert _log(host)[-1] == "2026-10-21 10:00:00  STATE=DONE-FAIL internal error: RuntimeError: boom"
-    assert probes.read_state(host.state_log).verdict == "DONE-FAIL"
+    assert _log(fileless_host)[-1] == "2026-10-21 10:00:00  STATE=DONE-FAIL internal error: RuntimeError: boom"
+    assert probes.read_state(fileless_host.state_log).verdict == "DONE-FAIL"
 
 
-def test_upgrade_run_carries_on_past_an_unreadable_build(stage: Path, host: FakeUpgradeHost) -> None:
-    host.registry_fails = True
+def test_upgrade_run_carries_on_past_an_unreadable_build(stage: Path, fileless_host: FakeUpgradeHost) -> None:
+    fileless_host.registry_fails = True
 
-    code, envelope = _run_upgrade(host, stage)
+    code, envelope = _run_upgrade(fileless_host, stage)
 
     assert code == 0
-    assert "2026-10-21 10:00:00  build_before=unknown (NativeCallError: registry unavailable)" in _log(host)
+    assert "2026-10-21 10:00:00  build_before=unknown (NativeCallError: registry unavailable)" in _log(fileless_host)
     assert _data(envelope)["build_before"] is None
 
 
@@ -1072,12 +1114,12 @@ def test_upgrade_run_launches_setup_when_whoami_fails_with_any_error(stage: Path
     assert _log(host)[1] == "2026-10-21 10:00:00  whoami=unknown (TypeError: 'NoneType' object is not subscriptable)"
 
 
-def test_upgrade_run_appends_to_an_existing_log(stage: Path, host: FakeUpgradeHost) -> None:
-    host.state_log.write_bytes(b"earlier line\r\n")
+def test_upgrade_run_appends_to_an_existing_log(stage: Path, fileless_host: FakeUpgradeHost) -> None:
+    fileless_host.state_log.write_bytes(b"earlier line\r\n")
 
-    _run_upgrade(host, stage)
+    _run_upgrade(fileless_host, stage)
 
-    assert _log(host)[0] == "earlier line"
+    assert _log(fileless_host)[0] == "earlier line"
 
 
 def test_exit_text_formats_like_the_old_powershell_line() -> None:
@@ -1198,6 +1240,7 @@ def _actions(envelope: dict[str, object]) -> list[tuple[object, object]]:
     return [(obj(d)["path"], obj(d)["action"]) for d in items(_data(envelope)["directories"])]
 
 
+@READS_THE_REAL_TOOL_PATH
 def test_lock_dirs_creates_and_locks_both_directories(fresh: FakeUpgradeHost) -> None:
     code, envelope = _lock_dirs(fresh, "--stage-root", r"D:\upgrade")
 
@@ -1208,6 +1251,7 @@ def test_lock_dirs_creates_and_locks_both_directories(fresh: FakeUpgradeHost) ->
     assert _actions(envelope) == [(r"C:\winrepair", "CREATED"), (r"D:\upgrade", "CREATED")]
 
 
+@READS_THE_REAL_TOOL_PATH
 def test_lock_dirs_without_a_stage_root_locks_only_the_tool_directory(fresh: FakeUpgradeHost) -> None:
     # The driver's push runs it from an admin-only copy before the tool goes into C:\winrepair,
     # when the stage root is not known yet.
@@ -1232,6 +1276,7 @@ def test_lock_dirs_leaves_an_exactly_locked_directory_and_its_content_alone(host
 # --no-create is apply's after-reboot report: it says a directory is gone instead of making it.
 
 
+@READS_THE_REAL_TOOL_PATH
 def test_lock_dirs_no_create_reports_an_absent_directory_and_creates_nothing(fresh: FakeUpgradeHost) -> None:
     code, envelope = _lock_dirs(fresh, "--no-create")
     assert code == 0
@@ -1275,16 +1320,16 @@ def test_lock_dirs_refuses_an_existing_unlocked_directory_even_when_empty(fresh:
 
 
 def test_lock_dirs_refuses_a_locked_directory_holding_something_a_non_admin_can_change(
-    host: FakeUpgradeHost,
+    fileless_host: FakeUpgradeHost,
 ) -> None:
     evil = r"D:\upgrade\sources\evil.dll"
-    host.entries += [r"D:\upgrade\sources", evil]
-    host.acl_overrides[evil] = AclReading(evil, PLANTER_SID, False, (Ace(SYSTEM_SID, 0, 0x10, FULL),))
+    fileless_host.entries += [r"D:\upgrade\sources", evil]
+    fileless_host.acl_overrides[evil] = AclReading(evil, PLANTER_SID, False, (Ace(SYSTEM_SID, 0, 0x10, FULL),))
 
-    code, envelope = _lock_dirs(host, "--stage-root", r"D:\upgrade")
+    code, envelope = _lock_dirs(fileless_host, "--stage-root", r"D:\upgrade")
 
     assert code == 1
-    _lock_refused(host, envelope, f"{evil} is owned by {PLANTER_SID}")
+    _lock_refused(fileless_host, envelope, f"{evil} is owned by {PLANTER_SID}")
 
 
 def test_lock_dirs_refuses_a_directory_that_held_files_before_it_was_locked(fresh: FakeUpgradeHost) -> None:
@@ -1353,13 +1398,13 @@ def test_lock_dirs_refuses_a_tool_already_there_whose_bytes_do_not_match_its_nam
     _lock_refused(host, envelope, "does not match its name")
 
 
-def test_lock_dirs_refuses_a_tool_already_there_that_others_can_write(host: FakeUpgradeHost) -> None:
-    host.acl_overrides[TOOL] = AclReading(TOOL, ADMINS_SID, False, (Ace(USERS_SID, 0, 0, MODIFY),))
+def test_lock_dirs_refuses_a_tool_already_there_that_others_can_write(fileless_host: FakeUpgradeHost) -> None:
+    fileless_host.acl_overrides[TOOL] = AclReading(TOOL, ADMINS_SID, False, (Ace(USERS_SID, 0, 0, MODIFY),))
 
-    code, envelope = _lock_dirs(host)
+    code, envelope = _lock_dirs(fileless_host)
 
     assert code == 1
-    _lock_refused(host, envelope, f"lets {USERS_SID} write")
+    _lock_refused(fileless_host, envelope, f"lets {USERS_SID} write")
 
 
 def test_lock_dirs_refuses_a_directory_it_cannot_create(fresh: FakeUpgradeHost) -> None:
@@ -1391,6 +1436,7 @@ def test_lock_dirs_then_staging_then_launch_is_the_order_launch_accepts(fresh: F
     Path(SETUP).write_bytes(b"MZ")
     Path(POWERSHELL).write_bytes(b"MZ")
     fresh.entries = [TOOL, SETUP]
+    fresh.state_log = Path(STATE_LOG)  # the --state-log _launch passes, a file in the cwd on POSIX
 
     code, envelope = _launch(fresh)
 
@@ -1425,6 +1471,7 @@ class _Win32LockHost(FakeUpgradeHost):
 LOCK_DESCRIPTOR_ACES = [((0, 0x3), FULL, Sid(SYSTEM_SID)), ((0, 0x3), FULL, Sid(ADMINS_SID))]
 
 
+@READS_THE_REAL_TOOL_PATH
 def test_lock_dirs_creates_each_directory_with_the_lock_already_in_place(fresh: FakeUpgradeHost) -> None:
     # A directory made first and locked afterwards is open to every local user in between, and a
     # handle opened then keeps its access after the lock. So each one comes into existence locked.

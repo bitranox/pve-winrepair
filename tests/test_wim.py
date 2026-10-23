@@ -114,6 +114,27 @@ def test_unparsable_xml_raises(tmp_path: Path) -> None:
         wim.read(path)
 
 
+# The reader parses with stdlib expat instead of defusedxml; these two pin the protection that
+# choice rests on, on every interpreter CI runs (expat 2.4 and later).
+def test_an_entity_bomb_is_refused_by_expat_s_amplification_limit(tmp_path: Path) -> None:
+    levels = "".join(f'<!ENTITY {chr(98 + i)} "{("&" + chr(97 + i) + ";") * 10}">' for i in range(8))
+    bomb = f'<?xml version="1.0"?><!DOCTYPE WIM [<!ENTITY a "aaaaaaaaaa">{levels}]><WIM>&i;</WIM>'
+    path = _write(tmp_path, _with_xml(bomb))  # a few hundred characters that would expand to 10**9
+
+    with pytest.raises(wim.WimFormatError, match="amplification"):
+        wim.read(path)
+
+
+def test_an_external_entity_is_never_fetched(tmp_path: Path) -> None:
+    outside = tmp_path / "outside.txt"
+    outside.write_text("<IMAGE/>", encoding="utf-8")
+    document = f'<?xml version="1.0"?><!DOCTYPE WIM [<!ENTITY e SYSTEM "{outside.as_uri()}">]><WIM>&e;</WIM>'
+    path = _write(tmp_path, _with_xml(document))
+
+    with pytest.raises(wim.WimFormatError, match="undefined entity"):
+        wim.read(path)
+
+
 def test_xml_that_is_not_utf16_raises(tmp_path: Path) -> None:
     data = bytearray(FIXTURE.read_bytes())
     data[208:] = b"\xff\xfe" + b"\x00\xd8" * ((len(data) - 210) // 2)  # lone surrogates
