@@ -19,16 +19,14 @@ from __future__ import annotations
 
 import argparse
 import codecs
-import importlib
 import itertools
 import json
 import os
 import re
 import socket
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 from pwshpy import (
     CimInstance,
@@ -47,6 +45,7 @@ from pve_winrepair_guest.evtlog import EvtApi, iter_events
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping, Sequence
+    from datetime import datetime
 
 __all__ = [
     "CURRENT_VERSION_KEY",
@@ -61,7 +60,6 @@ __all__ = [
     "PwshpyHost",
     "StagedOs",
     "StateLog",
-    "TaskRunInfo",
     "build_info",
     "commands",
     "drive_from_cim",
@@ -100,40 +98,22 @@ class ProbeError(RuntimeError):
     """A probe could not read what it needs; the entry reports it as an internal error."""
 
 
-@dataclass(frozen=True)
-class TaskRunInfo:
-    """When a scheduled task last ran and what it returned (Get-ScheduledTaskInfo).
+def task_time(value: datetime | None) -> str | None:
+    """Render a scheduled task's run time as the guest's local wall-clock ISO text.
 
-    Attributes:
-        last_run: LastRunTime as local wall-clock ISO text (no offset), or None when it never ran.
-        last_result: LastTaskResult (0 = success, 267009 = still running).
-    """
-
-    last_run: str | None
-    last_result: int | None
-
-
-# Task Scheduler's "never": LastRunTime of a task that never ran is 1999-11-30, NextRunTime of a
-# task with no next run 1899-12-30 (both read on a test guest); no real run predates 2000.
-_TASK_TIME_FLOOR = 2000
-
-
-def task_time(value: object) -> str | None:
-    """Render a Task Scheduler COM time as local wall-clock ISO text, or None for "never".
-
-    pywin32 labels these times UTC, but they are the guest's local wall time (the never-run date
-    reads 00:00 both through pywin32 and in PowerShell's local view on a test guest), so the false offset
-    is dropped rather than converted.
+    pwshpy reads a Task Scheduler time as the guest's local wall time and hands it over as aware
+    UTC (None for its "never" sentinels); the report keeps the local text a reader compares with
+    the guest's own clock and logs.
 
     Args:
-        value: ``LastRunTime`` / ``NextRunTime`` as pywin32 returns it.
+        value: ``ScheduledTaskInfo.last_run_time``.
 
     Returns:
-        For example ``2026-10-21T19:57:06``; None for the never sentinels or a missing value.
+        For example ``2026-10-21T19:57:06``, in whole seconds; None when the task never ran.
     """
-    if not isinstance(value, datetime) or value.year < _TASK_TIME_FLOOR:
+    if value is None:
         return None
-    return value.replace(tzinfo=None).isoformat(timespec="seconds")
+    return value.astimezone().replace(tzinfo=None).isoformat(timespec="seconds")
 
 
 class ProbeHost(Protocol):
@@ -164,11 +144,10 @@ class ProbeHost(Protocol):
         ...
 
     def scheduled_tasks(self) -> Iterable[ScheduledTaskInfo]:
-        """Every scheduled task in every folder (Get-ScheduledTask)."""
-        ...
+        """Every scheduled task in every folder, with its last run time and result (Get-ScheduledTask).
 
-    def task_run_info(self, task: ScheduledTaskInfo) -> TaskRunInfo:
-        """Last run time and result of one task (Get-ScheduledTaskInfo)."""
+        A run field Task Scheduler refuses reads as unknown (None) without dropping the task.
+        """
         ...
 
     def exec(self, argv: Sequence[str], *, timeout: float) -> ProcessResult:
@@ -219,21 +198,6 @@ class PwshpyHost:
     def scheduled_tasks(self) -> Iterable[ScheduledTaskInfo]:
         """See :meth:`ProbeHost.scheduled_tasks`."""
         return ps.get_scheduled_task()
-
-    def task_run_info(self, task: ScheduledTaskInfo) -> TaskRunInfo:
-        """See :meth:`ProbeHost.task_run_info`.
-
-        pwshpy 1.5.0's ScheduledTaskInfo has no LastRunTime / LastTaskResult (filed in pwshpy's
-        OPEN-WORK.md), so this asks the Task Scheduler COM API directly, as pwshpy itself does.
-        """
-        # import_module, not an import statement: pywin32 is a Windows-only dependency of pwshpy
-        # that the Linux dev host does not install, and this line only ever runs on the guest.
-        client: Any = importlib.import_module("win32com.client")
-        scheduler = client.Dispatch("Schedule.Service")
-        scheduler.Connect()
-        folder = scheduler.GetFolder(task.task_path.rstrip("\\") or "\\")
-        registered = folder.GetTask(task.task_name)
-        return TaskRunInfo(last_run=task_time(registered.LastRunTime), last_result=int(registered.LastTaskResult))
 
     def exec(self, argv: Sequence[str], *, timeout: float) -> ProcessResult:
         """See :meth:`ProbeHost.exec`."""
@@ -608,7 +572,18 @@ def _run_nic_macs(host: ProbeHost) -> Outcome:
 
 @dataclass(frozen=True)
 class TaskReport:
-    """One boot task the runners depend on."""
+    """One boot task the runners depend on (Get-ScheduledTask plus Get-ScheduledTaskInfo).
+
+    Attributes:
+        name: The task name asked for.
+        present: Whether a task of that name (case-insensitive) is registered.
+        task_path: Its folder, or None when absent.
+        state: Its state (Ready, Running, Disabled, ...), or None when absent.
+        enabled: Whether it is enabled, or None when absent.
+        last_run: Its last run time as local wall-clock ISO text, or None when it never ran.
+        last_result: Its last exit code or HRESULT (0 = success), or None when it never ran or a
+            run is still in progress (Windows reports no result until the run finishes).
+    """
 
     name: str
     present: bool
@@ -687,25 +662,20 @@ def _containers(host: ProbeHost, skipped: list[Skip]) -> tuple[Container, ...] |
     return parse_containers(result.stdout)
 
 
-def _task_report(host: ProbeHost, name: str, tasks: Sequence[ScheduledTaskInfo], skipped: list[Skip]) -> TaskReport:
+def _task_report(name: str, tasks: Sequence[ScheduledTaskInfo]) -> TaskReport:
     task = next((t for t in tasks if t.task_name.casefold() == name.casefold()), None)
     if task is None:
         return TaskReport(
             name=name, present=False, task_path=None, state=None, enabled=None, last_run=None, last_result=None
         )
-    try:
-        run = host.task_run_info(task)
-    except Exception as exc:  # diagnostics only (pywin32 COM raises its own com_error), never the gate
-        skipped.append(Skip(f"{name} run info", str(exc)))
-        run = TaskRunInfo(None, None)
     return TaskReport(
         name=name,
         present=True,
         task_path=task.task_path,
         state=str(task.state.value),
         enabled=task.enabled,
-        last_run=run.last_run,
-        last_result=run.last_result,
+        last_run=task_time(task.last_run_time),
+        last_result=task.last_task_result,
     )
 
 
@@ -731,7 +701,7 @@ def _run_verify_runners(host: ProbeHost, expected: int, names: Sequence[str]) ->
     containers = _containers(host, skipped)
     count = None if containers is None else len(containers)
     report = RunnerReport(
-        tasks=tuple(_task_report(host, name, tasks, skipped) for name in names),
+        tasks=tuple(_task_report(name, tasks) for name in names),
         docker_service=_docker_service(host),
         dockerd_processes=count_processes(host.processes(), ("dockerd",))["dockerd"],
         containers=containers,

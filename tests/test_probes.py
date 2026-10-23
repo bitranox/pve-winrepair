@@ -68,8 +68,21 @@ def _proc(name: str) -> ProcessInfo:
     return ProcessInfo(pid=1, name=name)
 
 
-def _task(name: str, path: str = "\\") -> ScheduledTaskInfo:
-    return ScheduledTaskInfo(task_name=name, task_path=path, state=TaskState.READY, enabled=True)
+# pwshpy reads a Task Scheduler time as the guest's local wall time and hands it over as aware UTC.
+LAST_RUN = datetime(2026, 10, 21, 10, 0, 0).astimezone(timezone.utc)
+
+
+def _task(
+    name: str, path: str = "\\", *, last_run_time: datetime | None = LAST_RUN, last_task_result: int | None = 0
+) -> ScheduledTaskInfo:
+    return ScheduledTaskInfo(
+        task_name=name,
+        task_path=path,
+        state=TaskState.READY,
+        enabled=True,
+        last_run_time=last_run_time,
+        last_task_result=last_task_result,
+    )
 
 
 def _container(name: str) -> str:
@@ -122,10 +135,6 @@ class FakeHost:
 
     def scheduled_tasks(self) -> Iterable[ScheduledTaskInfo]:
         return self.tasks
-
-    def task_run_info(self, task: ScheduledTaskInfo) -> probes.TaskRunInfo:
-        self._check("task_run_info")
-        return probes.TaskRunInfo(last_run="2026-10-21T10:00:00", last_result=0)
 
     def exec(self, argv: Sequence[str], *, timeout: float) -> ProcessResult:
         self.exec_calls.append((list(argv), timeout))
@@ -550,11 +559,17 @@ def test_verify_runners_failing_docker_cli_is_unknown_never_zero() -> None:
     assert "error during connect" in str(envelope["skipped"])
 
 
-def test_verify_runners_task_run_info_failure_is_skipped_not_fatal() -> None:
-    code, envelope = _run(_runner_host(18, fail={"task_run_info"}), "verify-runners", *RUNNER_ARGS, *EXPECTED_ARGS)
+def test_verify_runners_reports_a_task_that_never_ran_or_still_runs_without_a_result() -> None:
+    # pwshpy reads LastTaskResult "has not run" and "still running" as no result (None); only the
+    # run time tells the two apart.
+    never = _task("runner", last_run_time=None, last_task_result=None)
+    running = _task("Runner-Toolcache", "\\Example\\", last_task_result=None)
 
-    assert code == 0
-    assert {"item": "runner run info", "reason": "task_run_info unavailable"} in items(envelope, "skipped")
+    _, envelope = _run(_runner_host(18, tasks=[never, running]), "verify-runners", *RUNNER_ARGS, *EXPECTED_ARGS)
+
+    runs = [(at(t, "last_run"), at(t, "last_result")) for t in items(envelope, "data", "tasks")]
+    assert runs == [(None, None), ("2026-10-21T10:00:00", None), (None, None)]
+    assert envelope["skipped"] == []
 
 
 def test_verify_runners_ignores_lines_that_are_not_container_objects() -> None:
@@ -752,14 +767,9 @@ def test_state_unreadable_log_is_an_internal_error_not_absent(tmp_path: Path) ->
     assert envelope["ok"] is False
 
 
-def test_task_time_is_local_wall_text_and_never_is_none() -> None:
-    # pywin32 hands Task Scheduler times over labelled UTC although they are the guest's local wall
-    # time, and a task that never ran reads 1999-11-30 (no next run: 1899-12-30), measured on a test guest.
-    labelled_utc = datetime(2026, 10, 21, 19, 57, 6, tzinfo=timezone.utc)
+def test_task_time_renders_pwshpys_utc_as_the_guests_local_wall_time() -> None:
+    labelled = datetime(2026, 10, 21, 19, 57, 6, 123000).astimezone(timezone.utc)
 
-    assert probes.task_time(labelled_utc) == "2026-10-21T19:57:06"
-    assert probes.task_time(datetime(1999, 11, 30, tzinfo=timezone.utc)) is None
-    assert probes.task_time(datetime(1899, 12, 30, tzinfo=timezone.utc)) is None
+    # Whole seconds, as the docstring shows; None stays None (never ran).
+    assert probes.task_time(labelled) == "2026-10-21T19:57:06"
     assert probes.task_time(None) is None
-    # pywintypes times carry milliseconds; the field is whole seconds, as the docstring shows.
-    assert probes.task_time(labelled_utc.replace(microsecond=123000)) == "2026-10-21T19:57:06"
