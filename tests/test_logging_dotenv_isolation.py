@@ -156,10 +156,10 @@ def test_a_prefixed_permission_line_in_the_cwd_dotenv_does_not_block_a_deploy(tm
 
 @pytest.mark.os_agnostic
 def test_an_invalid_logging_section_leaves_commands_that_do_not_read_the_config_running(tmp_path: Path) -> None:
-    result = _run(tmp_path, "hello", env={f"{PREFIX}___LIB_LOG_RICH__RATE_LIMIT": "100:60"})
+    result = _run(tmp_path, "info", env={f"{PREFIX}___LIB_LOG_RICH__RATE_LIMIT": "100:60"})
 
     assert result.returncode == 0, result.stderr
-    assert "Hello World" in result.stdout
+    assert f"Info for {__init__conf__.name}:" in result.stdout
 
 
 @pytest.mark.os_agnostic
@@ -194,7 +194,7 @@ def test_a_value_only_lib_log_rich_itself_refuses_is_a_configuration_error_too(t
     env = {f"{PREFIX}___LIB_LOG_RICH__QUEUE_MAXSIZE": "0"}
 
     refused = _run(tmp_path, "config", env=env)
-    running = _run(tmp_path, "hello", env=env)
+    running = _run(tmp_path, "info", env=env)
 
     assert refused.returncode == 78
     assert "lib_log_rich.queue_maxsize" in refused.stderr

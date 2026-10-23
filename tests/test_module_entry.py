@@ -35,7 +35,7 @@ def test_module_entry_executes_cli_and_shows_help(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """python -m invocation with no args shows help and exits 0."""
-    monkeypatch.setattr(sys, "argv", ["pve_winrepair"], raising=False)
+    monkeypatch.setattr(sys, "argv", ["pve-winrepair"], raising=False)
 
     with pytest.raises(SystemExit) as exc:
         runpy.run_module("pve_winrepair.__main__", run_name="__main__")
@@ -51,9 +51,10 @@ def test_module_entry_formats_exceptions_via_exit_helpers(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     strip_ansi: Callable[[str], str],
+    failing_command: str,
 ) -> None:
     """Exceptions during module entry are formatted by lib_cli_exit_tools."""
-    monkeypatch.setattr(sys, "argv", ["pve_winrepair", "fail"], raising=False)
+    monkeypatch.setattr(sys, "argv", ["pve-winrepair", failing_command], raising=False)
     monkeypatch.setattr(lib_cli_exit_tools.config, "traceback", False, raising=False)
     monkeypatch.setattr(lib_cli_exit_tools.config, "traceback_force_color", False, raising=False)
 
@@ -70,9 +71,10 @@ def test_module_entry_traceback_flag_prints_full_traceback(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     strip_ansi: Callable[[str], str],
+    failing_command: str,
 ) -> None:
     """--traceback via module entry prints complete traceback on error."""
-    monkeypatch.setattr(sys, "argv", ["pve_winrepair", "--traceback", "fail"])
+    monkeypatch.setattr(sys, "argv", ["pve-winrepair", "--traceback", failing_command])
     monkeypatch.setattr(lib_cli_exit_tools.config, "traceback", False, raising=False)
     monkeypatch.setattr(lib_cli_exit_tools.config, "traceback_force_color", False, raising=False)
 
@@ -96,10 +98,7 @@ def test_module_entry_cli_exports_all_registered_commands() -> None:
         "cli_config",
         "cli_config_deploy",
         "cli_config_generate_examples",
-        "cli_fail",
-        "cli_hello",
         "cli_info",
-        "cli_logdemo",
     }
     exported = {name for name in dir(cli_mod) if name.startswith("cli_")}
     assert expected_commands.issubset(exported)
@@ -149,10 +148,10 @@ def test_entry_main_invokes_cli_with_help(
 ) -> None:
     """entry.main() wires production services and invokes CLI.
 
-    This tests the console script entry point used by pip-installed commands
-    (pve_winrepair, pve-winrepair).
+    This tests the console script entry point used by the pip-installed command
+    (pve-winrepair).
     """
-    monkeypatch.setattr(sys, "argv", ["pve_winrepair", "--help"])
+    monkeypatch.setattr(sys, "argv", ["pve-winrepair", "--help"])
 
     exit_code = entry.main()
 
@@ -167,9 +166,10 @@ def test_entry_main_returns_nonzero_on_error(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     strip_ansi: Callable[[str], str],
+    failing_command: str,
 ) -> None:
     """entry.main() returns non-zero exit code on CLI errors."""
-    monkeypatch.setattr(sys, "argv", ["pve_winrepair", "fail"])
+    monkeypatch.setattr(sys, "argv", ["pve-winrepair", failing_command])
     monkeypatch.setattr(lib_cli_exit_tools.config, "traceback", False)
     monkeypatch.setattr(lib_cli_exit_tools.config, "traceback_force_color", False)
 

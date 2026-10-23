@@ -19,10 +19,7 @@ from .commands import (
     cli_config,
     cli_config_deploy,
     cli_config_generate_examples,
-    cli_fail,
-    cli_hello,
     cli_info,
-    cli_logdemo,
 )
 from .constants import CLICK_CONTEXT_SETTINGS, TRACEBACK_SUMMARY_LIMIT, TRACEBACK_VERBOSE_LIMIT
 from .context import (
@@ -49,10 +46,7 @@ __all__ = [
     "cli_config",
     "cli_config_deploy",
     "cli_config_generate_examples",
-    "cli_fail",
-    "cli_hello",
     "cli_info",
-    "cli_logdemo",
     # Entry point
     "main",
     "restore_traceback_state",

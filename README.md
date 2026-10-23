@@ -137,7 +137,6 @@ pve-winrepair --version
 pve-winrepair config-deploy --target user
 
 # Try it out
-pve-winrepair hello
 pve-winrepair info
 pve-winrepair config
 ```
@@ -153,11 +152,6 @@ The CLI leverages [rich-click](https://github.com/ewels/rich-click) so help outp
 ```bash
 # Display package information
 pve-winrepair info
-
-# Greeting and error-handling demos
-pve-winrepair hello
-pve-winrepair fail
-pve-winrepair --traceback fail
 
 # Configuration management
 pve-winrepair config                         # Show current configuration
@@ -194,10 +188,6 @@ pve-winrepair --env-file ./environments/production.env config
 # Override configuration at runtime (repeatable --set)
 pve-winrepair --set lib_log_rich.console_level=DEBUG config
 pve-winrepair --set lib_log_rich.service=pve-winrepair config --format json
-
-# Logging demo
-pve-winrepair logdemo
-LOG_CONSOLE_LEVEL=DEBUG pve-winrepair logdemo   # logdemo reads LOG_* only, not --set
 
 # All commands work with any entry point
 python -m pve_winrepair info

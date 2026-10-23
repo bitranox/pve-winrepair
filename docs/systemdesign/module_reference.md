@@ -36,9 +36,8 @@ moves or removes a module, a CLI option or a public name.
   - `root.py`  -  Root command group
   - `main.py`  -  Entry point
   - `typed_click.py`  -  Strictly typed wrappers for rich_click's `option`, `version_option` and `get_current_context`
-  - `commands/info.py`  -  info, hello, fail commands
+  - `commands/info.py`  -  info command
   - `commands/config.py`  -  config, config-deploy, config-generate-examples commands
-  - `commands/logging.py`  -  logdemo command
   - `commands/repair.py`  -  `repair --vmid N [--stage-only] [--snapshot-name S] [--hours H] [--ip IP] [--stage-root X:] [--tpm-storage S] [--json]`; `--snapshot-name` defaults to `[repair] snapshot_name` and is validated by its rule
   - `commands/apply.py`  -  `apply --vmid N --ip IP [--apply-minutes M] [--json]`
   - `commands/guest_tool.py`  -  `guest-tool path` (the packed tool) and `guest-tool sha256` (`<sha256>  <content address>`); neither reads the configuration
@@ -74,7 +73,7 @@ moves or removes a module, a CLI option or a public name.
 - `tests/test_cli_config.py`  -  `config`, `config-deploy`, `config-generate-examples` commands
 - `tests/test_cli_config_errors.py`  -  A configuration that cannot be loaded: who reports it, and who still runs
 - `tests/test_cli_apply.py`  -  `apply` through `main()`: the receipt from `[node] state_dir`, refusals before any call, output and exit codes
-- `tests/test_cli_core.py`  -  Traceback, main entry, help, hello, fail, info, unknown command
+- `tests/test_cli_core.py`  -  Traceback, main entry, help, info, unknown command, the registered command set
 - `tests/test_cli_guest_tool.py`  -  `guest-tool path` and `guest-tool sha256`
 - `tests/test_cli_repair.py`  -  `repair` through `main()`: options, settings, refusals before any call, progress lines on stderr, output and exit codes
 - `tests/test_cli_env_file.py`  -  `--env-file` path passing, validation and value override
@@ -172,18 +171,6 @@ Print resolved package metadata.
 
 **Exit codes:** 0
 
-### hello
-
-Emit canonical greeting (`"Hello World"`).
-
-**Exit codes:** 0
-
-### fail
-
-Trigger intentional `RuntimeError` for testing error handling.
-
-**Exit codes:** 1
-
 ### config
 
 Display merged configuration from all sources.
@@ -221,19 +208,6 @@ Generate example configuration files.
 | `--force`           | Overwrite existing files      |
 
 **Exit codes:** 0, 1
-
-### logdemo
-
-Run logging demonstration.
-
-| Option         | Description                      |
-|----------------|----------------------------------|
-| `--theme NAME` | Logging theme (default: classic) |
-
-The demo runs lib_log_rich's own demo runtime: it does not read the configuration, so a
-`--set lib_log_rich.*` value changes nothing in it, while a `LOG_*` variable does.
-
-**Exit codes:** 0, 22 (an unknown `--theme`, or a `LOG_*` variable lib_log_rich refuses)
 
 ---
 
@@ -359,6 +333,7 @@ Use `composition.build_testing()` to wire all in-memory adapters.
 | `strip_ansi`              | Strips ANSI escape codes from output                                                                                                                                    |
 | `clear_config_cache`      | Clears LRU cache before tests                                                                                                                                           |
 | `managed_traceback_state` | Resets/restores traceback configuration                                                                                                                                 |
+| `failing_command`         | Registers a test-only command that raises `RuntimeError` (for the exit and traceback paths) and returns its name                                                        |
 | `isolated_logging_state`  | Autouse: after every test, shuts the lib_log_rich runtime down and restores the root logger; yields that restore step                                                   |
 | `user_layer_in_tmp_path`  | Points every OS's user-layer location (`HOME`, `USERPROFILE`, `XDG_CONFIG_HOME`, `APPDATA`, `LOCALAPPDATA`) at `tmp_path` and returns it, so a real deploy writes there |
 | `isolated_layers`         | Points every config layer but the shipped defaults (all three app roots, the user layer, the cwd) at `tmp_path` and removes inherited `PVE_WINREPAIR___` variables      |

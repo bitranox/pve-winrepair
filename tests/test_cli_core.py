@@ -1,4 +1,4 @@
-"""CLI core stories: traceback, main entry, help, hello, fail, info, unknown command."""
+"""CLI core stories: traceback, main entry, help, info, unknown command."""
 
 from __future__ import annotations
 
@@ -137,9 +137,10 @@ def test_traceback_flag_displays_full_exception_traceback(
     managed_traceback_state: None,
     capsys: pytest.CaptureFixture[str],
     strip_ansi: Callable[[str], str],
+    failing_command: str,
 ) -> None:
     """--traceback prints the complete traceback on failure."""
-    exit_code = cli_mod.main(["--traceback", "fail"], services_factory=build_production)
+    exit_code = cli_mod.main(["--traceback", failing_command], services_factory=build_production)
 
     plain_err = strip_ansi(capsys.readouterr().err)
 
@@ -149,30 +150,6 @@ def test_traceback_flag_displays_full_exception_traceback(
     assert "[TRUNCATED" not in plain_err
     assert lib_cli_exit_tools.config.traceback is False
     assert lib_cli_exit_tools.config.traceback_force_color is False
-
-
-@pytest.mark.os_agnostic
-def test_hello_command_outputs_greeting(
-    cli_runner: CliRunner,
-    production_factory: Callable[[], Any],
-) -> None:
-    """hello command outputs Hello World greeting."""
-    result: Result = cli_runner.invoke(cli_mod.cli, ["hello"], obj=production_factory)
-
-    assert result.exit_code == 0
-    assert "Hello World" in result.output
-
-
-@pytest.mark.os_agnostic
-def test_fail_command_raises_runtime_error(
-    cli_runner: CliRunner,
-    production_factory: Callable[[], Any],
-) -> None:
-    """fail command raises RuntimeError."""
-    result: Result = cli_runner.invoke(cli_mod.cli, ["fail"], obj=production_factory)
-
-    assert result.exit_code != 0
-    assert isinstance(result.exception, RuntimeError)
 
 
 @pytest.mark.os_agnostic
@@ -207,19 +184,21 @@ def test_restore_traceback_false_keeps_flags_enabled(
     """restore_traceback=False leaves traceback flags enabled after command."""
     cli_mod.apply_traceback_preferences(False)
 
-    cli_mod.main(["--traceback", "hello"], restore_traceback=False, services_factory=build_production)
+    cli_mod.main(["--traceback", "info"], restore_traceback=False, services_factory=build_production)
 
     assert lib_cli_exit_tools.config.traceback is True
     assert lib_cli_exit_tools.config.traceback_force_color is True
 
 
 @pytest.mark.os_agnostic
-def test_when_logdemo_is_invoked_it_completes_successfully(
-    cli_runner: CliRunner,
-    production_factory: Callable[[], Any],
-) -> None:
-    """Verify logdemo command runs and exits with code 0."""
-    result: Result = cli_runner.invoke(cli_mod.cli, ["logdemo"], obj=production_factory)
-
-    assert result.exit_code == 0
-    assert "Log demo completed" in result.output
+def test_only_the_kept_commands_are_registered() -> None:
+    """The root group registers exactly the shipped commands, so adding or dropping one changes this set."""
+    assert set(cli_mod.cli.commands) == {
+        "config",
+        "config-deploy",
+        "config-generate-examples",
+        "info",
+        "repair",
+        "apply",
+        "guest-tool",
+    }

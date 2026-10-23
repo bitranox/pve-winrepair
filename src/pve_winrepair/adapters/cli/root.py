@@ -83,11 +83,12 @@ def cli(
 
     Example:
         >>> from click.testing import CliRunner
+        >>> from pve_winrepair.composition import build_testing
         >>> runner = CliRunner()
-        >>> result = runner.invoke(cli, ["hello"])
+        >>> result = runner.invoke(cli, ["info"], obj=build_testing)
         >>> result.exit_code
         0
-        >>> "Hello World" in result.output
+        >>> "Info for pve-winrepair:" in result.output
         True
     """
     # ctx.obj is always the services factory (production or test). click types it as Any, which
@@ -124,11 +125,8 @@ def _register_commands() -> None:
         cli_config,
         cli_config_deploy,
         cli_config_generate_examples,
-        cli_fail,
         cli_guest_tool,
-        cli_hello,
         cli_info,
-        cli_logdemo,
         cli_repair,
     )
 
@@ -137,12 +135,9 @@ def _register_commands() -> None:
         cli_apply,
         cli_guest_tool,
         cli_info,
-        cli_hello,
-        cli_fail,
         cli_config,
         cli_config_deploy,
         cli_config_generate_examples,
-        cli_logdemo,
     ):
         cli.add_command(cmd)
 

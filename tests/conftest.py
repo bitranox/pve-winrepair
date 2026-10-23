@@ -250,6 +250,32 @@ def managed_traceback_state() -> Iterator[None]:
         _restore_cli_config(snapshot)
 
 
+#: The name the ``failing_command`` fixture registers; no shipped command is called this.
+FAILING_COMMAND = "test-only-fail"
+FAILING_MESSAGE = "I should fail"
+
+
+@pytest.fixture
+def failing_command(monkeypatch: pytest.MonkeyPatch) -> str:
+    """Register a command that raises ``RuntimeError`` on the root group, for one test only.
+
+    How an uncaught exception is rendered (exit code, ``--traceback``, the module entry) belongs to
+    ``main()`` and ``lib_cli_exit_tools``, not to any command, and the CLI ships no command that
+    fails on purpose. The test adds one through Click's own registry, which monkeypatch restores.
+
+    Returns:
+        The command name to put in argv.
+    """
+    from pve_winrepair.adapters.cli import cli
+
+    @rich_click.command(FAILING_COMMAND)
+    def fail() -> None:
+        raise RuntimeError(FAILING_MESSAGE)
+
+    monkeypatch.setitem(cli.commands, FAILING_COMMAND, fail)
+    return FAILING_COMMAND
+
+
 @pytest.fixture
 def isolated_layers(monkeypatch: pytest.MonkeyPatch, user_layer_in_tmp_path: Path, clear_config_cache: None) -> Path:
     """Every configuration layer but the shipped defaults points into ``tmp_path``, which is the cwd.

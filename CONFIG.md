@@ -457,8 +457,8 @@ Configuration can be overridden via environment variables using two methods:
 For logging configuration, use the native `LOG_*` variables (highest precedence):
 
 ```bash
-LOG_CONSOLE_LEVEL=DEBUG pve-winrepair hello
-LOG_ENABLE_GRAYLOG=true LOG_GRAYLOG_ENDPOINT="logs.example.com:12201" pve-winrepair hello
+LOG_CONSOLE_LEVEL=DEBUG pve-winrepair info
+LOG_ENABLE_GRAYLOG=true LOG_GRAYLOG_ENDPOINT="logs.example.com:12201" pve-winrepair info
 ```
 
 ### Method 2: Application-Prefixed Variables
@@ -466,8 +466,8 @@ LOG_ENABLE_GRAYLOG=true LOG_GRAYLOG_ENDPOINT="logs.example.com:12201" pve-winrep
 For any configuration section, use the format: `<PREFIX>___<SECTION>__<KEY>=value`
 
 ```bash
-PVE_WINREPAIR___LIB_LOG_RICH__CONSOLE_LEVEL=DEBUG pve-winrepair hello
-PVE_WINREPAIR___LIB_LOG_RICH__SERVICE=pve-winrepair pve-winrepair hello
+PVE_WINREPAIR___LIB_LOG_RICH__CONSOLE_LEVEL=DEBUG pve-winrepair info
+PVE_WINREPAIR___LIB_LOG_RICH__SERVICE=pve-winrepair pve-winrepair info
 ```
 
 **Separator reference:**

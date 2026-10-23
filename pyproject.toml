@@ -90,7 +90,6 @@ dev = [
 ]
 
 [project.scripts]
-pve_winrepair = "pve_winrepair.entry:main"
 pve-winrepair = "pve_winrepair.entry:main"
 
 [build-system]
