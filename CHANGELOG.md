@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file following
 the [Keep a Changelog](https://keepachangelog.com/) format.
 
 
-## [Unreleased]
+## [1.0.0] 2026-10-23 22:06:16
 
 The first public release, 1.0.0. The tool was developed in a private repository before it; that
 history is not published, so this changelog starts here.
@@ -49,3 +49,6 @@ history is not published, so this changelog starts here.
 - `--hours` and `--apply-minutes` accept only finite numbers above 0, `--tpm-storage` only a PVE
   storage ID and `--ip` only an IPv4 address; anything else is a usage error before any call.
 - ssh and scp to the guests pass `-o IdentitiesOnly=yes`, so only the configured key is offered.
+- `docs/windows-guest-ssh.md`: how to prepare a Windows guest for the node's ssh key - installing
+  OpenSSH Server, writing `administrators_authorized_keys` with the right encoding and ACL, and
+  checking the login from the node.
