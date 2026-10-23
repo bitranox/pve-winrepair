@@ -7,16 +7,21 @@ read is tested in ``test_envelope.py``, the node bundle in ``test_node.py``.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import ntpath
 import re
 import subprocess
 from typing import TYPE_CHECKING
+from unittest.mock import ANY
 
 import guest_fakes
 import pytest
 from guest_fakes import (
     GUEST_IP,
+    PROFILE_ACL,
+    PROFILE_PATH,
+    PROFILE_SDDL,
     TOOL_DIR,
     TOOL_PATH,
     USER,
@@ -28,6 +33,7 @@ from guest_fakes import (
     expected_guest_path,
     hashes_to,
     locked,
+    profile_reply,
     state_log,
 )
 
@@ -137,6 +143,11 @@ def _hash_call(path: str) -> list[str]:
     return _ssh(r"%SystemRoot%\System32\certutil.exe", "-hashfile", path, "SHA256")
 
 
+def _probe_call() -> list[str]:
+    """The profile probe; its encoded script is pinned by the probe's own test."""
+    return _ssh(POWERSHELL[0], "-NoProfile", "-NonInteractive", "-EncodedCommand", ANY)
+
+
 def _pushing(source: Path, *, present: bool = False) -> FakeRunner:
     reply = answer("lock-dirs", locked(present=present))
     return (
@@ -165,6 +176,7 @@ def test_push_tool_locks_the_tool_directory_before_it_writes_into_it(tmp_path: P
     # creates and locks C:\winrepair. Only then is it copied in (beside the final name, then renamed:
     # a cut copy never sits at the name a run executes), and the copy in place is hashed again.
     assert runner.calls == [
+        _probe_call(),
         ["scp", "-q", "-i", KEY, *ssh_options(SSH), str(source), f"{USER}@{GUEST_IP}:{_staged(dest)}"],
         _hash_call(_staged(dest)),
         _lock_dirs_call(dest),
@@ -183,7 +195,8 @@ def test_push_tool_never_overwrites_a_tool_already_on_the_guest(tmp_path: Path) 
     # A live SYSTEM run may be executing exactly this file; lock-dirs checked its bytes against its name,
     # and the full digest is read back before anything runs it.
     assert (pushed.path, pushed.copied) == (dest, False)
-    assert runner.calls[1:] == [
+    assert [runner.calls[0], *runner.calls[2:]] == [
+        _probe_call(),
         _hash_call(_staged(dest)),
         _lock_dirs_call(dest),
         _hash_call(dest),
@@ -237,7 +250,7 @@ def test_push_tool_refuses_a_profile_copy_whose_bytes_are_not_the_tool_and_never
     with pytest.raises(GuestPushError, match=f"expected {_sha(source)}"):
         _guest(runner, tmp_path).push_tool()
     # Nothing ran it: no lock-dirs, nothing copied in; the copy that is not the tool is deleted.
-    assert _routes(runner) == ["scp", "certutil", "del"]
+    assert _routes(runner) == [PROFILE_ACL, "scp", "certutil", "del"]
 
 
 def test_push_tool_refuses_when_the_copy_in_place_does_not_hash_to_the_tool(tmp_path: Path) -> None:
@@ -248,7 +261,7 @@ def test_push_tool_refuses_when_the_copy_in_place_does_not_hash_to_the_tool(tmp_
     dest = expected_guest_path(source)
     with pytest.raises(GuestPushError, match=re.escape(dest)):
         _guest(runner, tmp_path).push_tool()
-    assert _routes(runner) == ["scp", "certutil", "lock-dirs", "copy", "move", "certutil", "del"]
+    assert _routes(runner) == [PROFILE_ACL, "scp", "certutil", "lock-dirs", "copy", "move", "certutil", "del"]
 
 
 @pytest.mark.parametrize(
@@ -281,11 +294,15 @@ def test_push_tool_reads_the_spaced_hex_of_an_older_certutil(tmp_path: Path) -> 
 @pytest.mark.parametrize(
     ("route", "reply", "routes"),
     [
-        ("scp", Reply(1, "", "Connection reset"), ["scp", "del"]),
-        ("certutil", Reply(1, "", "Zugriff verweigert"), ["scp", "certutil", "del"]),
-        ("lock-dirs", Reply(255, "", "Connection reset"), ["scp", "certutil", "lock-dirs", "del"]),
-        ("copy", Reply(1, "", "Zugriff verweigert"), ["scp", "certutil", "lock-dirs", "copy", "del"]),
-        ("move", Reply(1, "", "Zugriff verweigert"), ["scp", "certutil", "lock-dirs", "copy", "move", "del"]),
+        ("scp", Reply(1, "", "Connection reset"), [PROFILE_ACL, "scp", "del"]),
+        ("certutil", Reply(1, "", "Zugriff verweigert"), [PROFILE_ACL, "scp", "certutil", "del"]),
+        ("lock-dirs", Reply(255, "", "Connection reset"), [PROFILE_ACL, "scp", "certutil", "lock-dirs", "del"]),
+        ("copy", Reply(1, "", "Zugriff verweigert"), [PROFILE_ACL, "scp", "certutil", "lock-dirs", "copy", "del"]),
+        (
+            "move",
+            Reply(1, "", "Zugriff verweigert"),
+            [PROFILE_ACL, "scp", "certutil", "lock-dirs", "copy", "move", "del"],
+        ),
     ],
     ids=["scp", "hash", "lock-dirs", "copy", "move"],
 )
@@ -360,10 +377,10 @@ def test_stage_tool_runs_later_calls_from_the_verified_profile_copy(tmp_path: Pa
     runner = _pushing(source).on("build", answer("build", BUILD))
     staged = _guest(runner, tmp_path).stage_tool()
     staged.tool("build", timeout=300)
-    assert runner.calls[1] == _hash_call(_staged(dest))
+    assert runner.calls[2] == _hash_call(_staged(dest))
     assert runner.calls[-1][runner.calls[-1].index("-File") + 1] == _staged(dest)
     # Nothing is copied into C:\winrepair and nothing is deleted yet: the caller still runs it.
-    assert _routes(runner) == ["scp", "certutil", "build"]
+    assert _routes(runner) == [PROFILE_ACL, "scp", "certutil", "build"]
     assert staged.remove_profile_copy() is None
     assert runner.calls[-1] == _ssh("del", "/Q", _staged(dest))
 
@@ -374,7 +391,7 @@ def test_stage_tool_refuses_and_deletes_a_profile_copy_that_is_not_the_tool(tmp_
     runner.replies["certutil"] = [Reply(0, certutil_output(_other_digest(source)))]
     with pytest.raises(GuestPushError, match="profile"):
         _guest(runner, tmp_path).stage_tool()
-    assert _routes(runner) == ["scp", "certutil", "del"]
+    assert _routes(runner) == [PROFILE_ACL, "scp", "certutil", "del"]
 
 
 def test_remove_profile_copy_reports_a_failed_delete(tmp_path: Path) -> None:
@@ -385,6 +402,119 @@ def test_remove_profile_copy_reports_a_failed_delete(tmp_path: Path) -> None:
     left = staged.remove_profile_copy()
     assert left is not None
     assert "timed out" in left
+
+
+# --- the profile's descriptor, read before a copy goes there ---------------------------------
+
+# Builtin Users may add and change files: any local account could swap the copy before it runs.
+LAX_SDDL = PROFILE_SDDL + "(A;OICI;FW;;;BU)"
+
+
+def _guest_remote(call: list[str]) -> list[str]:
+    """The remote command line of an ssh call: everything after ``user@host``."""
+    return call[call.index(f"{USER}@{GUEST_IP}") + 1 :]
+
+
+def test_stage_tool_refuses_a_profile_others_can_write_and_copies_nothing(tmp_path: Path) -> None:
+    source = _packed(tmp_path)
+    runner = _pushing(source).on(PROFILE_ACL, profile_reply(LAX_SDDL))
+    with pytest.raises(GuestPushError) as caught:
+        guest_ssh.stage_tool(GUEST_IP, guest_ssh.packed_tool(tmp_path), ssh=SSH, runner=runner)
+    message = str(caught.value)
+    assert PROFILE_PATH in message
+    assert "BU may write" in message
+    assert "nothing was copied" in message
+    # The probe alone ran: no scp, and no delete of a copy that was never made.
+    assert _routes(runner) == [PROFILE_ACL]
+
+
+def test_push_tool_refuses_a_profile_others_can_write_and_locks_nothing(tmp_path: Path) -> None:
+    source = _packed(tmp_path)
+    runner = _pushing(source).on(PROFILE_ACL, profile_reply(LAX_SDDL))
+    with pytest.raises(GuestPushError, match="can be written by others") as caught:
+        _guest(runner, tmp_path).push_tool()
+    assert "BU may write" in str(caught.value)
+    assert "scp" not in _routes(runner)
+    assert "lock-dirs" not in _routes(runner)
+    assert _routes(runner) == [PROFILE_ACL]
+
+
+def test_a_profile_only_trusted_principals_can_write_is_probed_right_before_the_copy(tmp_path: Path) -> None:
+    source = _packed(tmp_path)
+    runner = _pushing(source)
+    staged = _guest(runner, tmp_path).stage_tool()
+    assert staged.profile_copy == _staged(expected_guest_path(source))
+    assert _routes(runner) == [PROFILE_ACL, "scp", "certutil"]
+
+
+def test_the_probe_runs_an_encoded_script_reading_the_start_directory_descriptor(tmp_path: Path) -> None:
+    source = _packed(tmp_path)
+    runner = _pushing(source)
+    _guest(runner, tmp_path).stage_tool()
+    remote = _guest_remote(runner.calls[0])
+    assert remote[:4] == [POWERSHELL[0], "-NoProfile", "-NonInteractive", "-EncodedCommand"]
+    assert len(remote) == 5
+    # No "=" padding: cmd.exe, the guest's ssh shell, treats "=" as an argument delimiter.
+    assert re.fullmatch(r"[A-Za-z0-9+/]+", remote[4])
+    script = base64.b64decode(remote[4], validate=True).decode("utf-16-le")
+    assert "Get-Acl -LiteralPath ." in script
+    assert "ConvertTo-Json -Compress" in script
+
+
+PLANTED = "planted-value-7f3a"
+
+
+@pytest.mark.parametrize(
+    ("stdout", "field"),
+    [
+        (f"not json {PLANTED}\r\n", "answer"),
+        (profile_reply().stdout * 2, "answer"),
+        (f'["{PLANTED}"]\r\n', "answer"),
+        (profile_reply(user=PLANTED).stdout, "user"),
+        (profile_reply(path="C:\\" + PLANTED * 100).stdout, "path"),
+        ('{"path":"C:\\\\Users\\\\x","user":"S-1-5-18"}\r\n', "sddl"),
+    ],
+    ids=["not-json", "two-objects", "not-an-object", "user-not-a-sid", "path-too-long", "no-sddl"],
+)
+def test_a_probe_answer_that_is_not_the_expected_object_refuses_naming_the_field(
+    tmp_path: Path, stdout: str, field: str
+) -> None:
+    source = _packed(tmp_path)
+    runner = _pushing(source).on(PROFILE_ACL, Reply(0, stdout))
+    with pytest.raises(GuestPushError) as caught:
+        _guest(runner, tmp_path).stage_tool()
+    message = str(caught.value)
+    assert f"{field}: " in message
+    assert "nothing was copied" in message
+    assert PLANTED not in message
+    assert _routes(runner) == [PROFILE_ACL]
+
+
+def test_a_probe_that_fails_refuses_before_the_copy(tmp_path: Path) -> None:
+    source = _packed(tmp_path)
+    runner = _pushing(source).on(PROFILE_ACL, Reply(1, "", "Get-Acl : Attempted to perform an unauthorized operation."))
+    with pytest.raises(GuestPushError) as caught:
+        _guest(runner, tmp_path).stage_tool()
+    message = str(caught.value)
+    assert message.startswith("reading the ssh user's profile security descriptor failed rc=1: Get-Acl")
+    assert message.endswith("; nothing was copied")
+    assert _routes(runner) == [PROFILE_ACL]
+
+
+def test_a_probe_that_gets_no_answer_refuses_before_the_copy(tmp_path: Path) -> None:
+    source = _packed(tmp_path)
+    runner = _pushing(source).on(PROFILE_ACL, subprocess.TimeoutExpired("ssh", 60))
+    with pytest.raises(GuestPushError, match=r"timed out after 60 s; nothing was copied$"):
+        _guest(runner, tmp_path).stage_tool()
+    assert _routes(runner) == [PROFILE_ACL]
+
+
+def test_a_descriptor_it_cannot_parse_refuses_before_the_copy(tmp_path: Path) -> None:
+    source = _packed(tmp_path)
+    runner = _pushing(source).on(PROFILE_ACL, profile_reply("D:P(A;;ZZ;;;BU)"))
+    with pytest.raises(GuestPushError, match="cannot be read: unknown rights code 'ZZ'; nothing was copied"):
+        _guest(runner, tmp_path).stage_tool()
+    assert _routes(runner) == [PROFILE_ACL]
 
 
 def test_the_old_key_variable_is_not_read(monkeypatch: pytest.MonkeyPatch) -> None:

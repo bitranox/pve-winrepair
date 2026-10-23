@@ -18,6 +18,7 @@ from guest_fakes import (
     MUTATING_QM,
     NEWOS,
     NO_LOG,
+    PROFILE_ACL,
     TOOL_DIR,
     TOOL_PATH,
     Answer,
@@ -342,9 +343,17 @@ def test_after_the_apply_reboot_build_and_restore_wu_run_from_the_verified_profi
     verdict, steps = _applied(runner)
     after = _after_reboot(runner)
     assert verdict == "VERIFIED"
-    assert [route(call) for call in after] == ["scp", "certutil", "lock-dirs", "build", "restore-wu", "del"]
+    assert [route(call) for call in after] == [
+        PROFILE_ACL,
+        "scp",
+        "certutil",
+        "lock-dirs",
+        "build",
+        "restore-wu",
+        "del",
+    ]
     # The profile copy is hashed before it runs anything; nothing is copied into C:\winrepair.
-    assert after[1][-2] == STAGED
+    assert after[2][-2] == STAGED
     assert {_runs(call) for call in after if "-File" in call} == {STAGED}
     lock = next(s for s in steps if s["step"] == "winrepair_lock")
     assert (lock["ok"], lock["action"]) == (True, "ALREADY_LOCKED")
@@ -389,7 +398,7 @@ def test_a_profile_copy_that_is_not_the_tool_after_the_reboot_runs_nothing_and_i
     # Through run_apply: the refusal's "error" step is recorded there, not by apply_sequence.
     result = run_apply(REQUEST, make_node(runner), receipts=receipts, on_step=lambda _s: None)
     assert (result.exit, result.verdict) == (RunExit.REFUSED, "ERROR")
-    assert [route(call) for call in _after_reboot(runner)] == ["scp", "certutil", "del"]
+    assert [route(call) for call in _after_reboot(runner)] == [PROFILE_ACL, "scp", "certutil", "del"]
     error = result.steps[-1]
     assert error["step"] == "error"
     # "the profile copy": the copy in place C:\winrepair\<STAGED> has the same file name, and a

@@ -129,7 +129,8 @@ def route(cmd: Sequence[str]) -> str:
     at = next(i for i, token in enumerate(cmd) if token.startswith(f"{USER}@"))
     remote = list(cmd[at + 1 :])
     if remote[0].endswith("powershell.exe"):
-        return remote[6]
+        # The profile probe runs an encoded script, not the tool: it has no subcommand to route by.
+        return PROFILE_ACL if "-EncodedCommand" in remote else remote[6]
     if remote[0].endswith("certutil.exe"):
         return "certutil"
     return remote[0]
@@ -154,12 +155,37 @@ def hashes_to(source: Path) -> Responder:
 Responder = Callable[[list[str]], Reply]
 Answer = Reply | BaseException | Responder
 
+#: The route the profile probe (the ssh user's profile descriptor, read before a copy goes there) is
+#: answered under.
+PROFILE_ACL = "profile-acl"
+#: The ssh user's SID and profile directory the default probe reply reports.
+PROFILE_SID = "S-1-5-21-1-2-3-1001"
+PROFILE_PATH = "C:\\Users\\admin"
+#: A profile only SYSTEM, Administrators and the ssh user may write; an app capability SID may only
+#: traverse it.
+PROFILE_SDDL = (
+    f"O:{PROFILE_SID}G:{PROFILE_SID}D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;{PROFILE_SID})"
+    "(A;;0x100020;;;S-1-15-3-1024-1-2-3)"
+)
+
+
+def profile_reply(sddl: str = PROFILE_SDDL, *, user: str = PROFILE_SID, path: str = PROFILE_PATH) -> Reply:
+    """What the profile probe prints: one compressed JSON object, as ``ConvertTo-Json -Compress`` writes it."""
+    return Reply(0, json.dumps({"path": path, "user": user, "sddl": sddl}, separators=(",", ":")) + "\r\n")
+
+
+#: Answered on every runner unless a test queues its own: a guest whose profile only trusted
+#: principals can write, so a push or stage proceeds past the probe.
+DEFAULT_REPLIES: Mapping[str, Answer] = {PROFILE_ACL: profile_reply()}
+
 
 class FakeRunner:
     """Records argv and answers per route; the last reply of a queue repeats.
 
-    A reply may be an exception (``subprocess.TimeoutExpired``, ``OSError``), raised as the real
-    ``subprocess.run`` would, or a function of the argv that returns the reply (a stateful fake).
+    A route with nothing queued is answered from :data:`DEFAULT_REPLIES` (the profile probe), else
+    the call is unexpected. A reply may be an exception (``subprocess.TimeoutExpired``,
+    ``OSError``), raised as the real ``subprocess.run`` would, or a function of the argv that
+    returns the reply (a stateful fake).
     """
 
     def __init__(self) -> None:
@@ -176,7 +202,7 @@ class FakeRunner:
         self.calls.append(list(cmd))
         self.timeouts.append(timeout)
         key = route(cmd)
-        queue = self.replies.get(key)
+        queue = self.replies.get(key) or ([DEFAULT_REPLIES[key]] if key in DEFAULT_REPLIES else None)
         if not queue:
             raise AssertionError(f"unexpected call {key!r}: {list(cmd)}")
         reply = queue.pop(0) if len(queue) > 1 else queue[0]

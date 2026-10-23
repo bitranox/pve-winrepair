@@ -1,0 +1,234 @@
+"""Who may write a directory, read from its SDDL security descriptor.
+
+Every guest tool call the node makes from the ssh user's profile copy runs in an elevated ssh
+session. The copy's bytes are hashed before it runs, but a principal that can write the profile
+could swap the file between the hash and the run. So the node reads the profile directory's
+descriptor first and refuses unless only trusted principals can write it (see
+:func:`write_problems`).
+
+The parser covers the descriptor text ``Get-Acl`` prints (``O:``, ``G:``, ``D:``, ``S:``
+components; hex or two-letter rights; SID strings or two-letter aliases). Anything it does not
+understand is :class:`SddlError`, and any ACE kind other than allow and deny is reported as a
+problem rather than judged: the check fails closed.
+
+Reference: the "Security Descriptor String Format" and "ACE Strings" pages of the Windows SDK
+documentation.
+"""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+
+__all__ = [
+    "TRUSTED_WELL_KNOWN",
+    "WRITE_RIGHTS",
+    "SddlAce",
+    "SddlError",
+    "SddlReading",
+    "parse_sddl",
+    "write_problems",
+]
+
+# LocalSystem, BUILTIN\Administrators, CREATOR OWNER. CREATOR OWNER is trusted because on a file
+# created in the directory it becomes that file's creator: here the ssh user who copies the tool.
+TRUSTED_WELL_KNOWN: frozenset[str] = frozenset({"S-1-5-18", "S-1-5-32-544", "S-1-3-0"})
+
+# Every right that lets a principal change what is in the directory or what a copy there holds:
+# add file 0x2, add subdirectory 0x4, write EA 0x10, delete child 0x40, write attributes 0x100,
+# DELETE 0x10000, WRITE_DAC 0x40000, WRITE_OWNER 0x80000, GENERIC_ALL 0x10000000, GENERIC_WRITE
+# 0x40000000. Synchronize plus traverse (0x100020), which app capability SIDs hold, is not a write.
+WRITE_RIGHTS: int = 0x500D0156
+
+# Only the trusted aliases are resolved: every other principal stays as written and is untrusted,
+# so a missing alias can only make the check stricter.
+_ALIASES = {"SY": "S-1-5-18", "BA": "S-1-5-32-544", "CO": "S-1-3-0"}
+
+_RIGHT_CODES = {
+    "GA": 0x10000000,
+    "GW": 0x40000000,
+    "GR": 0x80000000,
+    "GX": 0x20000000,
+    "FA": 0x1F01FF,
+    "FW": 0x120116,
+    "FR": 0x120089,
+    "FX": 0x1200A0,
+    "SD": 0x10000,
+    "RC": 0x20000,
+    "WD": 0x40000,
+    "WO": 0x80000,
+    "CC": 0x1,
+    "DC": 0x2,
+    "LC": 0x4,
+    "SW": 0x8,
+    "RP": 0x10,
+    "WP": 0x20,
+    "DT": 0x40,
+    "LO": 0x80,
+    "CR": 0x100,
+}
+_ACE_FLAGS = frozenset({"CI", "OI", "NP", "IO", "ID", "SA", "FA", "TP", "CR"})
+
+_COMPONENT = re.compile(r"([OGDS]):")
+_SID = re.compile(r"S-1(?:-[0-9]+)+|[A-Z]{2}")
+# The ACL flags as a closed alternation: a greedy [A-Z_]* would swallow the "S" of a following "S:".
+_ACL_FLAGS = re.compile(r"(?:NO_ACCESS_CONTROL|P|AI|AR)*")
+_HEX_RIGHTS = re.compile(r"0[xX][0-9A-Fa-f]{1,8}")
+_NESTING = {"(": 1, ")": -1}
+_ACE_FIELDS = 6  # kind;flags;rights;object guid;inherit object guid;sid (a callback ACE adds a seventh)
+
+
+class SddlError(ValueError):
+    """The descriptor text is malformed, or uses a form this parser does not support."""
+
+
+@dataclass(frozen=True)
+class SddlAce:
+    """One ACE: its kind (``A`` allow, ``D`` deny, ...), flags as written, rights mask, SID (aliases resolved)."""
+
+    kind: str
+    flags: str
+    rights: int
+    sid: str
+
+
+@dataclass(frozen=True)
+class SddlReading:
+    """A parsed descriptor: the owner ("" when absent), whether a DACL is in force, the DACL's ACEs."""
+
+    owner: str
+    dacl_present: bool
+    aces: tuple[SddlAce, ...]
+
+
+def _sid(text: str) -> str:
+    if not _SID.fullmatch(text):
+        raise SddlError(f"not a SID: {text!r}")
+    return _ALIASES.get(text, text)
+
+
+def _rights(text: str) -> int:
+    if _HEX_RIGHTS.fullmatch(text):
+        return int(text, 16)
+    if not text or len(text) % 2:
+        raise SddlError(f"unsupported rights {text!r}")
+    mask = 0
+    for i in range(0, len(text), 2):
+        code = text[i : i + 2]
+        if code not in _RIGHT_CODES:
+            raise SddlError(f"unknown rights code {code!r}")
+        mask |= _RIGHT_CODES[code]
+    return mask
+
+
+def _flag_codes(flags: str) -> tuple[str, ...]:
+    """The two-letter ACE flags, read in pairs: a substring test would find "IO" inside "CIOI"."""
+    codes = tuple(flags[i : i + 2] for i in range(0, len(flags), 2))
+    if len(flags) % 2 or not set(codes) <= _ACE_FLAGS:
+        raise SddlError(f"unknown ACE flags {flags!r}")
+    return codes
+
+
+def _ace(body: str) -> SddlAce:
+    fields = body.split(";", _ACE_FIELDS)
+    # Only a callback ACE carries a seventh field; on an allow or deny ACE one is malformed.
+    if len(fields) < _ACE_FIELDS or (fields[0] in ("A", "D") and len(fields) > _ACE_FIELDS):
+        raise SddlError(f"an ACE needs {_ACE_FIELDS} fields: ({body})")
+    kind, flags, rights, _object, _inherit, sid = fields[:_ACE_FIELDS]
+    if not re.fullmatch(r"[A-Z]{1,2}", kind):
+        raise SddlError(f"unknown ACE kind {kind!r}")
+    _flag_codes(flags)
+    return SddlAce(kind, flags, _rights(rights), _sid(sid))
+
+
+def _ace_end(text: str, start: int) -> int:
+    """The index just past the ``)`` closing the ACE that opens at ``start`` (callback ACEs nest)."""
+    depth = 0
+    for i in range(start, len(text)):
+        depth += _NESTING.get(text[i], 0)
+        if depth == 0:
+            return i + 1
+    raise SddlError("an ACE is not closed")
+
+
+def _acl(text: str, at: int) -> tuple[str, tuple[SddlAce, ...], int]:
+    """The ACL flags and ACEs from ``at``, and where they end."""
+    matched = _ACL_FLAGS.match(text, at)  # never None: the pattern matches the empty string
+    flags = matched.group(0) if matched else ""
+    aces: list[SddlAce] = []
+    at += len(flags)
+    while at < len(text) and text[at] == "(":
+        end = _ace_end(text, at)
+        aces.append(_ace(text[at + 1 : end - 1]))
+        at = end
+    return flags, tuple(aces), at
+
+
+def _owner_or_group(text: str, at: int) -> tuple[str, int]:
+    match = _SID.match(text, at)
+    if match is None:
+        raise SddlError(f"no SID after the component at {at}")
+    return _sid(match.group(0)), match.end()
+
+
+def parse_sddl(text: str) -> SddlReading:
+    """Parse a descriptor string such as ``(Get-Acl -LiteralPath .).Sddl`` prints.
+
+    Raises:
+        SddlError: It is empty, a component repeats, or something is malformed or unsupported.
+
+    Example:
+        >>> reading = parse_sddl("O:BAG:SYD:P(A;OICI;FA;;;SY)(A;;0x1200a9;;;BU)")
+        >>> reading.owner, reading.dacl_present, [ace.sid for ace in reading.aces]
+        ('S-1-5-32-544', True, ['S-1-5-18', 'BU'])
+    """
+    seen: dict[str, str] = {}
+    dacl: tuple[str, tuple[SddlAce, ...]] | None = None
+    at = 0
+    while at < len(text):
+        component = _COMPONENT.match(text, at)
+        if component is None or component.group(1) in seen:
+            raise SddlError(f"expected a new O:, G:, D: or S: component at {at}")
+        tag = component.group(1)
+        if tag in "OG":
+            seen[tag], at = _owner_or_group(text, component.end())
+            continue
+        flags, aces, at = _acl(text, component.end())
+        seen[tag] = flags
+        if tag == "D":
+            dacl = (flags, aces)
+    if not seen:
+        raise SddlError("an empty descriptor")
+    present = dacl is not None and "NO_ACCESS_CONTROL" not in dacl[0]
+    return SddlReading(seen.get("O", ""), present, dacl[1] if dacl is not None else ())
+
+
+def _ace_problem(ace: SddlAce, trusted: frozenset[str]) -> str | None:
+    if ace.kind == "D":  # a deny ACE only removes rights
+        return None
+    if ace.kind != "A":
+        return f"an ACE of kind {ace.kind} for {ace.sid} is not judged (only allow and deny are)"
+    if ace.sid in trusted or not ace.rights & WRITE_RIGHTS:
+        return None
+    codes = _flag_codes(ace.flags)
+    # Inherit-only reaches the directory itself never; it still reaches a copy created there when
+    # files inherit it (OI). A container-only inherit-only ACE reaches neither.
+    if "IO" in codes and "OI" not in codes:
+        return None
+    return f"{ace.sid} may write: allow {ace.rights:#x} (flags {ace.flags or 'none'})"
+
+
+def write_problems(reading: SddlReading, *, trusted: frozenset[str]) -> tuple[str, ...]:
+    """One line per way a principal outside ``trusted`` can write the directory or a copy placed in it.
+
+    Example:
+        >>> write_problems(parse_sddl("O:SYD:P(A;OICI;FA;;;SY)(A;OICI;FW;;;BU)"), trusted=TRUSTED_WELL_KNOWN)
+        ('BU may write: allow 0x120116 (flags OICI)',)
+    """
+    problems: list[str] = []
+    if reading.owner not in trusted:
+        problems.append(f"the owner {reading.owner or '(none)'} is not trusted (an owner can rewrite the ACL)")
+    if not reading.dacl_present:
+        problems.append("no DACL is in force, so everyone has every right")
+    problems += [problem for ace in reading.aces if (problem := _ace_problem(ace, trusted)) is not None]
+    return tuple(problems)

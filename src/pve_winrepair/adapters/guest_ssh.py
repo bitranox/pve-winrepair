@@ -16,10 +16,13 @@ executes.
 ``C:\winrepair`` is locked to SYSTEM and Administrators before the tool is ever copied into it: a
 directory created under ``C:\`` is open to every local user until then, and the tool runs as an
 elevated admin and as SYSTEM. The tool itself does the locking (``lock-dirs``), so every push first
-puts it in the ssh user's profile, which only SYSTEM, Administrators and that user can write, checks
-the copy's bytes against the node's digest, and runs it from there (see :func:`push_tool`). After
-the apply reboot the apply-and-verify driver runs the tool from such a verified profile copy only
-(:meth:`Guest.stage_tool`), never from ``C:\winrepair``, whose lock the upgrade may have changed.
+puts it in the ssh user's profile, checks the copy's bytes against the node's digest, and runs it
+from there (see :func:`push_tool`). Before that copy is made, the node reads the profile's security
+descriptor with the guest's own ``powershell.exe`` and refuses unless only SYSTEM, Administrators
+and the ssh user can write it: anyone else who could would be able to swap the copy between its hash
+and its run (see :func:`stage_tool`). After the apply reboot the apply-and-verify driver runs the
+tool from such a verified profile copy only (:meth:`Guest.stage_tool`), never from
+``C:\winrepair``, whose lock the upgrade may have changed.
 
 Settings:
     The key, the user and the host-key options come from the ``[ssh]`` section
@@ -30,6 +33,7 @@ Settings:
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import re
 
@@ -41,7 +45,11 @@ from functools import cached_property
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
+
+from pve_winrepair.domain.acl import TRUSTED_WELL_KNOWN, SddlError, parse_sddl, write_problems
 from pve_winrepair.domain.envelope import (
+    POWERSHELL,
     READ_FAILURES,
     Envelope,
     Fields,
@@ -58,6 +66,8 @@ from pve_winrepair.domain.guest_tool import PackedTool, Pushed
 
 if TYPE_CHECKING:
     from collections.abc import Generator, Sequence
+
+    from pydantic_core import ErrorDetails
 
     from pve_winrepair.domain.settings import SshSettings
 
@@ -111,6 +121,43 @@ _TIMEOUT_OPTS = (
 CERTUTIL = r"%SystemRoot%\System32\certutil.exe"
 _SHA256_LINE = re.compile(r"[0-9A-Fa-f]{64}")
 
+# The profile probe: the directory ssh and scp start in (where the relative profile copy lands), the
+# ssh user's SID, and that directory's security descriptor, printed as ONE compressed JSON object.
+# Stop turns a failed Get-Acl into a non-zero exit instead of a half-filled object.
+_PROFILE_SCRIPT = (
+    "$ErrorActionPreference = 'Stop'; "
+    "[pscustomobject]@{"
+    "path = (Get-Location).Path; "
+    "user = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value; "
+    "sddl = (Get-Acl -LiteralPath .).Sddl"
+    "} | ConvertTo-Json -Compress"
+)
+
+
+def _encoded_command(script: str) -> str:
+    """``script`` as powershell's -EncodedCommand takes it: base64 of UTF-16LE, without ``=`` padding.
+
+    Encoded, the script crosses ssh's join and cmd.exe without any quoting. A script whose length
+    is a multiple of 3 encodes to a multiple of 6 bytes and so needs no ``=``: trailing spaces make
+    it one, because cmd.exe treats ``=`` as an argument delimiter.
+    """
+    padded = script + " " * (-len(script) % 3)
+    return base64.b64encode(padded.encode("utf-16-le")).decode("ascii")
+
+
+# POWERSHELL's path, never its "-File" form: this runs a script text, not the tool.
+_PROFILE_PROBE = (POWERSHELL[0], "-NoProfile", "-NonInteractive", "-EncodedCommand", _encoded_command(_PROFILE_SCRIPT))
+
+
+class _ProfileReading(BaseModel):
+    """The profile probe's answer, checked at the boundary before anything is judged from it."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
+
+    path: str = Field(min_length=1, max_length=1024)
+    user: str = Field(pattern=r"^S-1-[0-9-]+$", max_length=256)
+    sddl: str = Field(min_length=1, max_length=65536)
+
 
 def run(cmd: Sequence[str], timeout: float) -> subprocess.CompletedProcess[str]:
     """Run a command, capturing stdout and stderr SEPARATELY as UTF-8 text.
@@ -118,7 +165,8 @@ def run(cmd: Sequence[str], timeout: float) -> subprocess.CompletedProcess[str]:
     Separate on purpose: ssh's own warnings go to stderr and must never splice into the
     envelope line on stdout.
     """
-    # An argv list, never a shell, and every word bound for the guest passed check_argument.
+    # An argv list, never a shell. Every word bound for the guest either passed check_argument or is
+    # a fixed string of this module (the certutil and powershell paths, the encoded profile probe).
     return subprocess.run(  # noqa: S603 - argv list, no shell  # nosec B603
         list(cmd),
         capture_output=True,
@@ -267,6 +315,50 @@ def _verify(runner: Runner, ip: str, ssh: SshSettings, path: str, tool: PackedTo
         )
 
 
+def _answer_problem(item: ErrorDetails) -> str:
+    """``<field>: <reason>`` for one validation error; never the input, which came from the guest."""
+    return f"{'.'.join(str(part) for part in item['loc']) or 'answer'}: {item['msg']}"
+
+
+def _profile_reading(stdout: str, what: str) -> _ProfileReading:
+    try:
+        return _ProfileReading.model_validate_json(stdout.strip())
+    except ValidationError as error:
+        problems = "; ".join(_answer_problem(item) for item in error.errors())
+        raise GuestPushError(f"{what}: not the probe's JSON object ({problems}); nothing was copied") from None
+
+
+def _check_profile(runner: Runner, ip: str, ssh: SshSettings) -> None:
+    """Refuse unless only SYSTEM, Administrators and the ssh user can write the ssh user's profile.
+
+    The copy :func:`stage_tool` makes inherits the profile's object-inheritable ACEs, so those are
+    judged too (:func:`~pve_winrepair.domain.acl.write_problems`).
+
+    Raises:
+        GuestPushError: The probe failed or gave no answer, its answer is malformed, or someone else
+            can write the profile. Nothing was copied.
+    """
+    what = "reading the ssh user's profile security descriptor"
+    try:
+        proc = _remote(runner, ip, ssh, _PROFILE_PROBE, what)
+        _checked(proc, what)
+    except GuestPushError as exc:
+        raise GuestPushError(f"{exc}; nothing was copied") from exc
+    reading = _profile_reading(proc.stdout, what)
+    try:
+        problems = write_problems(parse_sddl(reading.sddl), trusted=TRUSTED_WELL_KNOWN | {reading.user})
+    except SddlError as exc:
+        raise GuestPushError(
+            f"{what}: the descriptor of {reading.path} cannot be read: {exc}; nothing was copied"
+        ) from None
+    if problems:
+        raise GuestPushError(
+            f"the ssh user's profile {reading.path} can be written by others, so a copy placed there could "
+            f"be swapped before it runs: {'; '.join(problems)} - fix the profile's ACL (only SYSTEM, "
+            "Administrators and the ssh user may write it); nothing was copied"
+        )
+
+
 def remove_staged(runner: Runner, ip: str, ssh: SshSettings, staged: str) -> str | None:
     """Delete the profile copy ``staged``; None once done, else why not. Never raises."""
     removing = f"removing the profile copy {staged}"
@@ -295,14 +387,20 @@ def stage_tool(
 ) -> str:
     """Copy ``tool`` to the ssh user's profile and check its bytes there; return its (relative) name.
 
-    The copy is hashed on the guest against the node's digest before anything runs it, so a
-    profile that is not what it should be cannot hand an elevated run other bytes. On any failure
-    the copy is deleted again (see :func:`remove_staged`); on success the caller deletes it.
+    First the profile's security descriptor is read on the guest: a profile anyone but SYSTEM,
+    Administrators and the ssh user can write is refused before anything is copied, since such a
+    principal could swap the copy between its hash and its run. The copy is then hashed on the guest
+    against the node's digest before anything runs it, so a profile that is not what it should be
+    cannot hand an elevated run other bytes. On a failure after the copy it is deleted again (see
+    :func:`remove_staged`); on success the caller deletes it.
 
     Raises:
-        GuestPushError: The copy failed, its hash could not be read, or it is not ``tool``.
+        GuestPushError: The profile can be written by others or its descriptor could not be read
+            (nothing copied), the copy failed, its hash could not be read, or it is not ``tool``.
     """
     staged = tool.staged
+    # Outside _removed_on_failure: a refusal here copied nothing, so there is nothing to delete.
+    _check_profile(runner, ip, ssh)
     with _removed_on_failure(runner, ip, ssh, staged):
         try:
             proc = _call(runner, _scp_argv(ip, ssh, [str(tool.source)], staged, recursive=False), timeout, "push")
