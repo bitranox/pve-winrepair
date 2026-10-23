@@ -1,14 +1,106 @@
-# Configuration System
+# Configuration
 
-This project uses [`lib_layered_config`](https://github.com/bitranox/lib_layered_config) to manage configuration through a layered merging system. Configuration values are loaded from multiple sources and merged in a defined order, allowing flexible overrides from system-wide defaults down to individual command-line arguments.
+`pve-winrepair` reads its settings through
+[`lib_layered_config`](https://github.com/bitranox/lib_layered_config): bundled defaults, then
+configuration files, then `.env`, environment variables and `--set` on the command line, each layer
+overriding the ones before it.
 
-## Key Concepts
+On a Proxmox node, put the settings in **`/etc/pve-winrepair/config.toml`**. That is all most
+installs need. The rest of this page lists every setting, then explains the layers for the cases
+where one file is not enough.
 
-- **Layered merging**: Configuration is assembled from multiple files and sources, with later layers overriding earlier ones
-- **Cross-platform paths**: Follows XDG conventions on Linux, standard locations on macOS and Windows
-- **Profile support**: Named profiles allow environment-specific configurations (e.g., `production`, `staging`, `test`)
-- **TOML format**: All configuration files use TOML syntax
-- **Runtime overrides**: Values can be overridden via environment variables or CLI flags without modifying files
+```toml
+[ssh]
+key = "/root/.ssh/id_guest"
+user = "admin"
+
+[guest]
+subnet = "192.0.2.0/24"
+
+[repair]
+media_dir = "/var/lib/vz/winmedia/win11"
+```
+
+`pve-winrepair config` shows the merged result and, for each value, the layer and file it came from.
+`repair` and `apply` validate all four sections before they do anything: an unknown key or a refused
+value stops them with exit 78 and one `Error: <section>.<key>: <reason>` line per problem, for
+example `Error: node.state_dir: must be an absolute path on the node (starting with /)`.
+
+---
+
+## Settings
+
+Every key below is shipped with its default in `defaultconfig.d/20-winrepair.toml`, which also
+documents each key. An empty text value means "not configured": it loads, and the command that needs
+it refuses to run until it is set.
+
+### `[ssh]`
+
+**`key`** (default `""`): the private key file the node logs in to the guests with. Required by
+`repair` and `apply`, which refuse to start without it. A guest that refuses this key is reached by
+overriding it for one run: `PVE_WINREPAIR___SSH__KEY=/root/.ssh/id_other_guest pve-winrepair ...`.
+
+**`user`** (default `"Administrator"`): the account the node logs in as. It must be an administrator
+on the guest. Letters, digits, `_`, `.` and `-`, 1 to 64 characters; no `DOMAIN\` part.
+
+**`strict_host_key_checking`** (default `true`): passed to ssh as `StrictHostKeyChecking=yes`, or `no`
+when false. Keep it true. Set it false only for internal guests that are cloned and rebuilt from
+templates, where every rebuild brings a new host key, and only on a network you trust: with `no`, ssh
+accepts any key, a changed one included. `pve-winrepair config` currently shows this value as
+`***REDACTED***`, because its name contains `key`; the value is still used.
+
+**`known_hosts_file`** (default `"~/.ssh/known_hosts"`): the known_hosts file ssh reads and writes for
+the guests, passed to ssh as written (ssh expands a leading `~` against the home of the account that
+runs it). Keep it a real file, never `/dev/null`: that turns every connection into a first
+connection, ssh then prints a "Permanently added" warning on every call, and with strict checking
+on, no guest could ever be reached. A separate file such as `~/.ssh/known_hosts_guests` keeps the
+guests' keys apart from the node's own.
+
+### `[guest]`
+
+**`subnet`** (default `""`): the IPv4 LAN the node reaches the guests on, in CIDR or netmask form with
+no host bits set (`192.0.2.0/24` or `192.0.2.0/255.255.255.0`). `repair` reads the guest's addresses
+from the QEMU guest agent and drops loopback and link-local ones:
+
+- With a subnet, it takes the first address inside it and waits, as the agent reports again, until
+  one appears.
+- Empty, it takes the only remaining address at once and refuses a guest that reports several.
+
+Set it. Without it, a guest that briefly reports only a container-switch address (a `172.x` address
+of a Docker or Hyper-V switch, with the LAN lease not up yet) is taken at that address at once, and
+a guest running Docker that reports both is refused on the first read. With the subnet set, both
+cases wait for the LAN address.
+
+**`runner_tasks`** (default `[]`) and **`expected_runners`** (default `0`): no node command reads
+these. They record, for guests that run CI runners, what an operator passes to the guest tool's
+`verify-runners --task NAME --expected N` after a reboot (one `--task` per entry; `0` means any count
+is fine). They are validated with the same rules that verb applies (task names of letters, digits,
+`_`, `.` and `-`, 1 to 64 characters; a count from 0 to 999999, never `true`/`false`), so
+`pve-winrepair config` shows only values the verb accepts.
+
+### `[repair]`
+
+**`media_dir`** (default `""`): the directory on the node with the Windows installation media,
+unpacked as on the ISO, so that `setup.exe` and `sources/install.wim` sit at its top level.
+Required by `repair`. Everything in it is copied to the guest's staging directory.
+
+**`snapshot_name`** (default `"pre_winrepair"`): the Proxmox snapshot `repair` takes. A letter first,
+then letters, digits, `_` and `-`, 2 to 40 characters. `--snapshot-name` overrides it for one run
+and follows the same rule.
+
+**`stage_free_gb`** (default `15.0`) and **`system_free_gb`** (default `25.0`): the free space, in
+GiB (1024^3 bytes), that `repair` requires before it copies anything. The staging drive needs
+`stage_free_gb` for the media; `C:` needs `system_free_gb` for the upgrade's own working set and
+its rollback copy. When `C:` is the only usable drive it needs both. Each must be a finite number
+greater than 0.
+
+### `[node]`
+
+**`state_dir`** (default `"/var/lib/pve-winrepair"`): where the node keeps its state, the repair
+receipts `receipt-<vmid>.json`. An absolute path; `""`, a relative path and a leading `~` are
+refused. Before anything else, `repair` and `apply` check that it is a directory, or that its
+nearest existing parent is one, so a receipt write cannot fail hours into a run on a path that is a
+file. A directory `pve-winrepair` creates gets mode 0700, each receipt 0600.
 
 ---
 
@@ -26,7 +118,8 @@ Configuration is loaded and merged in the following order (lowest to highest pre
 | 6        | **env vars** | Environment variables                           |
 | 7        | **CLI**      | Command-line `--set` flags (highest priority)   |
 
-**Merge behavior**: Each layer only needs to specify values it wants to override. Unspecified values inherit from lower layers.
+**Merge behavior**: Each layer only needs to specify values it wants to override. Unspecified values
+inherit from lower layers.
 
 ---
 
@@ -45,24 +138,25 @@ Configuration is loaded and merged in the following order (lowest to highest pre
 Every layer reads `config.toml` first and then the files in the `config.d/` directory next to it
 (for the host layer: `hosts/{hostname}.d/`), in lexical order; a `config.d/` file may be TOML, YAML
 or JSON. On Linux the app and host layers are read from `/etc/xdg/{slug}/` and then from
-`/etc/{slug}/`, and `$XDG_CONFIG_HOME` replaces `~/.config` when it is set. The `.env` row is a
-fallback: it is read only when no `.env` is found in the working directory or one of its parents.
+`/etc/{slug}/`, so a key in `/etc/pve-winrepair/config.toml` wins over the same key under
+`/etc/xdg/pve-winrepair/`. `$XDG_CONFIG_HOME` replaces `~/.config` when it is set. The `.env` row is
+a fallback: it is read only when no `.env` is found in the working directory or one of its parents.
 
 ### Path Placeholders
 
-| Placeholder  | Linux                      | macOS / Windows            |
-|--------------|----------------------------|----------------------------|
-| `{slug}`     | `pve-winrepair` | -                          |
-| `{vendor}`   | -                          | `bitranox`                 |
-| `{app}`      | -                          | `pve-winrepair` |
-| `{hostname}` | System hostname            | System hostname            |
+| Placeholder  | Linux           | macOS / Windows |
+|--------------|-----------------|-----------------|
+| `{slug}`     | `pve-winrepair` | -               |
+| `{vendor}`   | -               | `bitranox`      |
+| `{app}`      | -               | `pve-winrepair` |
+| `{hostname}` | System hostname | System hostname |
 
 ### Concrete Examples
 
-**Linux:**
-- User config: `~/.config/pve-winrepair/config.toml`
-- App config: `/etc/xdg/pve-winrepair/config.toml`
+**Linux (the Proxmox node):**
+- App config: `/etc/pve-winrepair/config.toml` (read after `/etc/xdg/pve-winrepair/config.toml`)
 - Host config: `/etc/xdg/pve-winrepair/hosts/myserver.toml`
+- User config: `~/.config/pve-winrepair/config.toml` (`/root/.config/...` for root)
 
 **macOS:**
 - User config: `~/Library/Application Support/bitranox/pve-winrepair/config.toml`
@@ -94,30 +188,33 @@ These options apply to all commands and must be specified **before** the command
 pve-winrepair --profile production config
 
 # Override settings at runtime (repeatable)
-pve-winrepair --set lib_log_rich.console_level=DEBUG config
-pve-winrepair --set lib_log_rich.console_level=DEBUG --set lib_log_rich.service=pve-winrepair config
+pve-winrepair --set repair.snapshot_name=pre_repair_2 repair --vmid 100
+pve-winrepair --set lib_log_rich.console_level=DEBUG --set ssh.user=admin config
 
 # Load configuration from an explicit .env file
-pve-winrepair --env-file /etc/myapp/.env config
-pve-winrepair --env-file ./environments/production.env config
+pve-winrepair --env-file /etc/pve-winrepair/.env config
 
 # Show full traceback for debugging
-pve-winrepair --traceback config-deploy --target user
+pve-winrepair --traceback config
 ```
 
 ---
 
 ### View Configuration
 
-Display the merged configuration from all sources (defaults -> app -> host -> user -> .env -> env vars).
+Display the merged configuration from all sources (defaults -> app -> host -> user -> .env -> env
+vars), each value with the layer and file it came from.
 
 #### Options Reference
 
-| Option           | Required | Description                                                   |
-|------------------|:--------:|---------------------------------------------------------------|
-| `--format`       | No       | Output format: `human` (default) or `json`.                   |
-| `--section NAME` | No       | Show only a specific section (e.g., `lib_log_rich`).          |
-| `--profile NAME` | No       | Load configuration for a specific profile.                    |
+| Option           | Required | Description                                 |
+|------------------|:--------:|---------------------------------------------|
+| `--format`       | No       | Output format: `human` (default) or `json`. |
+| `--section NAME` | No       | Show only a specific section (e.g., `ssh`). |
+| `--profile NAME` | No       | Load configuration for a specific profile.  |
+
+An unknown `--section` exits 22 (`Error: Section 'nope' not found`); a configuration that does not
+load exits 78.
 
 #### Examples
 
@@ -129,18 +226,20 @@ pve-winrepair config
 pve-winrepair config --format json
 
 # Show specific section only
-pve-winrepair config --section lib_log_rich
+pve-winrepair config --section repair
 
 # Load configuration for a specific profile
 pve-winrepair config --profile production
 
 # Combine options
-pve-winrepair config --profile staging --format json --section lib_log_rich
+pve-winrepair config --profile staging --format json --section ssh
 ```
 
 ### Deploy Configuration Files
 
-Deploy bundled default configuration to platform-specific directories.
+`config-deploy` writes the bundled defaults, every key with its default and its documentation, into
+a configuration layer, as a starting point to edit. An install whose own configuration management
+writes `/etc/pve-winrepair/config.toml` does not need it.
 
 #### Options Reference
 
@@ -154,75 +253,51 @@ Deploy bundled default configuration to platform-specific directories.
 | `--dir-mode MODE`  | No       | Override directory permissions (octal: `750` or `0o750`).                                                                     |
 | `--file-mode MODE` | No       | Override file permissions (octal: `640` or `0o640`).                                                                          |
 
+#### What each target writes (Linux)
+
+| Target | Files written                                                                                                       |
+|--------|---------------------------------------------------------------------------------------------------------------------|
+| `app`  | `/etc/xdg/pve-winrepair/config.toml` plus `config.d/20-winrepair.toml`, `40-layered-config.toml`, `90-logging.toml` |
+| `host` | `/etc/xdg/pve-winrepair/hosts/{hostname}.toml` plus `hosts/{hostname}.d/` with the same three files                 |
+| `user` | `~/.config/pve-winrepair/config.toml` plus `config.d/` with the same three files                                    |
+
+With `--profile NAME` the same files go under `profile/NAME/` of the target's directory, for example
+`/etc/xdg/pve-winrepair/profile/production/config.toml`.
+
+**A deploy to a higher layer hides every lower one.** The deployed `20-winrepair.toml` sets every
+key, so whatever layer it lands in decides all of them. A `host` deploy (host beats app) or a `user`
+deploy as root (user beats app and host) therefore puts all settings back to their defaults, the
+values in `/etc/pve-winrepair/config.toml` included. `app` is safe next to that file: it writes
+under `/etc/xdg/`, which is read first. Deploy into one layer only, edit the values there, and check
+the result with `pve-winrepair config`, which names the file each value came from.
+
 #### Basic Examples
 
 ```bash
-# Create user configuration file
+# The system-wide defaults to edit (as root)
+pve-winrepair config-deploy --target app
+
+# The defaults for this host only
+pve-winrepair config-deploy --target host
+
+# A personal copy in ~/.config/pve-winrepair/
 pve-winrepair config-deploy --target user
 
-# Deploy to system-wide location (requires privileges)
-sudo pve-winrepair config-deploy --target app
+# Several targets at once
+pve-winrepair config-deploy --target user --target app
 
-# Deploy host-specific configuration
-sudo pve-winrepair config-deploy --target host
+# Replace files that differ from the bundled ones (keeps <name>.bak)
+pve-winrepair config-deploy --target app --force
 
-# Deploy to multiple locations at once
-pve-winrepair config-deploy --target user --target host
-
-# Overwrite existing configuration
-pve-winrepair config-deploy --target user --force
-
-# Deploy to a specific profile directory
-pve-winrepair config-deploy --target user --profile production
-
-# Deploy production profile and overwrite if exists
-pve-winrepair config-deploy --target user --profile production --force
+# Into a profile directory
+pve-winrepair config-deploy --target app --profile production
 ```
 
-Every target receives `config.toml` plus `config.d/20-winrepair.toml`, `config.d/40-layered-config.toml`
-and `config.d/90-logging.toml` (the host target writes `hosts/{hostname}.toml` and
-`hosts/{hostname}.d/`). With `--force`, a file whose content differs from the bundled one is
-replaced and the old file is kept as `<name>.bak` (numbered, `<name>.bak.1` and so on, when a
-backup already exists); a file whose content is already identical is left as it is, mode
-included. When nothing differs, `config-deploy --force` writes nothing and says so.
-
-#### Deploying for Other Users
-
-To deploy user-level configuration for a different user account, use `sudo -u`:
-
-```bash
-# Deploy user config for 'serviceaccount' user
-sudo -u serviceaccount pve-winrepair config-deploy --target user
-
-# Deploy with a specific profile
-sudo -u serviceaccount pve-winrepair config-deploy --target user --profile production
-
-# The config will be created at that user's home directory:
-# /home/serviceaccount/.config/pve-winrepair/config.toml
-```
-
-**Important notes:**
-
-- Using `sudo` alone (without `-u`) deploys to root's home directory, not the target user's
-- Always use `sudo -u <username>` when deploying for service accounts or other users
-- Files are created with ownership of the target user (correct behavior)
-- File permissions are set according to the `user` layer defaults (`0o700`/`0o600` = private)
-
-**Common deployment scenarios:**
-
-```bash
-# System admin deploying app-wide config (all users)
-sudo pve-winrepair config-deploy --target app
-
-# System admin deploying for a service account
-sudo -u myservice pve-winrepair config-deploy --target user
-
-# System admin deploying host-specific config
-sudo pve-winrepair config-deploy --target host
-
-# Regular user deploying their own config (no sudo needed)
-pve-winrepair config-deploy --target user
-```
+With `--force`, a file whose content differs from the bundled one is replaced and the old file is
+kept as `<name>.bak` (numbered, `<name>.bak.1` and so on, when a backup already exists); a file
+whose content is already identical is left as it is, mode included. When nothing differs,
+`config-deploy --force` writes nothing and says so. The `app` and `host` targets need write access
+to `/etc/xdg/`, which on a node means root; a target that may not be written exits 13.
 
 #### File Permissions (POSIX Only)
 
@@ -312,9 +387,13 @@ of the section names `(source: override)` and has no hint, since no option gets 
 drop the `--set`. The files a deploy writes are never read for it, so `config-deploy --force`
 replaces a destination that carries a bad value, or does not parse at all, without further options.
 
+
 ### Generate Example Configuration Files
 
-Create example TOML files showing all available options with default values and documentation comments. Useful for learning the configuration structure or creating initial configuration files.
+`config-generate-examples` writes lib_layered_config's example layout: one placeholder file per
+layer location plus a `.env.example`. The files show WHERE each layer reads from and hold a generic
+`[service]` placeholder, not this application's settings. For a file with this application's
+defaults and every key documented, use `config-deploy`.
 
 #### Options Reference
 
@@ -331,18 +410,11 @@ pve-winrepair config-generate-examples --destination ./examples
 
 # Overwrite existing example files
 pve-winrepair config-generate-examples --destination ./examples --force
-
-# Generate examples in current directory
-pve-winrepair config-generate-examples --destination .
 ```
 
-#### Generated Files
-
-The command writes lib_layered_config's example layout: one placeholder file per layer location
-(`config.toml`, `config.d/10-override.toml`, `hosts/your-hostname.toml`, under `xdg/` and `home/`
-or the platform's equivalents) plus a `.env.example`. They show WHERE each layer reads from and
-hold a generic `[service]` placeholder, not this application's settings. For a file holding this
-application's defaults with every option documented, use `config-deploy`.
+On Linux it writes `xdg/pve-winrepair/config.toml`, `xdg/pve-winrepair/hosts/your-hostname.toml`,
+`home/pve-winrepair/config.toml`, `home/pve-winrepair/config.d/10-override.toml` and
+`.env.example` below the destination.
 
 ### Runtime Overrides
 
@@ -363,6 +435,9 @@ Use `--set` to override configuration values without modifying files. This optio
 ```bash
 # Override a single value
 pve-winrepair --set lib_log_rich.console_level=DEBUG config
+
+# Another snapshot name and more poll time for one repair
+pve-winrepair --set repair.snapshot_name=pre_repair_2 repair --vmid 100 --hours 8
 
 # Override multiple values
 pve-winrepair --set lib_log_rich.console_level=DEBUG --set lib_log_rich.console_format_preset=short config
@@ -466,9 +541,13 @@ LOG_ENABLE_GRAYLOG=true LOG_GRAYLOG_ENDPOINT="logs.example.com:12201" pve-winrep
 For any configuration section, use the format: `<PREFIX>___<SECTION>__<KEY>=value`
 
 ```bash
+PVE_WINREPAIR___SSH__KEY=/root/.ssh/id_other_guest pve-winrepair repair --vmid 100
+PVE_WINREPAIR___REPAIR__STAGE_FREE_GB=20 pve-winrepair config --section repair
 PVE_WINREPAIR___LIB_LOG_RICH__CONSOLE_LEVEL=DEBUG pve-winrepair info
-PVE_WINREPAIR___LIB_LOG_RICH__SERVICE=pve-winrepair pve-winrepair info
 ```
+
+`PVE_WINREPAIR___SSH__KEY` is the usual way to reach a guest that refuses the configured key, for
+one run, without touching the file.
 
 **Separator reference:**
 - `___` (triple underscore) - separates prefix from section
@@ -478,19 +557,21 @@ PVE_WINREPAIR___LIB_LOG_RICH__SERVICE=pve-winrepair pve-winrepair info
 
 ## .env File Support
 
-Create a `.env` file in your project directory for local development overrides:
+A `.env` file holds overrides as `SECTION__KEY=value` lines (no prefix), plus lib_log_rich's own
+`LOG_*` variables:
 
 ```bash
 # .env
+REPAIR__SNAPSHOT_NAME=pre_repair_2
 LOG_CONSOLE_LEVEL=DEBUG
-LOG_CONSOLE_FORMAT_PRESET=short
-LOG_ENABLE_GRAYLOG=false
 ```
 
 By default, the configuration loader reads ONE `.env` as its `.env` layer: the first one from the
 current directory up to the filesystem root (past any `pyproject.toml` or `.git`, so a checkout
 nested in another reads the outer one's `.env`), or, when there is none, the per-user fallback
-`.env` (see the `.env` row of the layer table above).
+`.env` (see the `.env` row of the layer table above). On a node, that walk starts in the
+directory you run `pve-winrepair` from, so a stray `.env` there or in any parent directory changes
+the settings; `pve-winrepair config` names the `.env` a value came from.
 
 Logging reads the `LOG_*` lines of that same file (the `--env-file` when one is given; when the
 configuration did not load, the first `.env` on the same upward walk) and copies only those into
@@ -501,8 +582,7 @@ To load a specific `.env` file instead, use `--env-file`:
 
 ```bash
 # Load from an explicit path (skips upward directory search)
-pve-winrepair --env-file /opt/myapp/config/.env config
-pve-winrepair --env-file ./environments/staging.env config
+pve-winrepair --env-file /etc/pve-winrepair/.env config
 ```
 
 The file must exist and be readable; Click validates this before the command runs.
@@ -517,66 +597,41 @@ The `defaultconfig.toml` and files in `defaultconfig.d/` (bundled with the packa
 
 ## Customization Best Practices
 
-**Do NOT modify deployed configuration files directly.** `config-deploy --force` replaces them
-(keeping the old file as `<name>.bak`).
+`config-deploy --force` replaces a deployed file whose content differs (keeping the old one as
+`<name>.bak`), so an edit made to a deployed `config.d/` file does not survive a forced redeploy.
+Two ways keep your values safe:
 
-Instead, create your own override file in the layer's `config.d/` directory using a high-numbered
-prefix:
-
-```bash
-# User-level customization (Linux)
-~/.config/pve-winrepair/config.d/999-myconfig.toml
-
-# User-level customization (macOS)
-~/Library/Application Support/bitranox/pve-winrepair/config.d/999-myconfig.toml
-
-# User-level customization (Windows)
-%APPDATA%\bitranox\pve-winrepair\config.d\999-myconfig.toml
-
-# System-wide customization (Linux)
-/etc/xdg/pve-winrepair/config.d/999-myconfig.toml
-
-# Host-specific customization (Linux)
-/etc/xdg/pve-winrepair/hosts/{hostname}.d/999-myconfig.toml
-```
+- Keep them in `/etc/pve-winrepair/config.toml`. `config-deploy` never writes that file.
+- Or put an override file with a high number into the `config.d/` directory of the layer you use,
+  for example `/etc/pve-winrepair/config.d/999-site.toml`. A layer reads `config.toml` first and then
+  its `config.d/` files in lexical order, so a `999-` file loads after the deployed `20-`, `40-`
+  and `90-` files and wins over them. `config-deploy` never writes a `999-` file.
 
 A file placed directly next to `config.toml` (outside `config.d/`) is never read: each layer reads
 only `config.toml` plus its `config.d/` files.
 
-**Why this works:**
-- Files in each layer's `config.d/` directory are loaded in lexical order after `config.toml`
-- Higher-numbered files (e.g., `999-`) load last and override earlier values, including the
-  deployed `40-`, `50-` and `90-` files
-- `config-deploy` never writes a `999-myconfig.toml`, so a redeploy leaves your file alone
-
-**Example `999-myconfig.toml`:**
+**Example `999-site.toml`:**
 
 ```toml
-# My custom overrides - survives a redeploy
+[repair]
+media_dir = "/var/lib/vz/winmedia/win11"
 
 [lib_log_rich]
 console_level = "DEBUG"
-
-[lib_log_rich.payload_limits]
-context_max_keys = 30
 ```
-
-This approach keeps your customizations separate and safe from updates while still benefiting from new default values added in future versions.
 
 ---
 
 ## Library Use
 
-You can import the configuration system directly in Python:
+The merged configuration is also available from Python:
 
 ```python
-import pve_winrepair as btcli
+import pve_winrepair
 
-# Get the merged configuration object
-config = btcli.get_config()
-print(config.as_dict())
+config = pve_winrepair.get_config()
+print(config.as_dict()["repair"])
 
-# Access specific sections
-log_config = config.get("lib_log_rich", default={})
-layered_config = config.get("lib_layered_config", default={})
+# One section, with a default when it is absent
+ssh = config.get("ssh", default={})
 ```

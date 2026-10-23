@@ -39,6 +39,25 @@ sources. After any edit under `src/pve_winrepair_guest/` (including one `make te
 ruff's formatting), run `make custom pack` and commit the `.ps1` with the change. `make test` does
 not repack: a gate that repacks before it compares could never find a stale artefact.
 
+## The Privacy Gate
+
+`tests/test_privacy_gate.py` keeps private site data (host names, internal addresses, VM ids,
+credential paths) out of the public tree: the tracked files, their path names, untracked files that
+a `git add -A` would pick up, and the decoded payload of the packed guest tool. Its generic patterns
+always run, CI included. The exact private names come from a JSON token list that is never
+committed: `.privacy-tokens.json` at the checkout root (gitignored), or the file named by
+`PVE_WINREPAIR_PRIVACY_TOKENS_FILE`. It is an object with keys from `hosts`, `vmids`, `words` and
+`paths`, each a list of non-empty strings:
+
+```json
+{"hosts": ["build-host-1"], "vmids": ["4711"], "words": ["EXAMPLECORP"], "paths": ["/srv/private/"]}
+```
+
+Without the default file those tests skip, which is expected in CI; locally, a skip means your list
+is missing. A malformed list, or a variable naming a missing file, is an error. A finding names the
+path's position and the pattern or list entry, never the matched text, so the test output itself
+leaks nothing.
+
 ## Test Markers
 
 | Command                | What it runs                                                       |
@@ -74,8 +93,7 @@ These tests are skipped by `make test` and in CI, and run with `make testintegra
   `src/pve_winrepair/__init__conf__.py`; a version bump rewrites that file, so do not
   edit the version there by hand.
 - The console script name is the static `shell_command` constant in `__init__conf__.py`
-  (`pve-winrepair`); `[project.scripts]` in `pyproject.toml` registers it together
-  with `pve_winrepair`.
+  (`pve-winrepair`); `[project.scripts]` in `pyproject.toml` registers it.
 
 ## Dependency Auditing
 

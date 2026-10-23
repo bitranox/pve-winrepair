@@ -10,20 +10,33 @@ moves or removes a module, a CLI option or a public name.
 ## Related Files
 
 ### Domain Layer
-- `src/pve_winrepair/domain/enums.py`  -  Type-safe enums (OutputFormat, DeployTarget)
-- `src/pve_winrepair/domain/errors.py`  -  Domain exceptions (ConfigurationError)
+- `src/pve_winrepair/domain/acl.py`  -  Who may write a directory, read from its SDDL security descriptor (`parse_sddl`, `write_problems`, `TRUSTED_WELL_KNOWN`); the node's check of the ssh user's profile before a copy of the tool goes there
+- `src/pve_winrepair/domain/addresses.py`  -  `lan_address` picks the guest's LAN address out of what its agent reports (the first one in `[guest] subnet`; without a subnet the only candidate, several refused with `AmbiguousAddressError`)
+- `src/pve_winrepair/domain/enums.py`  -  Type-safe enums (`OutputFormat`, `DeployTarget`)
+- `src/pve_winrepair/domain/envelope.py`  -  The guest tool's answer contract: `Envelope`, the typed `Fields`, `parse_envelope`, the error types (`GuestNoAnswerError`, `GuestInternalError`, `GuestProtocolError`, `GuestPushError`, `UnsafeArgumentError`), `check_argument`, the state markers and `RunState`, `READ_FAILURES` and `WU_HELD_HINT`; starts no process
+- `src/pve_winrepair/domain/errors.py`  -  Domain exceptions (`ConfigurationError`)
+- `src/pve_winrepair/domain/guest_tool.py`  -  `PackedTool` (the node's packed tool, its content address and sha256) and `Pushed` (what a push left on the guest)
+- `src/pve_winrepair/domain/receipt.py`  -  `RepairReceipt`, the image build a repair's prepare step measured, and `ReceiptError`
+- `src/pve_winrepair/domain/report.py`  -  `Report` collects a run's steps and hands each to `on_step`; `RunExit`, `RunResult`, `Step`; flags a run that leaves Windows Update held
 - `src/pve_winrepair/domain/settings.py`  -  Node CLI settings models (`SshSettings`, `GuestSettings`, `RepairSettings`, `NodeSettings`, `Settings`); see Settings below
 
 ### Application Layer
-- `src/pve_winrepair/application/ports.py`  -  Callable Protocol definitions for adapter functions
+- `src/pve_winrepair/application/ports.py`  -  Protocol definitions the adapters satisfy: the configuration and logging callables, `LoadSettings`, `GuestPort`, `NodePort`, `ReceiptStore`, `MakeNode`, `MakeReceipts`
+- `src/pve_winrepair/application/guest_state.py`  -  `read_run_state`, the live-run gate both use cases read before they stop, relaunch or restage a guest
+- `src/pve_winrepair/application/repair.py`  -  `run_repair`: live-run check, Windows Update hold, vTPM, snapshot, push, stage root, locked staging, media copy, WIM gate, receipt, launch, poll; `RepairRequest`, `RepairError`
+- `src/pve_winrepair/application/apply.py`  -  `run_apply`: receipt, run gate, staged-OS gate, clean stop and start, build check against the receipt from a verified profile copy, Windows Update release; `ApplyRequest`, `ApplyError`
+- `src/pve_winrepair/application/vm.py`  -  `vm_status` and the bounded `wait_status` over `qm status`; `VmStatusTimeoutError`
 
 ### Adapters Layer
-- `src/pve_winrepair/adapters/config/loader.py`  -  Configuration loading with LRU caching
+- `src/pve_winrepair/adapters/config/loader.py`  -  Configuration loading with LRU caching; `NOT_SENSITIVE` names the keys `config` shows unredacted
 - `src/pve_winrepair/adapters/config/deploy.py`  -  Configuration deployment
 - `src/pve_winrepair/adapters/config/display.py`  -  Configuration display (TOML/JSON output, redaction)
 - `src/pve_winrepair/adapters/config/overrides.py`  -  CLI `--set` override parsing and deep-merge
 - `src/pve_winrepair/adapters/config/settings.py`  -  `load_settings` validates the `[ssh] [guest] [repair] [node]` sections into `Settings`; `SettingsError` carries one `<section>.<field>: <reason>` line per problem
-- `src/pve_winrepair/adapters/guest_ssh.py`  -  The guest tool over ssh: `Guest` pushes the packed tool to its content address, runs one subcommand and reads its JSON envelope (`Envelope`, typed `Fields`; `GuestNoAnswerError`, `GuestInternalError`, `GuestProtocolError`, `GuestPushError`); `Node` bundles `qm`, the clock and the guests; `ssh_options` turns `SshSettings` into ssh's `-o` options; `TOOL_DIR` is the packed tool shipped in `adapters/guest_tool/`
+- `src/pve_winrepair/adapters/guest_ssh.py`  -  The guest tool over ssh: `Guest` checks the ssh user's profile, pushes the packed tool to its content address (`push_tool`) or stages a verified profile copy (`stage_tool`), runs one subcommand and hands the answer to `parse_envelope`; `ssh_options` turns `SshSettings` into ssh's `-o` options; `TOOL_DIR` is the packed tool shipped in `adapters/guest_tool/`
+- `src/pve_winrepair/adapters/guest_tool/winrepair_guest.ps1`  -  The packed guest tool, a committed artefact (`make custom pack` writes it)
+- `src/pve_winrepair/adapters/node.py`  -  `Node`, the PVE node a run uses: one runner for `qm` and every guest, the clock and sleep; `run` is the production runner
+- `src/pve_winrepair/adapters/receipts.py`  -  `FileReceiptStore`: one receipt per VM at `<state_dir>/receipt-<vmid>.json`, replaced atomically, 0600 in a 0700 directory
 - `src/pve_winrepair/adapters/logging/setup.py`  -  lib_log_rich initialization; takes only the `LOG_*` lines of a `.env`, and raises `InvalidLoggingConfigError` for a refused `[lib_log_rich]` value or `LOG_*` variable, after starting logging with its defaults (and without the `LOG_*` variables only when one of them is refused); `check_logging_config` refuses another configuration's logging settings through lib_log_rich's `validate_config`, without touching the running runtime
 - `src/pve_winrepair/adapters/cli/`  -  CLI adapter package:
   - `__init__.py`  -  Public facade
@@ -35,6 +48,7 @@ moves or removes a module, a CLI option or a public name.
   - `root.py`  -  Root command group
   - `main.py`  -  Entry point
   - `typed_click.py`  -  Strictly typed wrappers for rich_click's `option`, `version_option` and `get_current_context`
+  - `commands/__init__.py`  -  Re-exports every command (`cli_repair`, `cli_apply`, `cli_guest_tool`, `cli_config`, ...)
   - `commands/info.py`  -  info command
   - `commands/config.py`  -  config, config-deploy, config-generate-examples commands
   - `commands/repair.py`  -  `repair --vmid N [--stage-only] [--snapshot-name S] [--hours H] [--ip IP] [--stage-root X:] [--tpm-storage S] [--json]`; `--snapshot-name` defaults to `[repair] snapshot_name` and is validated by its rule
@@ -48,16 +62,34 @@ moves or removes a module, a CLI option or a public name.
 - `src/pve_winrepair/adapters/memory/logging.py`  -  In-memory logging (a quiet lib_log_rich runtime for tests)
 
 ### Composition Layer
-- `src/pve_winrepair/composition/__init__.py`  -  Wires adapters to ports; `build_testing(make_node=..., make_receipts=...)` takes a node on a fake runner, and its default node refuses to run anything
+- `src/pve_winrepair/composition/__init__.py`  -  Wires adapters to ports (`AppServices`, `build_production`); `build_testing(make_node=..., make_receipts=...)` takes a node on a fake runner, and its default node refuses to run anything
 
 ### Entry Points
 - `src/pve_winrepair/entry.py`  -  Console-script entry point; wires production services before invoking the CLI
 - `src/pve_winrepair/__main__.py`  -  Thin shim for `python -m`
-- `src/pve_winrepair/__init__.py`  -  Public API exports
+- `src/pve_winrepair/__init__.py`  -  Public API exports (`get_config`, `print_info`)
 - `src/pve_winrepair/__init__conf__.py`  -  Package metadata constants
 
-### Guest Tool
+### Package Facades
+- `src/pve_winrepair/domain/__init__.py`  -  Re-exports `ConfigurationError`, `DeployTarget`, `OutputFormat`
+- `src/pve_winrepair/application/__init__.py`  -  Re-exports the configuration and logging ports
+- `src/pve_winrepair/adapters/__init__.py`  -  Layer docstring only
+- `src/pve_winrepair/adapters/config/__init__.py`  -  Re-exports the configuration adapter functions (`get_config`, `deploy_configuration`, `display_config`, `apply_overrides`, ...)
+- `src/pve_winrepair/adapters/logging/__init__.py`  -  Re-exports the logging setup
+
+### Guest Tool (`src/pve_winrepair_guest/`, runs on the Windows guest)
 - `src/pve_winrepair_guest/__init__.py`  -  Empty on purpose: the packer executes every parent `__init__.py` on the guest
+- `src/pve_winrepair_guest/winrepair_guest.py`  -  The entry script: one subcommand per run (`default_commands`), one JSON envelope on stdout, exit 0 ok, 1 refused, 2 internal error
+- `src/pve_winrepair_guest/envelope.py`  -  The tool's output contract: the envelope, `Outcome`, `Skip` and the exit code they imply
+- `src/pve_winrepair_guest/probes.py`  -  The read-only probes: `detect-lp-defect`, `drives`, `verify-runners`, `build`, `staged-os`, `servicing-active`, `setup-alive`, `state`
+- `src/pve_winrepair_guest/wu.py`  -  `quiesce-wu` and `restore-wu`, and the bounded Windows Update search probe (a `multiprocessing` child)
+- `src/pve_winrepair_guest/lockdown.py`  -  `lock-dirs` and the protected DACL that keeps non-admins away from what the SYSTEM task executes
+- `src/pve_winrepair_guest/upgrade.py`  -  `prepare` (the WIM gate and the compat waiver), `launch` (the trigger-less SYSTEM task) and `upgrade-run` (setup.exe, the state log and its marker)
+- `src/pve_winrepair_guest/wim.py`  -  Pure reader for a WIM file's image metadata
+- `src/pve_winrepair_guest/evtlog.py`  -  Reads a Windows event log with each message rendered by its provider's metadata
+
+### Scripts
+- `scripts/pack_guest.py`  -  Packs the guest tool into the committed artefact with pwshpy (`make custom pack`); `--check` exits 1 when the artefact is stale
 
 ### Configuration Defaults
 - `src/pve_winrepair/adapters/config/defaultconfig.toml`  -  Base defaults
@@ -66,41 +98,80 @@ moves or removes a module, a CLI option or a public name.
 - `src/pve_winrepair/adapters/config/defaultconfig.d/90-logging.toml`  -  Logging defaults
 
 ### Tests
+
+Helpers and fixtures:
 - `tests/conftest.py`  -  Shared fixtures (see Test Fixtures below)
 - `tests/cli_fakes.py`  -  The command name and message of the `failing_command` fixture, which the tests assert on
-- `tests/test_cache_effectiveness.py`  -  Configuration loading returns consistent (cached) results
+- `tests/guest_fakes.py`  -  A fake ssh/scp runner answering with the guest tool's real envelopes, plus fake `qm` and clock, the whole-run guests of a repair and an apply, and `run_cli` (the real `main()` with a node on the fake runner)
+- `tests/win32_fakes.py`  -  In-memory stand-ins for the pywin32 modules the guest tool calls
+- `tests/mp_targets.py`  -  Module-level targets for the real `multiprocessing` tests of the Windows Update search probe
+- `tests/json_paths.py`  -  Typed reads of a parsed JSON envelope
+- `tests/build_wim_fixture.py`  -  Builds the small WIM fixture from a real `install.wim`
+- `tests/fixtures/install_wim_header_xml.bin`  -  The WIM fixture: a header plus the image XML
+- `tests/fixtures/packed_tool/winrepair_guest.ps1`  -  A small stand-in for the packed tool, for the push tests
+
+Node CLI and its layers:
+- `tests/test_acl.py`  -  Which SDDL descriptors let someone else write the ssh user's profile
+- `tests/test_addresses.py`  -  Picking the guest's LAN address out of what its agent reports
+- `tests/test_apply.py`  -  The apply use case's gates and its whole run, through the ssh runner seam
+- `tests/test_envelope.py`  -  The envelope contract: the arguments it refuses, how an answer is read, its typed fields
+- `tests/test_guest_ssh.py`  -  The ssh adapter: the argv it builds from `SshSettings`, the profile check, the push and its hashes, the profile copy
+- `tests/test_node.py`  -  The node bundle: one runner for `qm` and every guest, and the port the use cases take
+- `tests/test_receipts.py`  -  The repair receipt and the file store that keeps one per VM in `[node] state_dir`
+- `tests/test_repair.py`  -  The repair use case's steps and its whole run, through the ssh runner seam
+- `tests/test_settings.py`  -  Settings models and `load_settings`: shipped defaults, refusals by field, the env override end to end
+- `tests/test_settings_dotenv_numbers.py`  -  Digit-only `.env` values reach every text setting as the text the operator wrote
+
+CLI:
+- `tests/test_cli_apply.py`  -  `apply` through `main()`: the receipt from `[node] state_dir`, refusals before any call, output and exit codes
 - `tests/test_cli_config.py`  -  `config`, `config-deploy`, `config-generate-examples` commands
 - `tests/test_cli_config_errors.py`  -  A configuration that cannot be loaded: who reports it, and who still runs
-- `tests/test_cli_apply.py`  -  `apply` through `main()`: the receipt from `[node] state_dir`, refusals before any call, output and exit codes
 - `tests/test_cli_core.py`  -  Traceback, main entry, help, info, unknown command, the registered command set
-- `tests/test_cli_guest_tool.py`  -  `guest-tool path` and `guest-tool sha256`
-- `tests/test_cli_repair.py`  -  `repair` through `main()`: options, settings, refusals before any call, progress lines on stderr, output and exit codes
 - `tests/test_cli_env_file.py`  -  `--env-file` path passing, validation and value override
 - `tests/test_cli_exit_codes.py`  -  Exit codes through the CLI
+- `tests/test_cli_guest_tool.py`  -  `guest-tool path` and `guest-tool sha256`
 - `tests/test_cli_main_exit.py`  -  Exit codes and stderr through the real `main()` entry point
 - `tests/test_cli_overrides.py`  -  `--set` through the CLI
+- `tests/test_cli_repair.py`  -  `repair` through `main()`: options, settings, refusals before any call, progress lines on stderr, output and exit codes
 - `tests/test_cli_validation.py`  -  Profile name validation
+
+Configuration and logging:
+- `tests/test_cache_effectiveness.py`  -  Configuration loading returns consistent (cached) results
 - `tests/test_config_overrides.py`  -  `--set` parsing tests
-- `tests/test_declared_dependencies.py`  -  Every third-party module imported at run time is a declared dependency
 - `tests/test_deploy_mode_safety.py`  -  `--dir-mode`/`--file-mode` literal, range and safety checks
 - `tests/test_deploy_permissions.py`  -  `config-deploy` permission options
 - `tests/test_display.py`  -  Config display formatting tests
-- `tests/test_enums.py`  -  Domain enum tests
-- `tests/test_errors.py`  -  Domain error types
-- `tests/guest_fakes.py`  -  A fake ssh/scp runner answering with the guest tool's real envelopes, plus fake `qm` and clock, the whole-run guests of a repair and an apply, and `run_cli` (the real `main()` with a node on the fake runner)
-- `tests/test_guest_ssh.py`  -  The ssh adapter: the argv it builds from `SshSettings`, the arguments it refuses, the push and its hashes, how it reads an answer
 - `tests/test_logging.py`  -  Logging configuration model
 - `tests/test_logging_dotenv_isolation.py`  -  Only `LOG_*` lines of a `.env` reach the environment; an invalid `[lib_log_rich]` section or `LOG_*` variable is a configuration failure that leaves logging running
 - `tests/test_memory_logging.py`  -  Testing-composition logging runtime and the per-test logging reset
+- `tests/test_permission_defaults.py`  -  `config-deploy` hands permissions to lib_layered_config: `--set` overrides, `.env` and deployed destinations never decide a mode, refusals exit 78
+- `tests/test_property_overrides.py`  -  Property-based `--set` override tests
+
+Guest tool:
+- `tests/test_entry.py`  -  The guest tool's entry point and its one-envelope-per-run contract; the README's subcommand table lists every subcommand
+- `tests/test_evtlog.py`  -  The event-log reader
+- `tests/test_lockdown.py`  -  `lock-dirs` and the DACL that keeps non-admins away from what the SYSTEM task executes
+- `tests/test_probes.py`  -  The read-only probe subcommands
+- `tests/test_upgrade.py`  -  `prepare`, `launch` and `upgrade-run`
+- `tests/test_wim.py`  -  The WIM reader
+- `tests/test_wu.py`  -  `quiesce-wu`, `restore-wu` and the bounded Windows Update search probe
+- `tests/test_artefact.py`  -  The committed packed tool is a fresh pack of the current guest sources
+- `tests/test_pack_guest.py`  -  `scripts/pack_guest.py`: pack, check, and its exit codes
+
+Project and repository:
+- `tests/test_coverage_database.py`  -  A pytest run leaves every coverage database it did not create alone
+- `tests/test_declared_dependencies.py`  -  Every third-party module imported at run time is a declared dependency
+- `tests/test_enums.py`  -  Domain enum tests
+- `tests/test_errors.py`  -  Domain error types
 - `tests/test_metadata.py`  -  Package metadata and PEP 561 marker tests
 - `tests/test_metadata_sync.py`  -  `__init__conf__` constants stay in sync with `pyproject.toml`
 - `tests/test_module_entry.py`  -  `python -m` entry tests
 - `tests/test_module_reference_sync.py`  -  This document names both packages, and its settings tables match the models' fields and defaults
-- `tests/test_permission_defaults.py`  -  `config-deploy` hands permissions to lib_layered_config: `--set` overrides, `.env` and deployed destinations never decide a mode, refusals exit 78
+- `tests/test_packaging.py`  -  The source distribution carries the package, its tests and its docs, and nothing else
+- `tests/test_platform_markers.py`  -  The `os_*` markers skip a test off its platform
 - `tests/test_ports.py`  -  Protocol conformance tests
-- `tests/test_property_overrides.py`  -  Property-based `--set` override tests
+- `tests/test_privacy_gate.py`  -  No private site data in the tracked tree, its path names or the packed guest tool (generic patterns always; the exact tokens from a local, never committed list)
 - `tests/test_safe_console.py`  -  Legacy-codepage output tests, plus the guard forbidding direct `click.echo`
-- `tests/test_settings.py`  -  Settings models and `load_settings`: shipped defaults, refusals by field, the fleet-shaped file, the env override end to end
 
 ---
 
@@ -108,16 +179,20 @@ moves or removes a module, a CLI option or a public name.
 
 ### Layer Assignments
 
-| Directory/Module       | Layer       | Responsibility                                                  |
-|------------------------|-------------|-----------------------------------------------------------------|
-| `domain/`              | Domain      | Pure logic  -  no I/O, logging, or frameworks                   |
-| `application/ports.py` | Application | Protocol definitions for adapters                               |
-| `adapters/config/`     | Adapters    | Configuration loading, deployment, display                      |
-| `adapters/logging/`    | Adapters    | lib_log_rich initialization                                     |
-| `adapters/cli/`        | Adapters    | Click CLI framework integration                                 |
-| `adapters/memory/`     | Adapters    | In-memory implementations for testing                           |
-| `composition/`         | Composition | Wires adapters to ports                                         |
-| `pve_winrepair_guest/` | Guest tool  | Runs on the Windows guest; imports nothing from `pve_winrepair` |
+| Directory/Module        | Layer       | Responsibility                                                  |
+|-------------------------|-------------|-----------------------------------------------------------------|
+| `domain/`               | Domain      | Pure logic  -  no I/O, logging, or frameworks                   |
+| `application/ports.py`  | Application | Protocol definitions for adapters                               |
+| `application/`          | Application | The repair and apply use cases, over the ports                  |
+| `adapters/guest_ssh.py` | Adapters    | ssh and scp to a guest; the push of the packed tool             |
+| `adapters/node.py`      | Adapters    | `qm`, the clock and the guests of one PVE node                  |
+| `adapters/receipts.py`  | Adapters    | Repair receipts as files in `[node] state_dir`                  |
+| `adapters/config/`      | Adapters    | Configuration loading, deployment, display                      |
+| `adapters/logging/`     | Adapters    | lib_log_rich initialization                                     |
+| `adapters/cli/`         | Adapters    | Click CLI framework integration                                 |
+| `adapters/memory/`      | Adapters    | In-memory implementations for testing                           |
+| `composition/`          | Composition | Wires adapters to ports                                         |
+| `pve_winrepair_guest/`  | Guest tool  | Runs on the Windows guest; imports nothing from `pve_winrepair` |
 
 ### Import Enforcement
 
@@ -207,6 +282,43 @@ Generate example configuration files.
 | `--force`           | Overwrite existing files      |
 
 **Exit codes:** 0, 1
+
+### repair
+
+Repair one guest by an in-place repair upgrade (`application/repair.py`).
+
+| Option              | Description                                                                          |
+|---------------------|--------------------------------------------------------------------------------------|
+| `--vmid N`          | The guest's VMID on this node  -  required, at least 1                               |
+| `--snapshot-name S` | Snapshot to take (default `[repair] snapshot_name`, validated by its rule)           |
+| `--hours H`         | Polling deadline in hours (default 6.0)                                              |
+| `--stage-only`      | Stage and verify the media, do not launch setup (verdict `STAGED`)                   |
+| `--ip IP`           | Guest address for a guest without QEMU agent; implies the offline snapshot           |
+| `--stage-root X:`   | Drive to stage on (default: a non-system fixed drive with room, else `C:`)           |
+| `--tpm-storage S`   | PVE storage for a new vTPM volume (default: the storage of the guest's disk)         |
+| `--json`            | Print the envelope `{ok, command, vmid, verdict, steps}` instead of the verdict line |
+
+**Exit codes:** 0 (`STATE=DONE-OK`, `STAGED`), 1 (refused; `STATE=DONE-FAIL`, `WORKER_GONE`, `TIMEOUT`, `ERROR`), 2 (internal error, or a usage error), 78 (configuration not loadable or invalid)
+
+### apply
+
+Apply the upgrade a repair staged and verify the build its receipt recorded (`application/apply.py`).
+
+| Option              | Description                                                                    |
+|---------------------|--------------------------------------------------------------------------------|
+| `--vmid N`          | The guest's VMID on this node  -  required, at least 1                         |
+| `--ip IP`           | The guest's address  -  required                                               |
+| `--apply-minutes M` | How long the apply phase may take before it is reported overrun (default 90.0) |
+| `--json`            | Print the envelope instead of the verdict line                                 |
+
+**Exit codes:** 0 (`VERIFIED`), 1 (refused: `RUN_LIVE`, `RUN_UNFINISHED`, `RUN_FAILED`, `NO_RUN`, `REVERTED_OR_UNCHANGED`, `ERROR`), 2 (internal error, or a usage error), 78 (configuration not loadable or invalid)
+
+### guest-tool
+
+`guest-tool path` prints the absolute path of the packed guest tool; `guest-tool sha256` prints
+`<sha256>  <content address on a guest>`. Neither reads the configuration.
+
+**Exit codes:** 0
 
 ---
 
@@ -339,4 +451,4 @@ Use `composition.build_testing()` to wire all in-memory adapters.
 
 ---
 
-**Last Updated:** 2026-10-22 (settings models)
+**Last Updated:** 2026-10-23 (module list after the node CLI port; repair, apply and guest-tool commands)

@@ -138,5 +138,4 @@ pip install "git+https://github.com/bitranox/pve-winrepair"
 
 - Use [fpm](https://fpm.readthedocs.io/) to repackage the Python wheel into `.deb` or `.rpm` for distribution via `apt` or `yum`/`dnf`.
 
-All methods register both the `pve_winrepair` and
-`pve-winrepair` commands on your PATH.
+All methods register the `pve-winrepair` command on your PATH.
