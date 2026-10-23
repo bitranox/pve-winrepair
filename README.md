@@ -78,7 +78,8 @@ On the Proxmox VE node:
 On the Windows guest (Windows 10 or 11):
 
 - OpenSSH Server with key authentication for an administrator account, and `cmd.exe` as the ssh
-  default shell (the Windows default).
+  default shell (the Windows default). [Preparing a Windows guest for SSH key
+  access](docs/windows-guest-ssh.md) walks through the install, the key file and its ACL.
 - The QEMU guest agent. Without it, pass the guest's address with `--ip`; the snapshot is then taken
   with the guest powered off.
 - Internet access the first time the guest tool runs as a given user, SYSTEM included: it installs
@@ -438,6 +439,7 @@ More in [DEVELOPMENT.md](DEVELOPMENT.md) and the
 
 - [Configuration](CONFIG.md)
 - [Install guide](INSTALL.md)
+- [Preparing a Windows guest for SSH key access](docs/windows-guest-ssh.md)
 - [Development handbook](DEVELOPMENT.md)
 - [Contributor guide](CONTRIBUTING.md)
 - [Changelog](CHANGELOG.md)

@@ -36,6 +36,9 @@ it refuses to run until it is set.
 
 ### `[ssh]`
 
+The guest side of these settings (OpenSSH, the key file and its ACL) is set up as described in
+[Preparing a Windows guest for SSH key access](docs/windows-guest-ssh.md).
+
 **`key`** (default `""`): the private key file the node logs in to the guests with. Required by
 `repair` and `apply`, which refuse to start without it. A guest that refuses this key is reached by
 overriding it for one run: `PVE_WINREPAIR___SSH__KEY=/root/.ssh/id_other_guest pve-winrepair ...`.
