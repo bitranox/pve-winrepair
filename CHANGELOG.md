@@ -15,8 +15,8 @@ history is not published, so this changelog starts here.
   in-place repair upgrade. It snapshots the guest before anything on it changes, adds a vTPM when
   the guest has none, stages the installation media from `[repair] media_dir`, checks the image,
   launches setup from a SYSTEM scheduled task and polls it to its verdict. `--stage-only` stages
-  and verifies the media without launching setup; `--ip` reaches a guest that has no QEMU guest
-  agent.
+  the media and holds Windows Update, but neither gates the WIM nor launches setup; `--ip`
+  reaches a guest that has no QEMU guest agent.
 - `pve-winrepair apply --vmid N --ip ADDR`: applies the upgrade a repair staged. It refuses unless
   the guest's upgrade run finished OK, reboots the guest into the new OS, waits for ssh, checks the
   guest's build against the repair receipt and lifts the Windows Update hold.

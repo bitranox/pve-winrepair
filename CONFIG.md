@@ -62,14 +62,14 @@ guests' keys apart from the node's own.
 no host bits set (`192.0.2.0/24` or `192.0.2.0/255.255.255.0`). `repair` reads the guest's addresses
 from the QEMU guest agent and drops loopback and link-local ones:
 
-- With a subnet, it takes the first address inside it and waits, as the agent reports again, until
-  one appears.
+- With a subnet, it takes the first address inside it. When there is none yet, it asks the agent
+  again every 10 seconds, up to 30 reads in all, and then refuses the run.
 - Empty, it takes the only remaining address at once and refuses a guest that reports several.
 
 Set it. Without it, a guest that briefly reports only a container-switch address (a `172.x` address
 of a Docker or Hyper-V switch, with the LAN lease not up yet) is taken at that address at once, and
 a guest running Docker that reports both is refused on the first read. With the subnet set, both
-cases wait for the LAN address.
+cases wait for the LAN address, within that bound.
 
 **`runner_tasks`** (default `[]`) and **`expected_runners`** (default `0`): no node command reads
 these. They record, for guests that run CI runners, what an operator passes to the guest tool's

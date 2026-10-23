@@ -24,16 +24,19 @@ guest. It takes two commands. `pve-winrepair repair --vmid N` prepares and start
 
 1. It refuses a guest on which an upgrade run is still live.
 2. It holds Windows Update (the service start types set to Disabled, then read back), so no further
-   update lands in the broken store, and waits for running servicing to finish. On a running guest
-   with the QEMU agent this happens first; a guest reached with `--ip` is held after the media are
-   staged.
+   update lands in the broken store. On a running guest reached through the QEMU agent this happens
+   first, and `repair` then waits up to 20 minutes for running servicing to finish. A guest reached
+   with `--ip`, or one that was stopped, is held only after the media are staged, and gets no
+   servicing wait.
 3. It adds a v2.0 vTPM when the guest has none, because setup refuses a machine without any TPM.
    That needs a clean ACPI shutdown; the guest is never force-stopped.
 4. It takes a Proxmox snapshot, `pre_winrepair` by default. With the guest agent, PVE freezes the
    filesystem first; without one (`--ip`), the guest is shut down and snapshotted powered off.
-5. It creates the staging directory (`D:\upgrade`, or `C:\upgrade` when there is no other fixed
-   drive with room) already locked to SYSTEM and Administrators, then copies the installation
-   media from the node into it.
+5. It creates the staging directory `<drive>:\upgrade` on the first fixed drive other than `C:`, in
+   letter order, with `[repair] stage_free_gb` free (or on the drive `--stage-root` names). With no
+   such drive it uses `C:\upgrade`, but only when `C:` has room for both the media and the upgrade.
+   The directory is created already locked to SYSTEM and Administrators, and the installation media
+   are then copied from the node into it.
 6. It gates on the WIM: `sources\install.wim` must be readable and its image 1 must not be older than
    the build the guest runs. The image's build goes into a receipt on the node.
 7. It launches setup.exe from a SYSTEM scheduled task (ssh kills a process tree that outlives its
@@ -154,16 +157,16 @@ SECTION.KEY=VALUE` (repeatable), `--env-file PATH`, `--traceback` / `--no-traceb
 
 `repair` options:
 
-| Option              | Default                  | Meaning                                                                                     |
-|---------------------|--------------------------|---------------------------------------------------------------------------------------------|
-| `--vmid N`          | required                 | The guest's VMID on this node                                                               |
-| `--snapshot-name S` | `[repair] snapshot_name` | The snapshot to take; an existing snapshot of that name is reused                           |
-| `--hours H`         | `6.0`                    | How long to poll for the verdict                                                            |
-| `--stage-only`      | off                      | Stage and check the media and hold Windows Update, but do not launch setup (verdict STAGED) |
-| `--ip IP`           | from the agent           | The guest's address, for a guest without the QEMU agent; implies the powered-off snapshot   |
-| `--stage-root X:`   | measured                 | The drive to stage on; by default a non-system fixed drive with room, else `C:`             |
-| `--tpm-storage S`   | the guest disk's storage | The PVE storage for a new vTPM volume                                                       |
-| `--json`            | off                      | Print a JSON envelope on stdout                                                             |
+| Option              | Default                  | Meaning                                                                                             |
+|---------------------|--------------------------|-----------------------------------------------------------------------------------------------------|
+| `--vmid N`          | required                 | The guest's VMID on this node                                                                       |
+| `--snapshot-name S` | `[repair] snapshot_name` | The snapshot to take; an existing snapshot of that name is reused                                   |
+| `--hours H`         | `6.0`                    | How long to poll for the verdict                                                                    |
+| `--stage-only`      | off                      | Stage the media and hold Windows Update, but neither gate the WIM nor launch setup (verdict STAGED) |
+| `--ip IP`           | from the agent           | The guest's address, for a guest without the QEMU agent; implies the powered-off snapshot           |
+| `--stage-root X:`   | measured                 | The drive to stage on; by default a non-system fixed drive with room, else `C:`                     |
+| `--tpm-storage S`   | the guest disk's storage | The PVE storage for a new vTPM volume                                                               |
+| `--json`            | off                      | Print a JSON envelope on stdout                                                                     |
 
 `apply` takes `--vmid N` and `--ip IP` (both required), `--apply-minutes M` (default `90.0`: how long
 the apply phase may take before it counts as overrun) and `--json`.

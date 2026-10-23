@@ -287,16 +287,16 @@ Generate example configuration files.
 
 Repair one guest by an in-place repair upgrade (`application/repair.py`).
 
-| Option              | Description                                                                          |
-|---------------------|--------------------------------------------------------------------------------------|
-| `--vmid N`          | The guest's VMID on this node  -  required, at least 1                               |
-| `--snapshot-name S` | Snapshot to take (default `[repair] snapshot_name`, validated by its rule)           |
-| `--hours H`         | Polling deadline in hours (default 6.0)                                              |
-| `--stage-only`      | Stage and verify the media, do not launch setup (verdict `STAGED`)                   |
-| `--ip IP`           | Guest address for a guest without QEMU agent; implies the offline snapshot           |
-| `--stage-root X:`   | Drive to stage on (default: a non-system fixed drive with room, else `C:`)           |
-| `--tpm-storage S`   | PVE storage for a new vTPM volume (default: the storage of the guest's disk)         |
-| `--json`            | Print the envelope `{ok, command, vmid, verdict, steps}` instead of the verdict line |
+| Option              | Description                                                                                           |
+|---------------------|-------------------------------------------------------------------------------------------------------|
+| `--vmid N`          | The guest's VMID on this node  -  required, at least 1                                                |
+| `--snapshot-name S` | Snapshot to take (default `[repair] snapshot_name`, validated by its rule)                            |
+| `--hours H`         | Polling deadline in hours (default 6.0)                                                               |
+| `--stage-only`      | Stage the media and hold Windows Update, but neither gate the WIM nor launch setup (verdict `STAGED`) |
+| `--ip IP`           | Guest address for a guest without QEMU agent; implies the offline snapshot                            |
+| `--stage-root X:`   | Drive to stage on (default: a non-system fixed drive with room, else `C:`)                            |
+| `--tpm-storage S`   | PVE storage for a new vTPM volume (default: the storage of the guest's disk)                          |
+| `--json`            | Print the envelope `{ok, command, vmid, verdict, steps}` instead of the verdict line                  |
 
 **Exit codes:** 0 (`STATE=DONE-OK`, `STAGED`), 1 (refused; `STATE=DONE-FAIL`, `WORKER_GONE`, `TIMEOUT`, `ERROR`), 2 (internal error, or a usage error), 78 (configuration not loadable or invalid)
 
