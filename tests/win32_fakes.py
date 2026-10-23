@@ -9,7 +9,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 ADMINS = "S-1-5-32-544"
-RUNNER = "S-1-5-21-1-2-3-1001"
 
 
 class Win32Error(Exception):
@@ -197,23 +196,12 @@ def descriptor(owner: Sid, dacl: Acl | None, control: int) -> Descriptor:
     return Descriptor(owner, dacl, control)
 
 
-class FakeApi:
-    """win32api: only the current-process pseudo handle."""
-
-    def GetCurrentProcess(self) -> object:  # noqa: N802 - mirrors the pywin32 / COM member name
-        return "process"
-
-
 class FakeSecurity:
-    """win32security over a dict of paths and one process token; records the calls made."""
+    """win32security over a dict of paths; records the calls made."""
 
     error = Win32Error
-    TOKEN_QUERY = 8
-    TokenUser = 1
 
-    def __init__(self, *, user: str = RUNNER, account: tuple[str, str] = ("admin", "WIN-HOST")) -> None:
-        self.user = user
-        self.account = account
+    def __init__(self) -> None:
         self.objects: dict[str, Descriptor] = {}
         self.calls: list[str] = []
 
@@ -246,14 +234,3 @@ class FakeSecurity:
         if name not in self.objects:
             raise Win32Error(2, "GetNamedSecurityInfo", "Das System kann die angegebene Datei nicht finden.")
         return self.objects[name]
-
-    def OpenProcessToken(self, process: object, access: int, /) -> object:  # noqa: N802 - mirrors the pywin32 / COM member name
-        self.calls.append(f"open {process} {access}")
-        return "token"
-
-    def GetTokenInformation(self, token: object, kind: int, /) -> tuple[Sid, int]:  # noqa: N802 - mirrors the pywin32 / COM member name
-        self.calls.append(f"info {token} {kind}")
-        return Sid(self.user), 0
-
-    def LookupAccountSid(self, system: str | None, sid: object, /) -> tuple[str, str, int]:  # noqa: N802 - mirrors the pywin32 / COM member name
-        return self.account[0], self.account[1], 1

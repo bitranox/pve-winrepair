@@ -72,7 +72,6 @@ from pve_winrepair_guest.lockdown import (
     AclReading,
     LockTarget,
     TreeEntry,
-    Win32Api,
     Win32File,
     Win32Security,
     acl_problems,
@@ -83,7 +82,6 @@ from pve_winrepair_guest.lockdown import (
     lock_scope_problem,
     lock_target_problems,
     read_acl,
-    token_user_sid,
     walk_tree,
 )
 from pve_winrepair_guest.probes import (
@@ -103,7 +101,7 @@ if TYPE_CHECKING:
     import argparse
     from collections.abc import Callable, Iterable, Sequence
 
-    from pwshpy import WindowsImage
+    from pwshpy import CurrentIdentity, WindowsImage
 
 __all__ = [
     "SETUP_FLAGS",
@@ -123,6 +121,7 @@ __all__ = [
     "UpgradeHost",
     "UpgradeRunReport",
     "WimImage",
+    "account_text",
     "commands",
     "elapsed_text",
     "exit_hex",
@@ -135,7 +134,6 @@ __all__ = [
     "signed32",
     "state_line",
     "task_spec",
-    "token_account",
     "wait_for_launch",
     "wim_gate",
 ]
@@ -319,7 +317,7 @@ class UpgradeHost(Protocol):
         ...
 
     def user_sid(self) -> str:
-        """Return the SID of the account running this process; raises OSError when unreadable."""
+        """Return the SID of the account running this process; raises a PwshPyError when unreadable."""
         ...
 
     def system_root(self) -> str:
@@ -431,16 +429,12 @@ class PwshpyHost:
         return datetime.now()
 
     def whoami(self) -> str:
-        """See :meth:`UpgradeHost.whoami`.
-
-        Raises:
-            OSError: pywin32 cannot be imported, or the token cannot be read.
-        """
-        return token_account(*_win32())
+        """See :meth:`UpgradeHost.whoami`."""
+        return account_text(ps.get_current_identity())
 
     def user_sid(self) -> str:
         """See :meth:`UpgradeHost.user_sid`."""
-        return token_user_sid(*_win32())
+        return ps.get_current_identity().sid
 
     def system_root(self) -> str:
         """See :meth:`UpgradeHost.system_root`."""
@@ -451,7 +445,7 @@ class PwshpyHost:
 
     def create_locked_dir(self, path: str) -> bool:
         """See :meth:`UpgradeHost.create_locked_dir`."""
-        return create_locked_dir(_win32()[0], _win32file(), path)
+        return create_locked_dir(_win32(), _win32file(), path)
 
     def name_taken(self, path: str) -> bool:
         """See :meth:`UpgradeHost.name_taken`.
@@ -467,7 +461,7 @@ class PwshpyHost:
 
     def inspect_lock_target(self, path: str) -> LockTarget:
         """See :meth:`UpgradeHost.inspect_lock_target`."""
-        return inspect_lock_target(_win32()[0], _win32file(), path)
+        return inspect_lock_target(_win32(), _win32file(), path)
 
     def tree(self, root: str) -> Iterable[TreeEntry]:
         """See :meth:`UpgradeHost.tree`."""
@@ -475,7 +469,7 @@ class PwshpyHost:
 
     def read_acl(self, path: str) -> AclReading:
         """See :meth:`UpgradeHost.read_acl`."""
-        return read_acl(_win32()[0], path)
+        return read_acl(_win32(), path)
 
     def test_path(self, path: str) -> bool:
         """See :meth:`UpgradeHost.test_path`."""
@@ -501,17 +495,16 @@ class PwshpyHost:
         return SetupRun(exit_code=result.exit_code, tree_wait=f"SetupHost by name (no job: {why})")
 
 
-def _win32() -> tuple[Win32Security, Win32Api]:
-    """pywin32's win32security and win32api, typed by the members this tool uses.
+def _win32() -> Win32Security:
+    """pywin32's win32security, typed by the members this tool uses.
 
     Raises:
         OSError: pywin32 is not installed (it is Windows-only, absent on the Linux dev host).
     """
     try:
-        security, api = importlib.import_module("win32security"), importlib.import_module("win32api")
+        return cast("Win32Security", importlib.import_module("win32security"))
     except ImportError as exc:
         raise OSError(f"pywin32 unavailable: {exc}") from exc
-    return cast("Win32Security", security), cast("Win32Api", api)
 
 
 def _win32file() -> Win32File:
@@ -522,34 +515,22 @@ def _win32file() -> Win32File:
         raise OSError(f"pywin32 unavailable: {exc}") from exc
 
 
-def token_account(security: Win32Security, api: Win32Api) -> str:
-    r"""Return ``DOMAIN\name (SID)`` of the account this process runs as, read from its own token.
+def account_text(identity: CurrentIdentity) -> str:
+    r"""``DOMAIN\name (SID)`` of an account, for the state log's ``whoami`` line.
 
-    Not ``GetUserNameEx(NameSamCompatible)``: under the SYSTEM task on a domain member that names
-    the computer account (``EXAMPLE\WIN-HOST$``, measured on a test guest), so the state log never
-    showed that the run is SYSTEM. The name is localised (a German-language Windows says
-    NT-AUTORITAET with an umlaut), so the SID is added as the part a reader can match on.
+    pwshpy reads the identity from the process token, never from ``USERNAME``: under the SYSTEM
+    task on a domain member ``GetUserNameEx(NameSamCompatible)`` named the computer account
+    (``EXAMPLE\WIN-HOST$``, measured on a test guest), so the log never showed the run is SYSTEM.
+    The name is localised (a German-language Windows says NT-AUTORITAET with an umlaut), so the
+    SID is added as the part a reader can match on; a SID without a name is the SID alone.
 
     Args:
-        security: The ``win32security`` module (injected: pywin32 exists only on Windows).
-        api: The ``win32api`` module.
+        identity: The account, as ``ps.get_current_identity`` reads it.
 
     Returns:
         For example ``NT AUTHORITY\SYSTEM (S-1-5-18)``.
-
-    Raises:
-        OSError: A token call failed. pywin32 raises its own ``pywintypes.error`` (exposed as the
-            module's ``error``), which derives from Exception, not OSError; re-raised as OSError so
-            a caller that treats the account as informational catches it without a bare except.
     """
-    try:
-        token = security.OpenProcessToken(api.GetCurrentProcess(), security.TOKEN_QUERY)
-        sid = security.GetTokenInformation(token, security.TokenUser)[0]
-        name, domain, _kind = security.LookupAccountSid(None, sid)
-        sid_text = security.ConvertSidToStringSid(sid)
-    except security.error as exc:
-        raise OSError(f"cannot read this run's account: {exc}") from exc
-    return f"{domain}\\{name} ({sid_text})"
+    return f"{identity.account} ({identity.sid})" if identity.account else identity.sid
 
 
 def _connect_scheduler() -> Any:

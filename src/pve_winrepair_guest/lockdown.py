@@ -14,9 +14,8 @@ Principals are named by SID, never by name: on a German-language Windows "Admini
 calls, not by parsing ``icacls`` output, which is localised too.
 
 Contents:
-    * :func:`create_locked_dir`, :func:`inspect_lock_target`, :func:`read_acl`, :func:`token_user_sid` - the
-      pywin32 calls, over an injected :class:`Win32Security` and :class:`Win32File` (the seams the
-      tests fake).
+    * :func:`create_locked_dir`, :func:`inspect_lock_target`, :func:`read_acl` - the pywin32 calls,
+      over an injected :class:`Win32Security` and :class:`Win32File` (the seams the tests fake).
     * :func:`walk_tree` - every entry below a locked directory, without following a reparse point.
     * :func:`acl_problems`, :func:`exact_lock_problems`, :func:`content_address`,
       :func:`lock_scope_problem`, :func:`lock_target_problems` - the pure checks.
@@ -47,7 +46,6 @@ __all__ = [
     "AclReading",
     "LockTarget",
     "TreeEntry",
-    "Win32Api",
     "Win32File",
     "Win32Security",
     "acl_problems",
@@ -58,7 +56,6 @@ __all__ = [
     "lock_scope_problem",
     "lock_target_problems",
     "read_acl",
-    "token_user_sid",
     "walk_tree",
 ]
 
@@ -167,16 +164,6 @@ class Win32Security(Protocol):
         """``pywintypes.error``, which every call here raises (it is not an OSError)."""
         ...
 
-    @property
-    def TOKEN_QUERY(self) -> int:  # noqa: N802 - mirrors the pywin32 / COM member name
-        """The token access right to read its information."""
-        ...
-
-    @property
-    def TokenUser(self) -> int:  # noqa: N802 - mirrors the pywin32 / COM member name
-        """The token information class for the user SID."""
-        ...
-
     def ACL(self) -> Acl:  # noqa: N802 - mirrors the pywin32 / COM member name
         """Return a new, empty ACL."""
         ...
@@ -203,18 +190,6 @@ class Win32Security(Protocol):
 
     def GetNamedSecurityInfo(self, name: str, object_type: int, info: int, /) -> SecurityDescriptor:  # noqa: N802 - mirrors the pywin32 / COM member name
         """Read parts of an object's security descriptor."""
-        ...
-
-    def OpenProcessToken(self, process: object, access: int, /) -> object:  # noqa: N802 - mirrors the pywin32 / COM member name
-        """Open a process's access token."""
-        ...
-
-    def GetTokenInformation(self, token: object, kind: int, /) -> tuple[Sid, int]:  # noqa: N802 - mirrors the pywin32 / COM member name
-        """Read one token information class (TokenUser: (SID, attributes))."""
-        ...
-
-    def LookupAccountSid(self, system: str | None, sid: Sid, /) -> tuple[str, str, int]:  # noqa: N802 - mirrors the pywin32 / COM member name
-        """Return (name, domain, account type) for a SID."""
         ...
 
 
@@ -245,14 +220,6 @@ class Win32File(Protocol):
 
     def CloseHandle(self, handle: object, /) -> None:  # noqa: N802 - mirrors the pywin32 / COM member name
         """Close a handle."""
-        ...
-
-
-class Win32Api(Protocol):
-    """The ``win32api`` members used here."""
-
-    def GetCurrentProcess(self) -> object:  # noqa: N802 - mirrors the pywin32 / COM member name
-        """Return the pseudo handle of this process."""
         ...
 
 
@@ -660,16 +627,3 @@ def read_acl(security: Win32Security, path: str) -> AclReading:
     except (security.error, *_BINDING_ERRORS) as exc:
         raise OSError(f"cannot read the DACL of {path}: {exc}") from exc
     return AclReading(path, owner, bool(control & SE_DACL_PROTECTED), aces)
-
-
-def token_user_sid(security: Win32Security, api: Win32Api) -> str:
-    """The SID of the account this process runs as, from its own token.
-
-    Raises:
-        OSError: The token could not be read.
-    """
-    try:
-        token = security.OpenProcessToken(api.GetCurrentProcess(), security.TOKEN_QUERY)
-        return security.ConvertSidToStringSid(security.GetTokenInformation(token, security.TokenUser)[0])
-    except security.error as exc:
-        raise OSError(f"cannot read this run's account: {exc}") from exc

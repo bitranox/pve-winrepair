@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import codecs
 import hashlib
-import importlib.util
 import io
 import json
 import ntpath
@@ -32,14 +31,16 @@ import pytest
 from json_paths import at, items, obj
 from pwshpy import (
     CimInstance,
+    CurrentIdentity,
     NativeCallError,
     ProcessInfo,
     RegistryHive,
     RegistryValue,
     RegistryValueType,
     TaskState,
+    ps,
 )
-from win32_fakes import Descriptor, FakeApi, FakeFiles, FakeSecurity, Node, Sid, Win32Error
+from win32_fakes import Descriptor, FakeFiles, FakeSecurity, Node, Sid
 
 from pve_winrepair_guest import lockdown, probes, upgrade, winrepair_guest
 from pve_winrepair_guest.lockdown import Ace, AclReading, LockTarget
@@ -1216,82 +1217,26 @@ def test_exit_text_formats_like_the_old_powershell_line() -> None:
     assert upgrade.elapsed_text(3725.4) == "01:02:05"
 
 
-def _system_token(failing: str = "") -> FakeSecurity:
-    """win32security for the SYSTEM account a SYSTEM task runs as; ``failing`` names a call that raises."""
-    return _FailingSecurity(failing) if failing else FakeSecurity(user=SYSTEM_SID, account=("SYSTEM", "NT AUTHORITY"))
-
-
-class _FailingSecurity(FakeSecurity):
-    """win32security whose call named ``failing`` raises the module's own error type."""
-
-    def __init__(self, failing: str) -> None:
-        super().__init__(user=SYSTEM_SID, account=("SYSTEM", "NT AUTHORITY"))
-        self.failing = failing
-
-    def OpenProcessToken(self, process: object, access: int, /) -> object:  # noqa: N802 - mirrors the pywin32 / COM member name
-        if self.failing == "OpenProcessToken":
-            raise Win32Error(5, "OpenProcessToken", "Zugriff verweigert")
-        return super().OpenProcessToken(process, access)
-
-    def LookupAccountSid(self, system: str | None, sid: object, /) -> tuple[str, str, int]:  # noqa: N802 - mirrors the pywin32 / COM member name
-        if self.failing == "LookupAccountSid":
-            raise Win32Error(1332, "LookupAccountSid", "Keine Zuordnung")
-        return super().LookupAccountSid(system, sid)
-
-
-def test_whoami_names_the_token_account_with_its_sid_not_the_computer_account() -> None:
+def test_account_text_names_the_token_account_with_its_sid_not_the_computer_account() -> None:
     # Measured on a test guest: GetUserNameEx(NameSamCompatible) under the SYSTEM task returned
-    # the computer account EXAMPLE\WIN-HOST$, so the state log never showed the run was SYSTEM.
-    security = _system_token()
-    api = FakeApi()
+    # the computer account EXAMPLE\\WIN-HOST$, so the state log never showed the run was SYSTEM.
+    # pwshpy's get_current_identity reads the token, so a SYSTEM run reads as SYSTEM.
+    system = CurrentIdentity(sid=SYSTEM_SID, account="NT AUTHORITY\\SYSTEM", name="SYSTEM", domain="NT AUTHORITY")
 
-    assert upgrade.token_account(security, api) == "NT AUTHORITY\\SYSTEM (S-1-5-18)"
-    assert security.calls == ["open process 8", "info token 1"]
-
-
-@dataclass
-class _TokenHost(FakeUpgradeHost):
-    """A FakeUpgradeHost whose whoami goes through the real token_account over a stand-in module."""
-
-    security: FakeSecurity = field(default_factory=_system_token)
-
-    def whoami(self) -> str:
-        return upgrade.token_account(self.security, FakeApi())
+    assert upgrade.account_text(system) == "NT AUTHORITY\\SYSTEM (S-1-5-18)"
 
 
-@pytest.mark.parametrize(
-    ("failing", "reason"),
-    [("OpenProcessToken", "(5, 'OpenProcessToken'"), ("LookupAccountSid", "(1332, 'LookupAccountSid'")],
-)
-def test_upgrade_run_launches_setup_when_the_token_account_cannot_be_read(
-    stage: Path, tmp_path: Path, failing: str, reason: str
-) -> None:
-    # A diagnostic line must never stop the run that is the whole point of the SYSTEM task.
-    host = _TokenHost(state_log=tmp_path / "upgrade-state.log", security=_system_token(failing))
-
-    code, envelope = _run_upgrade(host, stage)
-
-    assert code == 0
-    assert host.setup_argv[0] == str(stage / "setup.exe")
-    whoami = _log(host)[1]
-    assert whoami.startswith("2026-10-21 10:00:00  whoami=unknown (")
-    assert reason in whoami
-    assert _data(envelope)["verdict"] == "DONE-OK"
+def test_account_text_of_a_sid_without_a_name_is_the_sid() -> None:
+    # pwshpy reports an unresolvable SID with empty names instead of failing: the SID still says who.
+    assert upgrade.account_text(CurrentIdentity(sid=RUNNER_SID)) == RUNNER_SID
 
 
-def test_token_account_reports_a_pywin32_failure_as_oserror() -> None:
-    with pytest.raises(OSError, match="LookupAccountSid") as caught:
-        upgrade.token_account(_system_token("LookupAccountSid"), FakeApi())
-    assert isinstance(caught.value.__cause__, Win32Error)
+def test_pwshpy_host_reads_this_process_identity_from_pwshpy() -> None:
+    # The real adapter on any OS: the token's SID on Windows, the effective uid on POSIX.
+    host, me = upgrade.PwshpyHost(), ps.get_current_identity()
 
-
-@pytest.mark.skipif(importlib.util.find_spec("win32security") is not None, reason="pywin32 is installed")
-def test_pwshpy_host_whoami_reports_a_missing_pywin32_as_oserror() -> None:
-    # The real adapter on a host without pywin32: the import failure is an OSError too, so
-    # upgrade-run's informational read logs it as unknown instead of aborting.
-    with pytest.raises(OSError, match="win32security") as caught:
-        upgrade.PwshpyHost().whoami()
-    assert isinstance(caught.value.__cause__, ImportError)
+    assert host.user_sid() == me.sid
+    assert host.whoami() == upgrade.account_text(me)
 
 
 def test_pwshpy_host_name_taken_is_true_for_anything_with_the_name(tmp_path: Path) -> None:

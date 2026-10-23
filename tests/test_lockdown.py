@@ -1,7 +1,7 @@
 """Tests for lockdown: the DACL that keeps non-admins away from what the SYSTEM task executes.
 
 The pure checks run on readings built here. The pywin32 wiring (``create_locked_dir``,
-``inspect_lock_target``, ``read_acl``, ``token_user_sid``) runs against ``FakeSecurity`` and
+``inspect_lock_target``, ``read_acl``) runs against ``FakeSecurity`` and
 ``FakeFiles``, in-memory stand-ins for ``win32security`` and ``win32file`` with the same member
 names, so the flags, SIDs and masks handed to the real API are pinned.
 """
@@ -18,7 +18,6 @@ from win32_fakes import (
     FILE_ATTRIBUTE_REPARSE_POINT,
     SE_DACL_PROTECTED,
     Descriptor,
-    FakeApi,
     FakeFiles,
     FakeSecurity,
     Node,
@@ -269,10 +268,6 @@ def test_read_acl_reads_a_null_dacl_as_none() -> None:
     security = FakeSecurity()
     security.objects["x"] = descriptor(Sid(USERS), None, 0)
     assert lockdown.read_acl(security, "x") == AclReading("x", USERS, False, None)
-
-
-def test_token_user_sid_reads_this_process_token() -> None:
-    assert lockdown.token_user_sid(FakeSecurity(user=RUNNER), FakeApi()) == RUNNER
 
 
 # --- the lock, exactly, and the tree below it ----------------------------------------
