@@ -210,3 +210,11 @@ EXECUTION-USER-REVIEW.md
 
 # Private token list read by the privacy scanner and tests (local only, never committed)
 .privacy-tokens.json
+
+# Working files that name private hosts and paths: backlog, handover, plans and the user-decision
+# log stay local so the public tree never carries them
+/OPEN-WORK.md
+/handover.md
+/handover.prev.md
+/docs/plans/
+/USER-DECISIONS.jsonl
