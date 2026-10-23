@@ -1,7 +1,7 @@
 """Read a Windows event log with each event's message rendered by its provider's metadata.
 
 pwshpy 1.5.0's ``get_win_event`` formats messages with ``EvtFormatMessage(None, ...)``: no
-publisher metadata, failure swallowed. On a German guest every Setup event then reads
+publisher metadata, failure swallowed. On a German-language Windows every Setup event then reads
 "Das System kann die angegebene Datei nicht finden." (a Win32 error string, not the event text)
 or None, so a probe matching message text can never fire. This module renders through
 ``EvtOpenPublisherMetadata(provider)`` (opened once per provider) and reports a message it cannot

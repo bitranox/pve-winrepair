@@ -27,9 +27,9 @@ history is not published, so this changelog starts here.
   pushes to the guests, and its sha256 with the content address it is stored under on a guest.
 - The guest tool, packed with pwshpy into one PowerShell file, called over ssh and answering each
   call with one JSON envelope (exit 0 ok, 1 refused, 2 internal error). Its verbs: `build`,
-  `drives`, `state`, `staged-os`, `servicing-active`, `setup-alive`, `detect-lp-defect`,
-  `verify-runners`, `quiesce-wu`, `restore-wu`, `lock-dirs`, `prepare`, `launch` and
-  `upgrade-run`.
+  `drives`, `nic-macs`, `state`, `staged-os`, `servicing-active`, `setup-alive`,
+  `detect-lp-defect`, `verify-runners`, `quiesce-wu`, `restore-wu`, `lock-dirs`, `prepare`,
+  `launch` and `upgrade-run`.
 - Layered configuration in `/etc/pve-winrepair/config.toml` with the sections `[ssh]`, `[guest]`,
   `[repair]` and `[node]`; a key can be overridden for one run through
   `PVE_WINREPAIR___<SECTION>__<KEY>`. An unknown key or a refused value stops the command and

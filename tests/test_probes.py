@@ -48,7 +48,7 @@ LP_MESSAGE = (
 )
 
 
-def _reg(name: str, data: str | int, kind: RegistryValueType = RegistryValueType.REG_SZ) -> RegistryValue:
+def _reg(name: str, data: str | int | list[str], kind: RegistryValueType = RegistryValueType.REG_SZ) -> RegistryValue:
     return RegistryValue(hive=RegistryHive.HKLM, key="x", name=name, type=kind, data=data)
 
 
@@ -83,6 +83,7 @@ class FakeHost:
     registry_values: dict[str, list[RegistryValue]] = field(default_factory=dict[str, list[RegistryValue]])
     events: list[EventLogEntry] = field(default_factory=list[EventLogEntry])
     disks: list[CimInstance] = field(default_factory=list[CimInstance])
+    adapters: list[CimInstance] = field(default_factory=list[CimInstance])
     procs: list[ProcessInfo] = field(default_factory=list[ProcessInfo])
     svcs: list[ServiceInfo] = field(default_factory=list[ServiceInfo])
     tasks: list[ScheduledTaskInfo] = field(default_factory=list[ScheduledTaskInfo])
@@ -106,6 +107,10 @@ class FakeHost:
         self._check("events")
 
     def cim(self, class_name: str, *, where: str | None = None) -> Iterable[CimInstance]:
+        self._check(class_name)
+        if class_name == "Win32_NetworkAdapter":
+            assert where is None  # every adapter: the ones without a MAC are skipped in Python
+            return self.adapters
         assert (class_name, where) == ("Win32_LogicalDisk", "DriveType=3")
         return self.disks
 
@@ -150,6 +155,7 @@ def lp_host(**overrides: object) -> FakeHost:
             CURRENT_VERSION: [
                 _reg("CurrentBuild", "26200"),
                 _reg("UBR", 9711, RegistryValueType.REG_DWORD),
+                _reg("InstallDate", 1761206400, RegistryValueType.REG_DWORD),
                 _reg("DisplayVersion", "25H2"),
             ],
             NLS_LANGUAGE: [_reg("InstallLanguage", "0407")],
@@ -285,20 +291,54 @@ def test_lp_defect_missing_nls_key_is_skipped_not_fatal() -> None:
 # --- build ----------------------------------------------------------------------------------
 
 
-def test_build_reports_ubr_as_a_decimal_integer() -> None:
+def test_build_reports_ubr_and_install_date_as_decimal_integers() -> None:
     code, envelope = _run(lp_host(), "build")
 
     assert code == 0
-    assert _data(envelope) == {"current_build": "26200", "ubr": 9711, "build": "26200.9711"}
+    assert _data(envelope) == {
+        "current_build": "26200",
+        "ubr": 9711,
+        "build": "26200.9711",
+        "install_date": 1761206400,
+    }
 
 
 def test_build_without_ubr_is_an_internal_error_not_a_wrong_build() -> None:
-    host = FakeHost(registry_values={CURRENT_VERSION: [_reg("CurrentBuild", "26200")]})
+    host = FakeHost(
+        registry_values={
+            CURRENT_VERSION: [_reg("CurrentBuild", "26200"), _reg("InstallDate", 1, RegistryValueType.REG_DWORD)]
+        }
+    )
 
     code, envelope = _run(host, "build")
 
     assert code == 2
     assert "UBR" in str(_data(envelope)["error"])
+
+
+@pytest.mark.parametrize(
+    "install_date",
+    [
+        None,
+        _reg("InstallDate", "1761206400"),
+        _reg("InstallDate", ["1761206400"], RegistryValueType.REG_MULTI_SZ),
+    ],
+    ids=["missing", "text", "multi-text"],
+)
+def test_build_without_a_dword_install_date_is_an_internal_error(install_date: RegistryValue | None) -> None:
+    # apply compares InstallDate across the apply reboot: a missing one must never read as "unchanged".
+    values = [_reg("CurrentBuild", "26200"), _reg("UBR", 9711, RegistryValueType.REG_DWORD)]
+    host = FakeHost(registry_values={CURRENT_VERSION: values + ([install_date] if install_date else [])})
+
+    code, envelope = _run(host, "build")
+
+    assert (code, envelope["ok"]) == (2, False)
+    assert "InstallDate" in str(_data(envelope)["error"])
+
+
+def test_install_date_refuses_a_bool_although_bool_is_an_int() -> None:
+    with pytest.raises(probes.ProbeError, match="InstallDate"):
+        probes.install_date({"InstallDate": True})
 
 
 def test_build_unreadable_registry_is_an_internal_error() -> None:
@@ -349,6 +389,64 @@ def test_drives_without_free_space_is_skipped_and_none_left_is_an_error() -> Non
 
     assert code == 2
     assert "no fixed drive" in str(_data(envelope)["error"])
+
+
+# --- nic-macs -------------------------------------------------------------------------------
+
+
+def _adapter(name: str, mac: object) -> CimInstance:
+    return CimInstance(class_name="Win32_NetworkAdapter", properties={"Name": name, "MACAddress": mac})
+
+
+def test_nic_macs_reports_every_adapter_mac_normalised_sorted_and_unique() -> None:
+    host = FakeHost(
+        adapters=[
+            _adapter("Ethernet 4", "BC:24:11:FF:00:01"),
+            _adapter("Ethernet 2", "BC:24:11:0A:0B:0C"),
+            _adapter("WAN Miniport (IP)", None),
+            _adapter("Ethernet", "bc-24-11-01-02-03"),
+            _adapter("vEthernet (copy)", "bc:24:11:0a:0b:0c"),
+            _adapter("Ethernet 3", "02:00:00:00:00:01"),
+        ]
+    )
+
+    code, envelope = _run(host, "nic-macs")
+
+    assert (code, envelope["ok"]) == (0, True)
+    assert _data(envelope) == {
+        "macs": ["02:00:00:00:00:01", "BC:24:11:01:02:03", "BC:24:11:0A:0B:0C", "BC:24:11:FF:00:01"]
+    }
+    assert envelope["skipped"] == [{"item": "WAN Miniport (IP)", "reason": "no MAC address"}]
+
+
+@pytest.mark.parametrize(
+    "mac", ["BC:24:11:0A:0B", "BC:24:11:0A:0B:0C:0D", "BC:24-11:0A:0B:0C", "BC2411 0A0B0C", "GG:24:11:0A:0B:0C", 7]
+)
+def test_nic_macs_skips_a_mac_it_cannot_read_rather_than_guessing(mac: object) -> None:
+    host = FakeHost(adapters=[_adapter("odd", mac), _adapter("Ethernet", "BC:24:11:01:02:03")])
+
+    code, envelope = _run(host, "nic-macs")
+
+    assert code == 0
+    assert _data(envelope) == {"macs": ["BC:24:11:01:02:03"]}
+    assert [at(s, "item") for s in items(envelope, "skipped")] == ["odd"]
+    assert "not a MAC address" in str(at(envelope, "skipped", 0, "reason"))
+
+
+def test_nic_macs_with_no_mac_at_all_is_an_error_never_an_empty_list() -> None:
+    code, envelope = _run(FakeHost(adapters=[_adapter("WAN Miniport (IP)", None)]), "nic-macs")
+
+    assert (code, envelope["ok"]) == (2, False)
+    assert "no network adapter with a MAC address" in str(_data(envelope)["error"])
+
+
+def test_nic_macs_unreadable_wmi_is_an_internal_error_never_an_empty_list() -> None:
+    host = FakeHost(adapters=[_adapter("Ethernet", "BC:24:11:01:02:03")], fail={"Win32_NetworkAdapter"})
+
+    code, envelope = _run(host, "nic-macs")
+
+    assert (code, envelope["ok"]) == (2, False)
+    assert _data(envelope)["error_type"] == "NativeCallError"
 
 
 # --- verify-runners -------------------------------------------------------------------------

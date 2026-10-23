@@ -86,6 +86,7 @@ class FakeUpgradeHost:
     """An UpgradeHost over fixed records, a fake clock and a simulated SYSTEM task."""
 
     state_log: Path
+    current_build: str = "26200"
     ubr: int = 8875
     mosetup: dict[str, int] = field(default_factory=dict[str, int])
     waiver_fails: bool = False
@@ -175,7 +176,7 @@ class FakeUpgradeHost:
         if key == CURRENT_VERSION:
             if self.registry_fails:
                 raise NativeCallError("registry unavailable")
-            return [_reg("CurrentBuild", "26200"), _reg("UBR", self.ubr)]
+            return [_reg("CurrentBuild", self.current_build), _reg("UBR", self.ubr)]
         assert key == MOSETUP
         return [_reg(name, value) for name, value in self.mosetup.items()]
 
@@ -387,8 +388,28 @@ def test_prepare_refuses_media_older_than_the_running_build(stage: Path, host: F
 
     assert code == 1
     data = _data(envelope)
-    assert (data["gate"], data["reason"]) == ("FAIL", "image SPBuild 8973 older than running 9711")
+    assert (data["gate"], data["reason"]) == ("FAIL", "image 26200.8973 older than running 26200.9711")
     assert host.calls == []  # nothing changed on a refused gate
+
+
+def test_prepare_refuses_media_of_an_older_build_whatever_its_spbuild(stage: Path, host: FakeUpgradeHost) -> None:
+    # The fixture's image is 26200.8973: its SPBuild beats UBR 100, its build does not beat 26300.
+    host.current_build, host.ubr = "26300", 100
+
+    code, envelope = _run(host, "prepare", "--stage-root", str(stage))
+
+    assert code == 1
+    data = _data(envelope)
+    assert (data["gate"], data["reason"]) == ("FAIL", "image 26200.8973 older than running 26300.100")
+    assert host.calls == []
+
+
+def test_prepare_passes_media_of_a_newer_build_whatever_its_spbuild(stage: Path, host: FakeUpgradeHost) -> None:
+    host.current_build, host.ubr = "26100", 9999
+
+    code, envelope = _run(host, "prepare", "--stage-root", str(stage))
+
+    assert (code, _data(envelope)["gate"]) == (0, "PASS")
 
 
 def test_prepare_refuses_a_missing_wim(stage: Path, host: FakeUpgradeHost) -> None:
@@ -445,20 +466,43 @@ def test_prepare_reports_a_waiver_that_did_not_read_back(stage: Path, host: Fake
     assert {"item": f"{MOSETUP}\\{WAIVER}", "reason": "Zugriff verweigert"} in items(envelope, "skipped")
 
 
-@pytest.mark.parametrize(
-    ("spbuild", "ubr", "gate"),
-    [(8973, 8875, "PASS"), (8973, 8973, "PASS"), (8973, 8974, "FAIL"), (8973, 9711, "FAIL")],
-)
-def test_wim_gate_compares_spbuild_against_ubr(spbuild: int, ubr: int, gate: str) -> None:
-    image = WimImage(1, "n", "e", 26200, spbuild, ("de-DE",), "de-DE")
+def _running(current_build: str, ubr: int) -> probes.BuildInfo:
+    return probes.BuildInfo(current_build, ubr, f"{current_build}.{ubr}")
 
-    assert upgrade.wim_gate(WimInfo(images=(image,)), ubr)[0] == gate
+
+@pytest.mark.parametrize(
+    ("build", "spbuild", "gate"),
+    [
+        (19045, 9000, "FAIL"),  # an older build with a higher SPBuild than the guest's UBR
+        (26100, 9000, "FAIL"),
+        (26200, 7461, "FAIL"),
+        (26200, 7462, "PASS"),
+        (26200, 8973, "PASS"),
+        (26300, 1, "PASS"),  # a newer build with a lower SPBuild
+    ],
+)
+def test_wim_gate_compares_build_and_spbuild_against_the_running_build(build: int, spbuild: int, gate: str) -> None:
+    image = WimImage(1, "n", "e", build, spbuild, ("de-DE",), "de-DE")
+
+    assert upgrade.wim_gate(WimInfo(images=(image,)), _running("26200", 7462))[0] == gate
+
+
+def test_wim_gate_refuses_a_running_build_that_is_not_a_number() -> None:
+    image = WimImage(1, "n", "e", 26200, 8973, ("de-DE",), "de-DE")
+
+    gate, reason, found = upgrade.wim_gate(WimInfo(images=(image,)), _running("26200a", 7462))
+
+    assert (gate, reason, found) == ("FAIL", "running CurrentBuild '26200a' is not a number", image)
 
 
 def test_wim_gate_refuses_media_without_image_index_1() -> None:
     image = WimImage(2, "n", "e", 26200, 9999, ("de-DE",), "de-DE")
 
-    assert upgrade.wim_gate(WimInfo(images=(image,)), 8875) == ("FAIL", "the WIM has no image index 1", None)
+    assert upgrade.wim_gate(WimInfo(images=(image,)), _running("26200", 8875)) == (
+        "FAIL",
+        "the WIM has no image index 1",
+        None,
+    )
 
 
 # --- launch ---------------------------------------------------------------------------------

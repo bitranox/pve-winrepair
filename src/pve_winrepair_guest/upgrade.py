@@ -5,10 +5,10 @@ The filesystem work (read-only bits on the media, the WIM, ``setup.exe``, the st
 Python, so it runs for real in the tests too.
 
 * ``prepare --stage-root D:\upgrade``: clear read-only (inherited from the source medium), gate
-  hard on the WIM (a bad WIM must stop the run, not surface hours later), write the MoSetup
-  waiver, report TPM and free space.
-* ``lock-dirs --tool C:\winrepair\winrepair_guest-<sha16>.ps1 [--stage-root D:\upgrade] [--no-create]``: create
-  both directories with a DACL restricted to SYSTEM and Administrators already in place
+  hard on the WIM (a bad WIM or one older than the running build must stop the run, not surface
+  hours later), write the MoSetup waiver, report TPM and free space.
+* ``lock-dirs --tool C:\winrepair\winrepair_guest-<sha16>.ps1 [--stage-root D:\upgrade]
+  [--no-create]``: create both directories with a DACL restricted to SYSTEM and Administrators already in place
   (``lockdown``; read back), before the driver copies the tool or the media in; accept an existing
   one only when it is exactly locked with nothing below it a non-admin can change, and a tool
   already there only when it matches its name. ``--no-create`` reports an absent directory as
@@ -181,10 +181,12 @@ SETUP_FLAGS = (
     "/auto", "upgrade", "/quiet", "/eula", "accept", "/noreboot",
     "/compat", "ignorewarning", "/dynamicupdate", "disable",
 )  # fmt: skip
-# 3010 is ERROR_SUCCESS_REBOOT_REQUIRED. 0x3010 counts as success too: every state log this tool
-# has written judged it so, and a reader must keep reading those logs the same way.
+# 3010 is ERROR_SUCCESS_REBOOT_REQUIRED. 0x3010 counts as success too: the existing state logs
+# judged it so, and a reader must keep reading those logs the same way.
 SUCCESS_CODES = frozenset({0, 3010, 0x3010})
 _LAUNCHING = re.compile(r"(?:^|\s)launching: ")
+# CurrentBuild is REG_SZ; ASCII digits only, so int() can neither raise nor read a non-ASCII digit.
+_BUILD_NUMBER = re.compile(r"[0-9]{1,9}")
 # The action's Arguments line is split by powershell's own command-line parser, not by a shell: a
 # space or quote in a path would cut an argument, so a path that cannot ride in it unquoted is
 # refused up front. Absolute with a drive letter: the task starts in System32, where a relative
@@ -523,8 +525,8 @@ def token_account(security: Win32Security, api: Win32Api) -> str:
 
     Not ``GetUserNameEx(NameSamCompatible)``: under the SYSTEM task on a domain member that names
     the computer account (``EXAMPLE\WIN-HOST$``, measured on a test guest), so the state log never
-    showed that the run is SYSTEM. The name is localised (a German Windows says NT-AUTORITAET with
-    an umlaut), so the SID is added as the part a reader can match on.
+    showed that the run is SYSTEM. The name is localised (a German-language Windows says
+    NT-AUTORITAET with an umlaut), so the SID is added as the part a reader can match on.
 
     Args:
         security: The ``win32security`` module (injected: pywin32 exists only on Windows).
@@ -632,8 +634,12 @@ def clear_read_only(root: str) -> tuple[int, list[Skip]]:
     return cleared, failed
 
 
-def wim_gate(info: WimInfo, ubr: int) -> tuple[str, str | None, WimImage | None]:
-    """Gate the media: image index 1 must not be older than the running build's UBR.
+def wim_gate(info: WimInfo, running: BuildInfo) -> tuple[str, str | None, WimImage | None]:
+    """Gate the media: image index 1 must not be older than the running build.
+
+    ``(BUILD, SPBUILD)`` is compared against ``(CurrentBuild, UBR)`` as a tuple: SPBuild alone
+    would pass an older build whose servicing number happens to be higher than the guest's UBR
+    (19045.9000 on a 26200.7462 guest), and setup would downgrade it.
 
     Returns:
         (PASS or FAIL, the reason for FAIL, image index 1 or None when absent).
@@ -641,8 +647,10 @@ def wim_gate(info: WimInfo, ubr: int) -> tuple[str, str | None, WimImage | None]
     image = next((i for i in info.images if i.index == 1), None)
     if image is None:
         return "FAIL", "the WIM has no image index 1", None
-    if image.spbuild < ubr:
-        return "FAIL", f"image SPBuild {image.spbuild} older than running {ubr}", image
+    if not _BUILD_NUMBER.fullmatch(running.current_build):
+        return "FAIL", f"running CurrentBuild {running.current_build!r} is not a number", image
+    if (image.build, image.spbuild) < (int(running.current_build), running.ubr):
+        return "FAIL", f"image {image.build}.{image.spbuild} older than running {running.build}", image
     return "PASS", None, image
 
 
@@ -705,7 +713,7 @@ def run_prepare(host: UpgradeHost, stage_root: str) -> Outcome:
     info, reason = _read_wim(wim_path)
     gate, image = "FAIL", None
     if info is not None:
-        gate, reason, image = wim_gate(info, running.ubr)
+        gate, reason, image = wim_gate(info, running)
     report = PrepareReport(stage_root, cleared, failed, wim_path, gate, reason, image, running, None, None, ())
     if gate != "PASS":
         return Outcome(ok=False, data=report, skipped=tuple(skipped))

@@ -38,7 +38,8 @@ guest. It takes two commands. `pve-winrepair repair --vmid N` prepares and start
    The directory is created already locked to SYSTEM and Administrators, and the installation media
    are then copied from the node into it.
 6. It gates on the WIM: `sources\install.wim` must be readable and its image 1 must not be older than
-   the build the guest runs. The image's build goes into a receipt on the node.
+   the build the guest runs (the build number first, then the servicing build). The image's build
+   goes into a receipt on the node.
 7. It launches setup.exe from a SYSTEM scheduled task (ssh kills a process tree that outlives its
    connection, and setup runs for hours) and polls the run's own state log until it reports
    `STATE=DONE-OK` or `STATE=DONE-FAIL`.
@@ -331,11 +332,12 @@ admin:
 | `detect-lp-defect`                                              | is this guest affected by the orphaned language pack: AFFECTED, CLEAN or UNKNOWN                                                                                                  | UNKNOWN                       |
 | `drives`                                                        | free bytes per fixed drive (an unparsable volume is skipped)                                                                                                                      | never (2 when no drive reads) |
 | `verify-runners [--task NAME]... [--expected N]`                | did the runner containers and their boot tasks come back after a reboot: OK, SHORT or UNKNOWN                                                                                     | SHORT or UNKNOWN              |
-| `build`                                                         | CurrentBuild and UBR                                                                                                                                                              | never                         |
+| `build`                                                         | CurrentBuild, UBR and InstallDate (epoch seconds; an in-place upgrade writes it anew)                                                                                             | never                         |
 | `staged-os`                                                     | is the staged NewOS still there: REARMABLE (apply) or RERUN (a rollback deleted it)                                                                                               | never (2 when it cannot look) |
 | `servicing-active`                                              | are TiWorker / TrustedInstaller running                                                                                                                                           | never                         |
 | `setup-alive`                                                   | is SetupHost running                                                                                                                                                              | never                         |
 | `state [--log PATH]`                                            | the upgrade state log and its last `STATE=DONE-OK` / `STATE=DONE-FAIL` marker                                                                                                     | never                         |
+| `nic-macs`                                                      | the MAC address of every network adapter, `AA:BB:CC:DD:EE:FF`, sorted (an adapter without one is skipped)                                                                         | never (2 when no MAC reads)   |
 | `quiesce-wu`                                                    | hold Windows Update (Start=4, issue stops, bounded wait) and verify: OK, FAIL or UNKNOWN                                                                                          | FAIL or UNKNOWN               |
 | `restore-wu`                                                    | restore the start types and verify: RESTORED, STILL_DISABLED or UNKNOWN; plus a bounded search probe                                                                              | STILL_DISABLED or UNKNOWN     |
 | `prepare --stage-root X:\upgrade`                               | clear read-only, gate on the WIM, write the compat waiver: PASS or FAIL                                                                                                           | FAIL                          |

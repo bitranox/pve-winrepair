@@ -4,7 +4,7 @@ Each probe reads Windows only through the :class:`ProbeHost` port; :class:`Pwshp
 real adapter, and the decision logic between the two is plain Python that runs on Linux.
 
 Exit semantics (see ``envelope.py``): a probe that only REPORTS a reading (build, drives,
-staged-os, servicing-active, setup-alive, state) is ok whenever the reading succeeded. A probe
+nic-macs, staged-os, servicing-active, setup-alive, state) is ok whenever the reading succeeded. A probe
 that carries a VERDICT (detect-lp-defect, verify-runners) is refused (exit 1) when the verdict
 is UNKNOWN or, for verify-runners, SHORT. A failed read raises, which the entry turns into exit 2:
 a read that could not happen must never look like an empty answer.
@@ -53,7 +53,9 @@ __all__ = [
     "DEFAULT_STATE_LOG",
     "NEWOS_WINLOAD",
     "BuildInfo",
+    "BuildReport",
     "Drive",
+    "NicMacReport",
     "ProbeError",
     "ProbeHost",
     "PwshpyHost",
@@ -64,6 +66,8 @@ __all__ = [
     "commands",
     "drive_from_cim",
     "fixed_drives",
+    "install_date",
+    "nic_macs",
     "read_state",
     "staged_os",
     "state_verdict",
@@ -72,6 +76,8 @@ __all__ = [
 
 CURRENT_VERSION_KEY = r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion"
 NLS_LANGUAGE_KEY = r"HKLM\SYSTEM\CurrentControlSet\Control\Nls\Language"
+# Every network adapter WMI knows; the ones without a MAC (WAN miniports, tunnels) are skipped.
+NETWORK_ADAPTER_CLASS = "Win32_NetworkAdapter"
 # Where the upgrade run writes its append-only log and its STATE=DONE-OK|DONE-FAIL marker.
 DEFAULT_STATE_LOG = r"C:\upgrade-state.log"
 # setup.exe stages the new OS here; a rollback deletes it, so its winload decides re-arm vs re-run.
@@ -85,6 +91,8 @@ SETUP_PROCESSES = ("SetupHost",)
 STATE_MARKERS = ("STATE=DONE-OK", "STATE=DONE-FAIL")
 STATE_TAIL_LINES = 200
 _HRESULT = re.compile(r"(0x[0-9a-f]{8})", re.IGNORECASE)
+# Six hex octets with ONE separator throughout: WMI writes colons, IP Helper and getmac dashes.
+_MAC = re.compile(r"[0-9A-Fa-f]{2}([:-])(?:[0-9A-Fa-f]{2}\1){4}[0-9A-Fa-f]{2}")
 _GB = 1024**3
 
 
@@ -273,8 +281,44 @@ def build_info(values: Mapping[str, object]) -> BuildInfo:
     return BuildInfo(current_build=current.strip(), ubr=ubr, build=f"{current.strip()}.{ubr}")
 
 
+@dataclass(frozen=True)
+class BuildReport:
+    """What ``build`` reports: the running build and when this Windows was installed.
+
+    Attributes:
+        current_build: As :class:`BuildInfo`.
+        ubr: As :class:`BuildInfo`.
+        build: As :class:`BuildInfo`.
+        install_date: InstallDate (REG_DWORD, Unix epoch seconds). An in-place upgrade writes it
+            anew, so a change across the apply reboot shows the upgrade applied even when the
+            media carried the build the guest already ran.
+    """
+
+    current_build: str
+    ubr: int
+    build: str
+    install_date: int
+
+
+def install_date(values: Mapping[str, object]) -> int:
+    """Extract InstallDate from the CurrentVersion values.
+
+    Raises:
+        ProbeError: It is missing or not a DWORD; a missing one must never compare as unchanged.
+    """
+    value = values.get("InstallDate")
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ProbeError(f"InstallDate is missing or not a DWORD: {value!r}")
+    return value
+
+
 def _run_build(host: ProbeHost) -> Outcome:
-    return Outcome(ok=True, data=build_info(_values(host, CURRENT_VERSION_KEY)))
+    values = _values(host, CURRENT_VERSION_KEY)
+    info = build_info(values)
+    report = BuildReport(
+        current_build=info.current_build, ubr=info.ubr, build=info.build, install_date=install_date(values)
+    )
+    return Outcome(ok=True, data=report)
 
 
 # --- detect-lp-defect -----------------------------------------------------------------------
@@ -517,6 +561,48 @@ def _run_drives(host: ProbeHost) -> Outcome:
     return Outcome(ok=True, data=DriveReport(drives=drives), skipped=skipped)
 
 
+# --- nic-macs -------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class NicMacReport:
+    """The MAC address of every network adapter, ``AA:BB:CC:DD:EE:FF``, sorted and unique."""
+
+    macs: tuple[str, ...]
+
+
+def _adapter_name(adapter: CimInstance) -> str:
+    name = adapter.properties.get("Name")
+    return name if isinstance(name, str) and name else str(adapter.properties.get("DeviceID"))
+
+
+def nic_macs(adapters: Iterable[CimInstance]) -> tuple[tuple[str, ...], tuple[Skip, ...]]:
+    """Every Win32_NetworkAdapter's MAC, normalised, sorted and unique, and a Skip per one without.
+
+    An adapter with no MAC (a WAN miniport) or a value that is not six hex octets is skipped and
+    named, never guessed at: the node compares these against the VM's configured MAC.
+    """
+    macs: set[str] = set()
+    skips: list[Skip] = []
+    for adapter in adapters:
+        raw = adapter.properties.get("MACAddress")
+        if raw is None or raw == "":
+            skips.append(Skip(_adapter_name(adapter), "no MAC address"))
+        elif isinstance(raw, str) and _MAC.fullmatch(raw):
+            macs.add(raw.upper().replace("-", ":"))
+        else:
+            skips.append(Skip(_adapter_name(adapter), f"not a MAC address: {raw!r}"))
+    return tuple(sorted(macs)), tuple(skips)
+
+
+def _run_nic_macs(host: ProbeHost) -> Outcome:
+    adapters = list(host.cim(NETWORK_ADAPTER_CLASS))
+    macs, skipped = nic_macs(adapters)
+    if not macs:  # an empty list would read as "this guest has no NIC", not as "could not read"
+        raise ProbeError(f"no network adapter with a MAC address ({len(adapters)} adapters seen)")
+    return Outcome(ok=True, data=NicMacReport(macs=macs), skipped=skipped)
+
+
 # --- verify-runners -------------------------------------------------------------------------
 
 
@@ -678,7 +764,7 @@ def _configure_verify_runners(parser: argparse.ArgumentParser) -> None:
         type=_task_name,
         action="append",
         default=None,
-        help="a boot task to check (repeatable; none = no task check)",
+        help="a boot task to check, 1-64 of A-Z a-z 0-9 _ . - (repeatable; none = no task check)",
     )
     parser.add_argument(
         "--expected",
@@ -842,7 +928,7 @@ def commands(
             lambda a: _run_verify_runners(host_factory(), a.expected, tuple(a.tasks or ())),
             _configure_verify_runners,
         ),
-        Command("build", "CurrentBuild and UBR", lambda _a: _run_build(host_factory())),
+        Command("build", "CurrentBuild, UBR and InstallDate", lambda _a: _run_build(host_factory())),
         Command(
             "staged-os",
             "is the staged NewOS still present",
@@ -860,4 +946,5 @@ def commands(
             lambda a: Outcome(ok=True, data=read_state(a.log)),
             _configure_state,
         ),
+        Command("nic-macs", "the MAC address of every network adapter", lambda _a: _run_nic_macs(host_factory())),
     )
