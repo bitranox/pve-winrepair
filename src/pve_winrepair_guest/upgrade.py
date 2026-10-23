@@ -169,7 +169,6 @@ SETUP_SETTLE = 150.0
 # action's cmd.exe and its ping.exe child were both gone); 30 s bounds a slow one.
 TASK_END_WAIT = 30.0
 TASK_END_POLL = 1.0
-TREE_POLL = 10.0
 # launch walks both locked trees; the 26200 media hold about a thousand entries. A tree past this
 # is not the media the driver stages, and an unbounded walk would let it stall launch.
 TREE_LIMIT = 20_000
@@ -204,7 +203,7 @@ class SetupRun:
 
     Attributes:
         exit_code: Its exit code as the unsigned DWORD Windows returns (0xC1900200 = 3247440384).
-        tree_wait: How the wait covered setup's child processes: "job", or the fallback used.
+        tree_wait: How the wait covered setup's child processes: "job" (pwshpy's job object).
     """
 
     exit_code: int
@@ -361,7 +360,7 @@ class UpgradeHost(Protocol):
 
 
 class PwshpyHost:
-    """The real :class:`UpgradeHost`: pwshpy's native bindings plus a Win32 job object."""
+    """The real :class:`UpgradeHost`: pwshpy's native bindings plus the Task Scheduler COM API."""
 
     def registry(self, key: str) -> Iterable[RegistryValue]:
         """See :meth:`UpgradeHost.registry`."""
@@ -481,18 +480,13 @@ class PwshpyHost:
         The wait must cover setup.exe AND its descendants: the completion marker must not appear
         while SetupHost still works (PowerShell's ``Start-Process -Wait`` does wait for them,
         measured on a test guest: a ``cmd /c start /b ping -n 7`` that exits at once was waited for 8 s).
-        ``ps.exec`` waits for setup.exe alone, so this process first joins a fresh job object,
-        which every child it starts inherits, and then waits until it is the job's only process.
-        If the job cannot be joined, it falls back to waiting until no SetupHost process is left.
+        ``wait_tree=True`` starts setup.exe suspended inside a fresh job object and returns once the
+        job holds no process. A child started with CREATE_BREAKAWAY_FROM_JOB escapes that wait
+        (pwshpy's documented gap); the node does not rely on the marker alone: its apply gate also
+        requires that no SetupHost runs (``setup-alive``).
         """
-        job, why = _join_new_job()
-        result = ps.exec(list(argv))  # no timeout: the down-level phase runs for hours
-        if job is not None:
-            _wait_job_drained(job)
-            return SetupRun(exit_code=result.exit_code, tree_wait="job")
-        while any(p.name.casefold() == SETUP_PROCESS.casefold() for p in ps.get_process()):
-            time.sleep(TREE_POLL)
-        return SetupRun(exit_code=result.exit_code, tree_wait=f"SetupHost by name (no job: {why})")
+        result = ps.exec(list(argv), wait_tree=True)  # no timeout: the down-level phase runs for hours
+        return SetupRun(exit_code=result.exit_code, tree_wait="job")
 
 
 def _win32() -> Win32Security:
@@ -540,26 +534,6 @@ def _connect_scheduler() -> Any:
     service = client.Dispatch("Schedule.Service")
     service.Connect()
     return service
-
-
-def _join_new_job() -> tuple[Any, str | None]:
-    """Put this process into a new job object, so every process it starts joins it too."""
-    try:
-        win32job: Any = importlib.import_module("win32job")
-        win32api: Any = importlib.import_module("win32api")
-        job = win32job.CreateJobObject(None, "")
-        win32job.AssignProcessToJobObject(job, win32api.GetCurrentProcess())
-    except Exception as exc:  # pywin32 raises its own pywintypes.error; any failure means fall back
-        return None, f"{type(exc).__name__}: {exc}"
-    return job, None
-
-
-def _wait_job_drained(job: Any) -> None:
-    """Wait until this process is the only one left in ``job``."""
-    win32job: Any = importlib.import_module("win32job")
-    info = win32job.JobObjectBasicAccountingInformation
-    while int(win32job.QueryInformationJobObject(job, info)["ActiveProcesses"]) > 1:
-        time.sleep(TREE_POLL)
 
 
 # --- prepare --------------------------------------------------------------------------------

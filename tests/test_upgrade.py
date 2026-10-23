@@ -1239,6 +1239,29 @@ def test_pwshpy_host_reads_this_process_identity_from_pwshpy() -> None:
     assert host.whoami() == upgrade.account_text(me)
 
 
+_GRANDCHILD = """
+import pathlib, sys, time
+time.sleep(2)
+pathlib.Path(sys.argv[1]).write_text("done", encoding="utf-8")
+"""
+# The program exits at once and leaves a grandchild that finishes the work 2 s later, the shape of
+# setup.exe handing its work to SetupHost. Its output goes to DEVNULL, so no inherited pipe keeps
+# a plain wait open: only a wait for the whole process tree sees it.
+_HANDS_OFF = """
+import subprocess, sys
+subprocess.Popen([sys.executable, "-c", sys.argv[1], sys.argv[2]], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+"""
+
+
+def test_pwshpy_host_runs_setup_until_every_process_it_started_has_exited(tmp_path: Path) -> None:
+    marker = tmp_path / "grandchild-done"
+
+    run = upgrade.PwshpyHost().run_setup([sys.executable, "-c", _HANDS_OFF, _GRANDCHILD, str(marker)])
+
+    assert (run.exit_code, run.tree_wait) == (0, "job")
+    assert marker.read_text(encoding="utf-8") == "done"
+
+
 def test_pwshpy_host_name_taken_is_true_for_anything_with_the_name(tmp_path: Path) -> None:
     (tmp_path / "file").write_bytes(b"x")
     taken = upgrade.PwshpyHost().name_taken
