@@ -3,7 +3,7 @@
 The commands reach Windows through the ``UpgradeHost`` port; ``FakeUpgradeHost`` answers from
 real pwshpy records and a fake clock. Everything the old scripts did on the FILESYSTEM is done for
 real here, under ``tmp_path``: the read-only media files, the WIM (the real header and XML of the
-25H2 de-DE media, see ``test_wim.py``), ``setup.exe``'s presence and the append-only state log.
+25H2 de-DE media, see ``FIXTURE``), ``setup.exe``'s presence and the append-only state log.
 The scheduled task is simulated by ``task_lines``: lines the SYSTEM run appends to the state log
 once the fake clock passes their time, so the launch wait is exercised against the real reader.
 ``task`` models the task definition's state as Task Scheduler reports it (None = no such task);
@@ -12,6 +12,7 @@ ending it kills the instance and deleting it leaves the instance running, as mea
 
 from __future__ import annotations
 
+import codecs
 import hashlib
 import importlib.util
 import io
@@ -42,12 +43,19 @@ from win32_fakes import Descriptor, FakeApi, FakeFiles, FakeSecurity, Node, Sid,
 
 from pve_winrepair_guest import lockdown, probes, upgrade, winrepair_guest
 from pve_winrepair_guest.lockdown import Ace, AclReading, LockTarget
-from pve_winrepair_guest.wim import WimImage, WimInfo
+from pve_winrepair_guest.upgrade import WimImage
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
 
+# The real 208-byte header plus the real XML resource of a Windows 11 Pro 25H2 (de-DE, 26200.8973)
+# ``sources/install.wim``, with only the XML offset (bytes 80-87) rewritten to 208 so it points into
+# the small file, and the image NAME replaced by a same-length generic one (``build_wim_fixture.py``).
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "install_wim_header_xml.bin"
+WIM_HEADER = 208
+# The XML resource header: a 7-byte size at 72, its flag byte at 79 (0x04 = compressed).
+WIM_XML_SIZE = 72
+WIM_XML_FLAGS = 79
 CURRENT_VERSION = r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion"
 MOSETUP = r"HKLM\SYSTEM\Setup\MoSetup"
 WAIVER = "AllowUpgradesWithUnsupportedTPMOrCPU"
@@ -473,6 +481,85 @@ def test_prepare_refuses_a_wim_it_cannot_read(stage: Path, fileless_host: FakeUp
     assert reason.startswith("the WIM reader refused the image: ")
 
 
+def _with_xml(text: str) -> bytes:
+    """The fixture's real header followed by ``text`` as its UTF-16LE XML resource (BOM-led)."""
+    xml = codecs.BOM_UTF16_LE + text.encode("utf-16-le")
+    header = bytearray(FIXTURE.read_bytes()[:WIM_HEADER])
+    header[WIM_XML_SIZE : WIM_XML_SIZE + 7] = len(xml).to_bytes(7, "little")
+    return bytes(header) + xml
+
+
+def _image_xml(version: str) -> str:
+    return f'<WIM><IMAGE INDEX="1"><WINDOWS><VERSION>{version}</VERSION></WINDOWS><NAME>n</NAME></IMAGE></WIM>'
+
+
+def test_prepare_reports_the_real_media_image_in_the_field_names_the_node_reads(
+    stage: Path, fileless_host: FakeUpgradeHost
+) -> None:
+    # The node copies image.build and image.spbuild into the repair receipt: pwshpy's record says
+    # sp_build, the envelope must keep saying spbuild.
+    code, envelope = _run(fileless_host, "prepare", "--stage-root", str(stage))
+
+    assert code == 0
+    assert _data(envelope)["image"] == {
+        "index": 1,
+        "name": "Windows-Image-0001",
+        "edition": "Professional",
+        "build": 26200,
+        "spbuild": 8973,
+        "languages": ["de-DE"],
+        "default_language": "de-DE",
+    }
+
+
+def test_the_fleet_media_xml_resource_is_flagged_uncompressed() -> None:
+    # pwshpy refuses an XML resource flagged compressed (0x04); the real media's flag byte carries
+    # only 0x02 (metadata), so the fleet's install.wim is read, not refused.
+    assert FIXTURE.read_bytes()[WIM_XML_FLAGS] == 0x02
+
+
+def test_prepare_refuses_a_wim_whose_xml_resource_is_compressed(stage: Path, fileless_host: FakeUpgradeHost) -> None:
+    data = bytearray(FIXTURE.read_bytes())
+    data[WIM_XML_FLAGS] |= 0x04
+    (stage / "sources" / "install.wim").write_bytes(bytes(data))
+
+    code, envelope = _run(fileless_host, "prepare", "--stage-root", str(stage))
+
+    reason = _data(envelope)["reason"]
+    assert code == 1
+    assert isinstance(reason, str)
+    assert reason.startswith("the WIM reader refused the image: ")
+    assert "compressed" in reason
+
+
+def test_prepare_refuses_a_wim_whose_xml_declares_an_entity(stage: Path, fileless_host: FakeUpgradeHost) -> None:
+    # An entity declaration is the expansion-attack vector; no WIM writer emits a DTD.
+    xml = '<!DOCTYPE WIM [<!ENTITY b "26200">]>' + _image_xml("<BUILD>&b;</BUILD><SPBUILD>8973</SPBUILD>")
+    (stage / "sources" / "install.wim").write_bytes(_with_xml(xml))
+
+    code, envelope = _run(fileless_host, "prepare", "--stage-root", str(stage))
+
+    reason = _data(envelope)["reason"]
+    assert code == 1
+    assert isinstance(reason, str)
+    assert reason.startswith("the WIM reader refused the image: ")
+
+
+@pytest.mark.parametrize("build", ["", "<BUILD>26a00</BUILD>"])
+def test_prepare_refuses_media_whose_image_names_no_build(
+    stage: Path, fileless_host: FakeUpgradeHost, build: str
+) -> None:
+    (stage / "sources" / "install.wim").write_bytes(_with_xml(_image_xml(f"{build}<SPBUILD>8973</SPBUILD>")))
+
+    code, envelope = _run(fileless_host, "prepare", "--stage-root", str(stage))
+
+    assert code == 1
+    assert (_data(envelope)["gate"], _data(envelope)["reason"]) == (
+        "FAIL",
+        "image index 1 names no build (WINDOWS/VERSION/BUILD missing or not a number)",
+    )
+
+
 def test_prepare_reports_drives_through_the_shared_parser(stage: Path, fileless_host: FakeUpgradeHost) -> None:
     fileless_host.disks = [
         _disk("C:", 50 * 1024**3),
@@ -525,13 +612,13 @@ def _running(current_build: str, ubr: int) -> probes.BuildInfo:
 def test_wim_gate_compares_build_and_spbuild_against_the_running_build(build: int, spbuild: int, gate: str) -> None:
     image = WimImage(1, "n", "e", build, spbuild, ("de-DE",), "de-DE")
 
-    assert upgrade.wim_gate(WimInfo(images=(image,)), _running("26200", 7462))[0] == gate
+    assert upgrade.wim_gate((image,), _running("26200", 7462))[0] == gate
 
 
 def test_wim_gate_refuses_a_running_build_that_is_not_a_number() -> None:
     image = WimImage(1, "n", "e", 26200, 8973, ("de-DE",), "de-DE")
 
-    gate, reason, found = upgrade.wim_gate(WimInfo(images=(image,)), _running("26200a", 7462))
+    gate, reason, found = upgrade.wim_gate((image,), _running("26200a", 7462))
 
     assert (gate, reason, found) == ("FAIL", "running CurrentBuild '26200a' is not a number", image)
 
@@ -539,7 +626,7 @@ def test_wim_gate_refuses_a_running_build_that_is_not_a_number() -> None:
 def test_wim_gate_refuses_media_without_image_index_1() -> None:
     image = WimImage(2, "n", "e", 26200, 9999, ("de-DE",), "de-DE")
 
-    assert upgrade.wim_gate(WimInfo(images=(image,)), _running("26200", 8875)) == (
+    assert upgrade.wim_gate((image,), _running("26200", 8875)) == (
         "FAIL",
         "the WIM has no image index 1",
         None,

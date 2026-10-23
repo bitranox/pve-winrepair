@@ -24,7 +24,6 @@ GUEST_MODULES = (
     "lockdown",
     "probes",
     "upgrade",
-    "wim",
     "winrepair_guest",
     "wu",
 )

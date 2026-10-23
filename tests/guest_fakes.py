@@ -50,8 +50,8 @@ from pve_winrepair_guest.upgrade import (
     LockDirsReport,
     PrepareReport,
     TaskCleanup,
+    WimImage,
 )
-from pve_winrepair_guest.wim import WimImage
 from pve_winrepair_guest.wu import (
     QuiesceReport,
     RestoreReport,

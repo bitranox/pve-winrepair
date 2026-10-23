@@ -1,8 +1,9 @@
 r"""The in-place repair upgrade itself: gate the media, launch setup as SYSTEM, run it, mark the end.
 
 Windows is reached through the :class:`UpgradeHost` port; :class:`PwshpyHost` is the real adapter.
-The filesystem work (read-only bits on the media, the WIM, ``setup.exe``, the state log) is plain
-Python, so it runs for real in the tests too.
+The filesystem work (read-only bits on the media, ``setup.exe``, the state log) is plain Python,
+and the WIM is read by pwshpy's portable ``get_windows_image`` (header and XML only, no DISM), so
+both run for real in the tests too.
 
 * ``prepare --stage-root D:\upgrade``: clear read-only (inherited from the source medium), gate
   hard on the WIM (a bad WIM or one older than the running build must stop the run, not surface
@@ -65,7 +66,6 @@ from pwshpy import (
     ps,
 )
 
-from pve_winrepair_guest import wim
 from pve_winrepair_guest.envelope import Command, Outcome, Skip
 from pve_winrepair_guest.lockdown import (
     LOCK_SIDS,
@@ -103,7 +103,7 @@ if TYPE_CHECKING:
     import argparse
     from collections.abc import Callable, Iterable, Sequence
 
-    from pve_winrepair_guest.wim import WimImage, WimInfo
+    from pwshpy import WindowsImage
 
 __all__ = [
     "SETUP_FLAGS",
@@ -122,9 +122,11 @@ __all__ = [
     "TaskSpec",
     "UpgradeHost",
     "UpgradeRunReport",
+    "WimImage",
     "commands",
     "elapsed_text",
     "exit_hex",
+    "media_image",
     "powershell_path",
     "preflight",
     "register_on_demand",
@@ -634,7 +636,46 @@ def clear_read_only(root: str) -> tuple[int, list[Skip]]:
     return cleared, failed
 
 
-def wim_gate(info: WimInfo, running: BuildInfo) -> tuple[str, str | None, WimImage | None]:
+@dataclass(frozen=True)
+class WimImage:
+    """One image of the staged media, as prepare reports it (the envelope's ``image``).
+
+    The node reads ``build`` and ``spbuild`` from it into the repair receipt, so the field names
+    are the envelope's contract, not pwshpy's (``WindowsImage.sp_build``).
+
+    Attributes:
+        index: The image's 1-based index.
+        name: The image name, or "" when absent.
+        edition: WINDOWS/EDITIONID, or "" when absent.
+        build: WINDOWS/VERSION/BUILD (e.g. 26200); 0 when the XML holds no numeric one.
+        spbuild: WINDOWS/VERSION/SPBUILD, the servicing build compared against a guest's UBR.
+        languages: Every WINDOWS/LANGUAGES/LANGUAGE, in document order.
+        default_language: WINDOWS/LANGUAGES/DEFAULT, or "" when absent.
+    """
+
+    index: int
+    name: str
+    edition: str
+    build: int
+    spbuild: int
+    languages: tuple[str, ...]
+    default_language: str
+
+
+def media_image(record: WindowsImage) -> WimImage:
+    """The envelope's view of one image pwshpy read from the WIM's header and XML."""
+    return WimImage(
+        index=record.index,
+        name=record.name,
+        edition=record.edition_id,
+        build=record.build,
+        spbuild=record.sp_build,
+        languages=record.languages,
+        default_language=record.default_language,
+    )
+
+
+def wim_gate(images: Sequence[WimImage], running: BuildInfo) -> tuple[str, str | None, WimImage | None]:
     """Gate the media: image index 1 must not be older than the running build.
 
     ``(BUILD, SPBUILD)`` is compared against ``(CurrentBuild, UBR)`` as a tuple: SPBuild alone
@@ -644,9 +685,13 @@ def wim_gate(info: WimInfo, running: BuildInfo) -> tuple[str, str | None, WimIma
     Returns:
         (PASS or FAIL, the reason for FAIL, image index 1 or None when absent).
     """
-    image = next((i for i in info.images if i.index == 1), None)
+    image = next((i for i in images if i.index == 1), None)
     if image is None:
         return "FAIL", "the WIM has no image index 1", None
+    if image.build == 0:
+        # pwshpy reads a BUILD that is missing or not a number as 0. The tuple compare below would
+        # FAIL it too, but with a reason naming a build "0" the media never carried.
+        return "FAIL", "image index 1 names no build (WINDOWS/VERSION/BUILD missing or not a number)", image
     if not _BUILD_NUMBER.fullmatch(running.current_build):
         return "FAIL", f"running CurrentBuild {running.current_build!r} is not a number", image
     if (image.build, image.spbuild) < (int(running.current_build), running.ubr):
@@ -654,13 +699,17 @@ def wim_gate(info: WimInfo, running: BuildInfo) -> tuple[str, str | None, WimIma
     return "PASS", None, image
 
 
-def _read_wim(path: str) -> tuple[WimInfo | None, str | None]:
-    """Read the WIM, never trusting its byte size; return (info, None) or (None, reason)."""
+def _read_wim(path: str) -> tuple[tuple[WimImage, ...] | None, str | None]:
+    """Read the WIM's images from its header and XML; return (images, None) or (None, reason).
+
+    pwshpy's reader never trusts the file's byte size: it refuses a truncated or oversized XML
+    resource, a compressed one (resource flag 0x04), a DTD and malformed XML.
+    """
     if not _exists(path):
         return None, "install.wim missing"
     try:
-        return wim.read(path), None
-    except (wim.WimFormatError, OSError) as exc:
+        return tuple(media_image(record) for record in ps.get_windows_image(path)), None
+    except PwshPyError as exc:
         return None, f"the WIM reader refused the image: {exc}"
 
 
@@ -710,10 +759,10 @@ def run_prepare(host: UpgradeHost, stage_root: str) -> Outcome:
     failed = len(skipped)
     running = build_info(_values(host, CURRENT_VERSION_KEY))
     wim_path = os.fspath(Path(stage_root, "sources", "install.wim"))
-    info, reason = _read_wim(wim_path)
+    images, reason = _read_wim(wim_path)
     gate, image = "FAIL", None
-    if info is not None:
-        gate, reason, image = wim_gate(info, running)
+    if images is not None:
+        gate, reason, image = wim_gate(images, running)
     report = PrepareReport(stage_root, cleared, failed, wim_path, gate, reason, image, running, None, None, ())
     if gate != "PASS":
         return Outcome(ok=False, data=report, skipped=tuple(skipped))

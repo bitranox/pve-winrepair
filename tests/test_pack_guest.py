@@ -43,12 +43,12 @@ def _append(path: Path, line: str) -> None:
 
 @pytest.mark.os_agnostic
 def test_write_repacks_a_stale_artefact(project: Path, tmp_path: Path) -> None:
-    _append(project / GUEST / "wim.py", "# a change\n")
+    _append(project / GUEST / "envelope.py", "# a change\n")
     assert pack_guest.main([], project=project) == 0
     expected = tmp_path / "expected.ps1"
     pack_guest.pack(project, expected)
     is_fresh = pack_guest.same_pack(_artefact_text(project), expected.read_bytes().decode("utf-8"))
-    has_change = b"# a change" in pack_guest.decode_payload(_artefact_text(project))["pve_winrepair_guest/wim.py"]
+    has_change = b"# a change" in pack_guest.decode_payload(_artefact_text(project))["pve_winrepair_guest/envelope.py"]
     assert is_fresh
     assert has_change
 
@@ -77,7 +77,7 @@ def test_check_fails_when_the_guest_source_changed_after_packing(
     project: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     packed = (project / pack_guest.ARTEFACT).read_bytes()
-    _append(project / GUEST / "wim.py", "# a change after the last pack\n")
+    _append(project / GUEST / "envelope.py", "# a change after the last pack\n")
     capsys.readouterr()
     assert pack_guest.main(["--check"], project=project) == 1
     assert f"{pack_guest.ARTEFACT.as_posix()} is stale" in capsys.readouterr().err
@@ -241,7 +241,7 @@ def test_same_pack_holds_for_identical_text() -> None:
 
 @pytest.mark.os_agnostic
 def test_same_pack_sees_a_member_edit(project: Path, tmp_path: Path) -> None:
-    _append(project / GUEST / "wim.py", "# a member edit\n")
+    _append(project / GUEST / "envelope.py", "# a member edit\n")
     edited = tmp_path / "edited.ps1"
     pack_guest.pack(project, edited)
     same = pack_guest.same_pack(_artefact_text(project), edited.read_bytes().decode("utf-8"))
