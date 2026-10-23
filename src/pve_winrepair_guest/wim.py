@@ -20,7 +20,7 @@ from __future__ import annotations
 import os
 import re
 import struct
-import xml.etree.ElementTree as ET
+import xml.etree.ElementTree as ET  # stdlib expat on purpose, see _parse_xml  # nosec B405
 from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
@@ -151,7 +151,7 @@ def _parse_xml(text: str) -> WimInfo:
     # stdlib expat, not defusedxml: the media is our own downloaded Microsoft image, expat never
     # fetches external entities, and the size cap above bounds what an entity bomb could expand.
     try:
-        root = ET.fromstring(text)  # noqa: S314 - defusedxml would be a new guest dependency, see above
+        root = ET.fromstring(text)  # noqa: S314 - defusedxml would be a new guest dependency  # nosec B314
     except ET.ParseError as exc:
         raise WimFormatError(f"the XML resource does not parse: {exc}") from exc
     images = tuple(_parse_image(node) for node in root.findall("IMAGE"))
