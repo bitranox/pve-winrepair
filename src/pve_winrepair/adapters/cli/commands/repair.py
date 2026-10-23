@@ -18,6 +18,7 @@ from pve_winrepair.application.repair import RepairRequest, run_repair
 
 from ..constants import CLICK_CONTEXT_SETTINGS
 from ..context import get_cli_context
+from ..param_types import Ipv4Address, PositiveFiniteFloat, StorageId
 from ..typed_click import option
 from .runs import (
     PreflightError,
@@ -43,7 +44,7 @@ __all__ = ["cli_repair"]
         "Default: [repair] snapshot_name."
     ),
 )
-@option("--hours", type=float, default=6.0, show_default=True, help="Polling deadline, in hours.")
+@option("--hours", type=PositiveFiniteFloat(), default=6.0, show_default=True, help="Polling deadline, in hours.")
 @option("--json", "as_json", is_flag=True, default=False, help="Print a JSON envelope on stdout.")
 @option(
     "--stage-only",
@@ -53,8 +54,12 @@ __all__ = ["cli_repair"]
 )
 @option(
     "--ip",
+    type=Ipv4Address(),
     default=None,
-    help="Guest address, for a guest with no QEMU agent. Implies the offline snapshot: stop, snapshot, start.",
+    help=(
+        "Guest IPv4 address, for a guest with no QEMU agent. Implies the offline snapshot: stop, snapshot, "
+        "start. The guest there must have a NIC MAC of the VM's qm config, or the run is refused."
+    ),
 )
 @option(
     "--stage-root",
@@ -63,8 +68,9 @@ __all__ = ["cli_repair"]
 )
 @option(
     "--tpm-storage",
+    type=StorageId(),
     default=None,
-    help="PVE storage for a new vTPM volume. Default: the storage the guest's own disk is on.",
+    help="PVE storage ID for a new vTPM volume. Default: the storage the guest's own disk is on.",
 )
 @click.pass_context
 def cli_repair(
@@ -81,10 +87,11 @@ def cli_repair(
 ) -> None:
     """Repair a guest whose cumulative update fails, by an in-place repair upgrade.
 
-    Ensure a vTPM, snapshot, stage the installation media from [repair] media_dir and hold Windows
-    Update, gate the image, launch setup from a SYSTEM task and poll to its verdict. Each step goes
-    to stderr as it happens. Exit 0 when repaired or staged, 1 when refused, 2 on an internal error,
-    78 when the configuration does not load.
+    Refuse a live upgrade run, hold Windows Update (on a running guest reached through the agent),
+    ensure a vTPM, snapshot, stage the installation media from [repair] media_dir, hold Windows Update
+    again, gate the image, record the receipt, launch setup from a SYSTEM task and poll to its
+    verdict. Each step goes to stderr as it happens. Exit 0 when repaired or staged, 1 when refused,
+    2 on an internal error or a bad option, 78 when the configuration does not load.
     """
     cli_ctx = get_cli_context(ctx)
     settings = load_run_settings(ctx, cli_ctx)

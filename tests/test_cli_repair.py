@@ -41,6 +41,7 @@ from lib_layered_config import Config
 from pve_winrepair.adapters.cli.commands.runs import PreflightError, resolve_snapshot_name
 from pve_winrepair.adapters.cli.main import main
 from pve_winrepair.composition import AppServices, build_testing
+from pve_winrepair.domain.envelope import WU_HELD_HINT
 from pve_winrepair.domain.settings import RepairSettings
 
 if TYPE_CHECKING:
@@ -52,7 +53,7 @@ if TYPE_CHECKING:
 DONE_OK_STEPS = [
     "running", "push_tool", "no_live_run", "quiesce_wu", "servicing_idle", "vtpm", "running",
     "snapshot", "push_tool", "no_live_run", "stage_root", "lock_dirs", "stage_media", "quiesce_wu",
-    "prepare", "receipt", "launch", "poll",
+    "prepare", "build_before", "receipt", "launch", "poll",
 ]  # fmt: skip
 
 
@@ -135,13 +136,13 @@ def test_a_snapshot_name_override_labels_only_its_own_error_with_the_option() ->
 
 
 def test_a_refusal_exits_1_with_verdict_error_naming_the_reason(tmp_path: Path) -> None:
-    refused = answer("prepare", prepare_report("FAIL", "image SPBuild 8973 older than running 9711"), ok=False)
+    refused = answer("prepare", prepare_report("FAIL", "image 26200.8973 older than running 26200.9711"), ok=False)
     run = run_cli(["repair", "--vmid", "1", "--json"], cli_config(tmp_path), agent_runner(FakePve(), prepare=refused))
     envelope = json_envelope(run.stdout)
     assert (run.exit_code, envelope["ok"], envelope["verdict"]) == (1, False, "ERROR")
     last = envelope_steps(envelope)[-1]
     assert (last["step"], last["wu_held"]) == ("error", True)
-    assert str(last["message"]).startswith("guest gate refused: image SPBuild 8973 older than running 9711")
+    assert str(last["message"]).startswith("guest gate refused: image 26200.8973 older than running 26200.9711")
 
 
 def test_a_refusal_without_json_prints_the_verdict_line(tmp_path: Path) -> None:
@@ -295,6 +296,16 @@ def test_stage_only_stops_after_staging(tmp_path: Path) -> None:
     assert "launch" not in [step["step"] for step in envelope_steps(envelope)]
 
 
+def test_stage_only_says_windows_update_is_still_held_and_how_to_lift_it(tmp_path: Path) -> None:
+    run = run_cli(["repair", "--vmid", "1", "--stage-only", "--json"], cli_config(tmp_path), agent_runner(FakePve()))
+    last = envelope_steps(json_envelope(run.stdout))[-1]
+    assert (run.exit_code, last["step"], last["ok"], last["wu_held"]) == (0, "staged", True, True)
+    assert str(last["note"]).endswith(WU_HELD_HINT)
+    assert "no receipt" in str(last["note"])
+    # The operator sees the hold on stderr too, on the step printed last.
+    assert WU_HELD_HINT in run.stderr.splitlines()[-1]
+
+
 def test_stage_root_option_reaches_the_stage_root_step(tmp_path: Path) -> None:
     run = run_cli(
         ["repair", "--vmid", "1", "--stage-root", "C:", "--json"], cli_config(tmp_path), agent_runner(FakePve())
@@ -304,8 +315,55 @@ def test_stage_root_option_reaches_the_stage_root_step(tmp_path: Path) -> None:
 
 
 def test_hours_option_is_the_poll_deadline(tmp_path: Path) -> None:
-    run = run_cli(["repair", "--vmid", "1", "--hours", "0", "--json"], cli_config(tmp_path), agent_runner(FakePve()))
-    assert (run.exit_code, json_envelope(run.stdout)["verdict"]) == (1, "TIMEOUT")
+    runner = agent_runner(FakePve(), state=NO_LOG)
+    runner.replies["setup-alive"] = [GONE, GONE, ALIVE]  # both guards pass, then setup runs past the deadline
+    run = run_cli(["repair", "--vmid", "1", "--hours", "0.001", "--json"], cli_config(tmp_path), runner)
+    envelope = json_envelope(run.stdout)
+    assert (run.exit_code, envelope["verdict"]) == (1, "TIMEOUT")
+    assert "no verdict within 0.001 h" in str(envelope_steps(envelope)[-1]["note"])
+
+
+def _usage_error(argv: list[str], tmp_path: Path) -> tuple[CliRun, FakeRunner]:
+    runner = agent_runner(FakePve())
+    return run_cli(argv, cli_config(tmp_path), runner), runner
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "nan", "inf", "-inf", "x"])
+def test_hours_that_are_no_positive_finite_number_are_refused_before_any_call(tmp_path: Path, value: str) -> None:
+    run, runner = _usage_error(["repair", "--vmid", "1", "--hours", value], tmp_path)
+    assert run.exit_code == 2
+    assert "Invalid value for '--hours'" in run.stderr
+    assert runner.calls == []
+
+
+@pytest.mark.parametrize(
+    "value", ["a", "1local", "local-", "local zfs", "local-zfs:1", "local,x=1", "-tpm", "x" * 0, chr(0x00E4) + "b"]
+)
+def test_a_tpm_storage_that_is_no_pve_storage_id_is_refused_before_any_call(tmp_path: Path, value: str) -> None:
+    run, runner = _usage_error(["repair", "--vmid", "1", "--tpm-storage", value], tmp_path)
+    assert run.exit_code == 2
+    assert "Invalid value for '--tpm-storage'" in run.stderr
+    assert "not a PVE storage ID" in run.stderr
+    assert runner.calls == []
+
+
+@pytest.mark.parametrize("value", ["local-zfs", "Tpm.Store_1", "ab"])
+def test_a_tpm_storage_that_is_a_pve_storage_id_reaches_qm_set(tmp_path: Path, value: str) -> None:
+    pve = FakePve()
+    pve.config = "scsi0: local-zfs:vm-1-disk-0,size=64G\n"
+    runner = agent_runner(pve)
+    run_cli(["repair", "--vmid", "1", "--tpm-storage", value], cli_config(tmp_path), runner)
+    sets = [call for call in runner.calls if call[:2] == ["qm", "set"]]
+    assert [call[3:] for call in sets] == [["-tpmstate0", f"{value}:1,version=v2.0"]]
+
+
+@pytest.mark.parametrize("value", ["999.1.1.1", "192.0.2", "192.0.2.010", "host.example", "2001:db8::1", ""])
+def test_an_ip_that_is_no_ipv4_address_is_refused_before_any_call(tmp_path: Path, value: str) -> None:
+    run, runner = _usage_error(["repair", "--vmid", "1", "--ip", value], tmp_path)
+    assert run.exit_code == 2
+    assert "Invalid value for '--ip'" in run.stderr
+    assert "not an IPv4 address" in run.stderr
+    assert runner.calls == []
 
 
 def test_tpm_storage_option_is_where_a_new_vtpm_goes(tmp_path: Path) -> None:

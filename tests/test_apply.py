@@ -5,13 +5,15 @@ The answers are real guest envelopes over the guest tool's own data models.
 
 from __future__ import annotations
 
+import json
 import ntpath
-from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 import pytest
 from guest_fakes import (
     ALIVE,
+    BUILD_AFTER,
+    BUILD_BEFORE,
     DONE_OK,
     GONE,
     GUEST_IP,
@@ -19,8 +21,10 @@ from guest_fakes import (
     NEWOS,
     NO_LOG,
     PROFILE_ACL,
+    RECEIPT,
     TOOL_DIR,
     TOOL_PATH,
+    VM_MAC,
     Answer,
     FakeClock,
     FakePve,
@@ -45,9 +49,9 @@ from pve_winrepair.adapters.receipts import FileReceiptStore
 from pve_winrepair.application import apply
 from pve_winrepair.application.apply import ApplyError, ApplyRequest, run_apply
 from pve_winrepair.domain.envelope import WU_HELD_HINT, GuestProtocolError
-from pve_winrepair.domain.receipt import RepairReceipt
-from pve_winrepair.domain.report import Report, RunExit, Step
-from pve_winrepair_guest.probes import BuildInfo, StagedOs
+from pve_winrepair.domain.receipt import GuestBuild, RepairReceipt
+from pve_winrepair.domain.report import Report, RunExit, RunResult, Step
+from pve_winrepair_guest.probes import BuildReport, NicMacReport, StagedOs
 from pve_winrepair_guest.upgrade import DirectoryLock, LockDirsReport
 from pve_winrepair_guest.wu import SearchProbe
 
@@ -58,9 +62,22 @@ if TYPE_CHECKING:
 # --- build ----------------------------------------------------------------------------------
 
 
-def test_read_build_returns_build_and_decimal_ubr() -> None:
-    runner = FakeRunner().on("build", answer("build", BuildInfo("26200", 8973, "26200.8973")))
-    assert apply.read_build(make_guest(runner)) == ("26200", 8973)
+def test_read_build_returns_build_decimal_ubr_and_install_date() -> None:
+    runner = FakeRunner().on("build", answer("build", BuildReport("26200", 8973, "26200.8973", 1761206400)))
+    assert apply.read_build(make_guest(runner)) == GuestBuild(build=26200, ubr=8973, install_date=1761206400)
+
+
+@pytest.mark.parametrize("current_build", ["", "26200a", "-1", "2" * 10, chr(0x0662)])
+def test_read_build_with_a_current_build_that_is_no_number_is_a_protocol_error(current_build: str) -> None:
+    runner = FakeRunner().on("build", answer("build", BuildReport(current_build, 1, "x", 1)))
+    with pytest.raises(GuestProtocolError, match="CurrentBuild"):
+        apply.read_build(make_guest(runner))
+
+
+def test_read_build_without_install_date_is_a_protocol_error() -> None:
+    runner = FakeRunner().on("build", answer("build", {"current_build": "26200", "ubr": 1, "build": "26200.1"}))
+    with pytest.raises(GuestProtocolError, match="install_date"):
+        apply.read_build(make_guest(runner))
 
 
 @pytest.mark.parametrize(
@@ -208,10 +225,6 @@ def test_push_tool_step_reports_a_profile_copy_it_could_not_delete() -> None:
 DONE_FAIL = answer("state", state_log("launching: setup.exe", "STATE=DONE-FAIL setup exit=0xC1900200"))
 NO_MARKER = answer("state", state_log("=== start", "launching: setup.exe"))
 REQUEST = ApplyRequest(vmid=1, ip=GUEST_IP)
-# What the repair run's prepare step measured for VM 1: the build the apply must reach.
-RECEIPT = RepairReceipt(
-    vmid=1, image_build=26200, image_spbuild=8973, written_at=datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
-)
 
 
 @pytest.fixture
@@ -408,10 +421,7 @@ def test_a_profile_copy_that_is_not_the_tool_after_the_reboot_runs_nothing_and_i
 
 def test_a_failure_after_the_reboot_still_deletes_the_profile_copy() -> None:
     runner = apply_runner(FakePve(), GONE, DONE_OK)
-    runner.replies["build"] = [
-        answer("build", BuildInfo("26200", 7462, "26200.7462")),
-        answer("build", BuildInfo("26200", 7462, "26200.7462")),
-    ]
+    runner.replies["build"] = [answer("build", BUILD_BEFORE), answer("build", BUILD_BEFORE)]
     verdict, steps = _applied(runner)
     assert verdict is None
     assert [route(call) for call in _after_reboot(runner)][-2:] == ["build", "del"]
@@ -497,3 +507,112 @@ def test_run_apply_maps_an_unexpected_error_to_internal(receipts: FileReceiptSto
     last = result.steps[-1]
     assert (last["step"], last["ok"], last["wu_held"]) == ("internal", False, True)
     assert str(last["message"]).startswith("ValueError('a driver and tool that disagree')")
+
+
+# --- same-build media: InstallDate must change across the apply reboot ------------------------
+
+# Media carrying the build the guest already ran: a rollback ends on that same build, so the build
+# alone cannot tell an upgrade that applied from one that never landed.
+SAME_BUILD = RECEIPT.model_copy(update={"build_before": (26200, 8973)})
+UNCHANGED = BuildReport("26200", 8973, "26200.8973", BUILD_BEFORE.install_date)
+
+
+def _run_with(tmp_path: Path, receipt: RepairReceipt, after: BuildReport) -> tuple[FakeRunner, RunResult]:
+    """Apply with ``receipt`` on file, the guest reporting ``after`` once it is back from the apply reboot."""
+    store = FileReceiptStore(tmp_path)
+    store.write(receipt)
+    runner = apply_runner(FakePve(), GONE, DONE_OK)
+    runner.replies["build"] = [answer("build", BUILD_BEFORE), answer("build", after)]
+    return runner, run_apply(REQUEST, make_node(runner), receipts=store, on_step=lambda _s: None)
+
+
+def test_same_build_media_with_an_unchanged_install_date_is_reverted_or_unchanged_and_keeps_the_hold(
+    tmp_path: Path,
+) -> None:
+    runner, result = _run_with(tmp_path, SAME_BUILD, UNCHANGED)
+    assert (result.exit, result.verdict) == (RunExit.REFUSED, "REVERTED_OR_UNCHANGED")
+    check = next(s for s in result.steps if s["step"] == "verify_build")
+    assert (check["ok"], check["got"], check["install_date"]) == (False, "26200.8973", BUILD_BEFORE.install_date)
+    assert "InstallDate" in str(check["note"])
+    error = result.steps[-1]
+    assert (error["step"], error["wu_held"]) == ("error", True)
+    assert str(error["message"]).startswith(
+        f"build is 26200.8973, the build the guest ran before the repair, and its InstallDate "
+        f"{BUILD_BEFORE.install_date} did not change across the apply reboot"
+    )
+    # The hold stays: restore-wu never ran.
+    assert "restore-wu" not in [route(call) for call in runner.calls]
+
+
+def test_same_build_media_with_a_changed_install_date_is_verified(tmp_path: Path) -> None:
+    runner, result = _run_with(tmp_path, SAME_BUILD, BUILD_AFTER)
+    assert (result.exit, result.verdict) == (RunExit.OK, "VERIFIED")
+    check = next(s for s in result.steps if s["step"] == "verify_build")
+    assert check == {
+        "step": "verify_build",
+        "ok": True,
+        "build": "26200.8973",
+        "install_date_before": BUILD_BEFORE.install_date,
+        "install_date": BUILD_AFTER.install_date,
+    }
+    assert "restore-wu" in [route(call) for call in runner.calls]
+
+
+def test_a_newer_build_is_verified_whatever_the_install_date(tmp_path: Path) -> None:
+    _runner, result = _run_with(tmp_path, RECEIPT, UNCHANGED)
+    assert (result.exit, result.verdict) == (RunExit.OK, "VERIFIED")
+    check = next(s for s in result.steps if s["step"] == "verify_build")
+    assert check == {"step": "verify_build", "ok": True, "build": "26200.8973"}
+
+
+def test_a_receipt_without_the_build_before_is_refused_as_unusable_before_any_call(tmp_path: Path) -> None:
+    store = FileReceiptStore(tmp_path)
+    old = RECEIPT.model_dump(mode="json", exclude={"build_before", "install_date_before"})
+    store.path(1).write_text(json.dumps(old), encoding="utf-8")
+    runner = apply_runner(FakePve(), GONE, DONE_OK)
+    result = run_apply(REQUEST, make_node(runner), receipts=store, on_step=lambda _s: None)
+    assert runner.calls == []
+    assert (result.exit, result.verdict) == (RunExit.REFUSED, "ERROR")
+    message = str(result.steps[-1]["message"])
+    assert message.startswith(f"the repair receipt {store.path(1)} is not valid: ")
+    assert "build_before: Field required" in message
+    assert "install_date_before: Field required" in message
+
+
+# --- --ip must be the VM --vmid names: a MAC of its qm config ---------------------------------
+
+
+def test_apply_to_a_guest_that_is_not_the_vm_refuses_before_anything_stops_it(receipts: FileReceiptStore) -> None:
+    pve = FakePve()
+    runner = apply_runner(pve, GONE, DONE_OK)
+    runner.replies["nic-macs"] = [answer("nic-macs", NicMacReport(macs=("BC:24:11:FF:FF:01",)))]
+    result = run_apply(REQUEST, make_node(runner), receipts=receipts, on_step=lambda _s: None)
+    assert (result.exit, result.verdict) == (RunExit.REFUSED, "ERROR")
+    labels = call_labels(runner.calls)
+    assert [label for label in labels if label.split()[-1] in MUTATING_QM] == []
+    assert pve.status == "running"
+    assert result.steps[-2] == {
+        "step": "guest_identity",
+        "ok": False,
+        "ip": GUEST_IP,
+        "vm_macs": [VM_MAC],
+        "guest_macs": ["BC:24:11:FF:FF:01"],
+    }
+    error = result.steps[-1]
+    assert str(error["message"]).startswith(f"the guest at {GUEST_IP} is not VM 1: ")
+    assert error["wu_held"] is True
+
+
+def test_apply_binds_the_guest_to_the_vm_before_the_apply_reboot(receipts: FileReceiptStore) -> None:
+    runner = apply_runner(FakePve(), GONE, DONE_OK)
+    result = run_apply(REQUEST, make_node(runner), receipts=receipts, on_step=lambda _s: None)
+    assert (result.exit, result.verdict) == (RunExit.OK, "VERIFIED")
+    labels = call_labels(runner.calls)
+    assert labels.index("guest nic-macs") < labels.index("qm shutdown")
+    assert labels.count("guest nic-macs") == 1
+    assert next(s for s in result.steps if s["step"] == "guest_identity") == {
+        "step": "guest_identity",
+        "ok": True,
+        "ip": GUEST_IP,
+        "macs": [VM_MAC],
+    }

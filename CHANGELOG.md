@@ -36,3 +36,16 @@ history is not published, so this changelog starts here.
   names `<section>.<key>`.
 - `repair` and `apply` exit 0 when done, 1 when refused, 2 on an internal error and 78 when the
   configuration does not load.
+- `repair --ip` and `apply` bind the guest at `--ip` to the VM: one of the MACs in `qm config
+  <vmid>` must be among the adapters the guest tool's `nic-macs` reports, else the run is refused
+  before anything acts on the VM (on a stopped VM: before anything is staged at that address).
+- The receipt also records the guest's build and InstallDate before the upgrade. For media that
+  carry the build the guest already runs, `apply` requires InstallDate to change across the apply
+  reboot, else REVERTED_OR_UNCHANGED.
+- A `--stage-only` run (verdict STAGED) says on its last step that Windows Update is still held and
+  how to lift it.
+- The profile check trusts the SDDL alias `LA` when the ssh user is the built-in Administrator
+  (a SID ending in -500), the default `[ssh] user`.
+- `--hours` and `--apply-minutes` accept only finite numbers above 0, `--tpm-storage` only a PVE
+  storage ID and `--ip` only an IPv4 address; anything else is a usage error before any call.
+- ssh and scp to the guests pass `-o IdentitiesOnly=yes`, so only the configured key is offered.

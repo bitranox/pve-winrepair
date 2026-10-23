@@ -7,14 +7,16 @@ Every run goes through the real ``main()`` with the testing composition; the nod
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
+import pytest
 from guest_fakes import (
     DONE_OK,
     GONE,
     GUEST_IP,
+    RECEIPT,
     FakePve,
+    Reply,
     answer,
     apply_runner,
     cli_config,
@@ -25,7 +27,6 @@ from guest_fakes import (
 
 from pve_winrepair.adapters.receipts import FileReceiptStore
 from pve_winrepair.domain.envelope import WU_HELD_HINT
-from pve_winrepair.domain.receipt import RepairReceipt
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -33,10 +34,6 @@ if TYPE_CHECKING:
     from guest_fakes import FakeRunner
 
 APPLY = ["apply", "--vmid", "1", "--ip", GUEST_IP]
-#: What a repair's prepare step measured for VM 1; the fake guest comes back on 26200.8973.
-RECEIPT = RepairReceipt(
-    vmid=1, image_build=26200, image_spbuild=8973, written_at=datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
-)
 
 
 def _with_receipt(tmp_path: Path) -> dict[str, dict[str, object]]:
@@ -85,10 +82,33 @@ def test_apply_without_a_receipt_is_refused_before_any_call(tmp_path: Path) -> N
 
 
 def test_apply_minutes_option_is_how_long_the_guest_may_take_to_come_back(tmp_path: Path) -> None:
-    run = run_cli([*APPLY, "--apply-minutes", "0", "--json"], _with_receipt(tmp_path), _runner())
+    runner = _runner()
+    runner.replies["hostname"] = [Reply(255, "", "Connection timed out")]
+    run = run_cli([*APPLY, "--apply-minutes", "0.5", "--json"], _with_receipt(tmp_path), runner)
     message = str(envelope_steps(json_envelope(run.stdout))[-1]["message"])
     assert run.exit_code == 1
-    assert message.startswith("guest did not answer ssh within 0.0 min")
+    assert message.startswith("guest did not answer ssh within 0.5 min")
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "nan", "inf", "x"])
+def test_apply_minutes_that_are_no_positive_finite_number_are_refused_before_any_call(
+    tmp_path: Path, value: str
+) -> None:
+    runner = _runner()
+    run = run_cli([*APPLY, "--apply-minutes", value], _with_receipt(tmp_path), runner)
+    assert run.exit_code == 2
+    assert "Invalid value for '--apply-minutes'" in run.stderr
+    assert runner.calls == []
+
+
+@pytest.mark.parametrize("value", ["999.1.1.1", "192.0.2.010", "host.example", ""])
+def test_apply_with_an_ip_that_is_no_ipv4_address_is_refused_before_any_call(tmp_path: Path, value: str) -> None:
+    runner = _runner()
+    run = run_cli(["apply", "--vmid", "1", "--ip", value], _with_receipt(tmp_path), runner)
+    assert run.exit_code == 2
+    assert "Invalid value for '--ip'" in run.stderr
+    assert "not an IPv4 address" in run.stderr
+    assert runner.calls == []
 
 
 def test_apply_with_a_state_dir_that_is_a_regular_file_is_refused_before_any_call(tmp_path: Path) -> None:

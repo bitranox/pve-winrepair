@@ -62,8 +62,9 @@ guests' keys apart from the node's own.
 no host bits set (`192.0.2.0/24` or `192.0.2.0/255.255.255.0`). `repair` reads the guest's addresses
 from the QEMU guest agent and drops loopback and link-local ones:
 
-- With a subnet, it takes the first address inside it. When there is none yet, it asks the agent
-  again every 10 seconds, up to 30 reads in all, and then refuses the run.
+- With a subnet, it takes the first address inside it. When there is none yet, it waits 10 seconds
+  and asks the agent again (each read may take up to 60 seconds), up to 30 reads in all, and then
+  refuses the run.
 - Empty, it takes the only remaining address at once and refuses a guest that reports several.
 
 Set it. Without it, a guest that briefly reports only a container-switch address (a `172.x` address
@@ -101,6 +102,17 @@ receipts `receipt-<vmid>.json`. An absolute path; `""`, a relative path and a le
 refused. Before anything else, `repair` and `apply` check that it is a directory, or that its
 nearest existing parent is one, so a receipt write cannot fail hours into a run on a path that is a
 file. A directory `pve-winrepair` creates gets mode 0700, each receipt 0600.
+
+A receipt holds the build of the staged image and, from the same moment, the build and the
+InstallDate the guest ran (`build_before`, `install_date_before`); every field is required, and
+`apply` refuses a receipt that lacks one. When the image carries the build the guest already ran,
+`apply` accepts the result only if the guest's InstallDate changed across the apply reboot (an
+in-place upgrade writes it anew; a rollback lands on the same build). Otherwise the verdict is
+REVERTED_OR_UNCHANGED and Windows Update stays held.
+
+No setting binds `--ip` to a VM: `repair --ip` and `apply` always require one of the MACs of the
+VM's `netN` lines in `qm config` to be among the guest's network adapters, and refuse the run
+otherwise.
 
 ---
 

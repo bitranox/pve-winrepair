@@ -15,6 +15,7 @@ import json
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -25,12 +26,15 @@ from pve_winrepair.adapters.cli.main import main
 from pve_winrepair.adapters.guest_ssh import Guest
 from pve_winrepair.adapters.node import Node
 from pve_winrepair.composition import AppServices, build_production, build_testing
+from pve_winrepair.domain.receipt import RepairReceipt
 from pve_winrepair.domain.settings import SshSettings
 from pve_winrepair_guest.envelope import Outcome, build, internal_error, render
 from pve_winrepair_guest.probes import (
     BuildInfo,
+    BuildReport,
     Drive,
     DriveReport,
+    NicMacReport,
     ServicingReport,
     SetupReport,
     StagedOs,
@@ -68,6 +72,8 @@ GUEST_IP = "192.0.2.10"
 LAN_IP = "192.0.2.50"
 # What would stop, restart or reconfigure the VM, or take a snapshot of it.
 MUTATING_QM = frozenset({"shutdown", "stop", "start", "set", "snapshot", "rollback", "reboot"})
+#: The MAC of the fake VM's one NIC (``net0`` of :class:`FakePve`), as PVE writes it.
+VM_MAC = "BC:24:11:0A:0B:0C"
 # A real file standing in for the packed tool: the drivers hash it to name its guest copy.
 TOOL_DIR = Path(__file__).resolve().parent / "fixtures" / "packed_tool"
 
@@ -115,6 +121,12 @@ class Reply:
 def answer(command: str, data: object, *, ok: bool = True) -> Reply:
     """The tool's envelope for ``data``: exit 0 when ``ok``, else exit 1 (refused)."""
     return Reply(0 if ok else 1, render(build(command, Outcome(ok=ok, data=data))) + "\r\n")
+
+
+#: What nic-macs reports on the guest that is the fake VM: its NIC (lower case here, so both sides
+#: must be normalised) plus a Hyper-V vEthernet adapter the VM config does not list - the check is
+#: membership, never equality.
+NIC_MACS = answer("nic-macs", NicMacReport(macs=("00:15:5D:01:02:03", VM_MAC.lower())))
 
 
 def crashed(command: str, error: BaseException) -> Reply:
@@ -264,7 +276,11 @@ class FakePve:
     def __init__(self, status: str = "running", *, stuck: bool = False) -> None:
         self.status = status
         self.stuck = stuck
-        self.config = "scsi0: local-zfs:vm-1-disk-0,size=64G\ntpmstate0: local-zfs:vm-1-disk-1,size=4M\n"
+        self.config = (
+            "scsi0: local-zfs:vm-1-disk-0,size=64G\n"
+            "tpmstate0: local-zfs:vm-1-disk-1,size=4M\n"
+            f"net0: virtio={VM_MAC},bridge=vmbr0,firewall=1\n"
+        )
 
     def __call__(self, cmd: list[str]) -> Reply:
         verb = cmd[1]
@@ -336,6 +352,11 @@ def servicing_report(total: int) -> ServicingReport:
 
 IMAGE = WimImage(1, "Windows 11 Pro", "Professional", 26200, 8973, ("de-DE",), "de-DE")
 RUNNING_BUILD = BuildInfo("26200", 7462, "26200.7462")
+#: InstallDate (epoch seconds) of the guest before the repair, and after an upgrade that applied.
+INSTALL_DATE = 1_761_206_400
+INSTALL_DATE_AFTER = 1_761_300_000
+#: What ``build`` reports on the guest before the upgrade: :data:`RUNNING_BUILD` and its InstallDate.
+BUILD_BEFORE = BuildReport("26200", 7462, "26200.7462", INSTALL_DATE)
 
 
 def prepare_report(gate: str, reason: str | None = None, *, tpm: bool | None = True) -> PrepareReport:
@@ -402,6 +423,8 @@ def agent_runner(pve: FakePve, **overrides: Answer) -> FakeRunner:
         "drives": [answer("drives", drive_report(C=60.0, D=200.0))],
         "scp": [Reply(0)],
         "prepare": [answer("prepare", prepare_report("PASS"))],
+        "build": [answer("build", BUILD_BEFORE)],
+        "nic-macs": [NIC_MACS],
         "launch": [answer("launch", launch_report("OK"))],
     }
     answers.update({key: [value] for key, value in overrides.items()})
@@ -434,16 +457,27 @@ def apply_runner(pve: FakePve, alive: Reply, state: Reply) -> FakeRunner:
     return (
         tool_on_the_guest(FakeRunner())
         .on("qm", pve)
-        .on("build", answer("build", BuildInfo("26200", 7462, "26200.7462")), answer("build", BUILD_AFTER))
+        .on("build", answer("build", BUILD_BEFORE), answer("build", BUILD_AFTER))
         .on("setup-alive", alive)
         .on("state", state)
         .on("staged-os", answer("staged-os", StagedOs(NEWOS, True, "REARMABLE")))
         .on("hostname", Reply(0, "GUEST\r\n"))
+        .on("nic-macs", NIC_MACS)
         .on("restore-wu", answer("restore-wu", restore_report("RESTORED")))
     )
 
 
-BUILD_AFTER = BuildInfo("26200", 8973, "26200.8973")
+#: The guest after an upgrade to :data:`IMAGE` that applied: the image's build, a new InstallDate.
+BUILD_AFTER = BuildReport("26200", 8973, "26200.8973", INSTALL_DATE_AFTER)
+#: The receipt a repair of VM 1 leaves for :data:`IMAGE` staged on a guest that ran :data:`BUILD_BEFORE`.
+RECEIPT = RepairReceipt(
+    vmid=1,
+    image_build=IMAGE.build,
+    image_spbuild=IMAGE.spbuild,
+    build_before=(26200, 7462),
+    install_date_before=INSTALL_DATE,
+    written_at=datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc),
+)
 
 
 # --- the CLI: ``main()`` over the testing composition, with the fake node injected ----------------

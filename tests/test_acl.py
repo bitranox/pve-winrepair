@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from pve_winrepair.domain.acl import TRUSTED_WELL_KNOWN, SddlError, parse_sddl, write_problems
+from pve_winrepair.domain.acl import TRUSTED_WELL_KNOWN, SddlError, parse_sddl, trusted_writers, write_problems
 
 USER = "S-1-5-21-1-2-3-1001"
 TRUSTED = TRUSTED_WELL_KNOWN | {USER}
@@ -95,3 +95,33 @@ def test_a_sacl_after_the_dacl_is_skipped_and_its_ace_kinds_are_not_judged() -> 
 def test_more_malformed_descriptors_are_refused(text: str) -> None:
     with pytest.raises(SddlError):
         parse_sddl(text)
+
+
+# --- the built-in Administrator: Get-Acl prints its own SID as the alias LA -------------------
+
+ADMIN = "S-1-5-21-1-2-3-500"
+# The profile of the built-in Administrator (RID 500, the shipped default [ssh] user) as Get-Acl
+# prints it: the account's own SID appears only as the alias LA, as owner and in its ACE.
+ADMIN_PROFILE = "O:LAG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;LA)"
+
+
+def test_the_built_in_administrator_profile_has_no_problem_for_that_user() -> None:
+    assert write_problems(parse_sddl(ADMIN_PROFILE), trusted=trusted_writers(ADMIN)) == ()
+
+
+@pytest.mark.parametrize(
+    "user",
+    [USER, "S-1-5-21-1-2-3-5000", "S-1-5-21-500-2-3-1001", "S-1-5-21-1-2-3-1500"],
+    ids=["rid-1001", "rid-5000", "500-not-last", "rid-1500"],
+)
+def test_la_stays_untrusted_for_any_user_who_is_not_rid_500(user: str) -> None:
+    problems = write_problems(parse_sddl(ADMIN_PROFILE), trusted=trusted_writers(user))
+    assert problems == (
+        "the owner LA is not trusted (an owner can rewrite the ACL)",
+        "LA may write: allow 0x1f01ff (flags OICI)",
+    )
+
+
+def test_the_trusted_writers_are_the_well_known_principals_plus_the_user() -> None:
+    assert trusted_writers(USER) == TRUSTED_WELL_KNOWN | {USER}
+    assert trusted_writers(ADMIN) == TRUSTED_WELL_KNOWN | {ADMIN, "LA"}

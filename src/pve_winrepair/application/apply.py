@@ -22,7 +22,13 @@ stop the restore of Windows Update. The profile copy is deleted at the end on ev
 
 The build it verifies is the one the repair run's prepare step measured from the staged image and
 recorded in the VM's receipt (:class:`ReceiptStore`). The receipt is read first, before any node or
-guest call: without one there is nothing to verify against, and the run is refused untouched.
+guest call: without one there is nothing to verify against, and the run is refused untouched. When
+the media carried the build the guest already ran (the receipt's ``build_before``), a rolled-back
+upgrade ends on that same build, so the guest's InstallDate must also have changed from the one the
+receipt recorded, else the verdict is REVERTED_OR_UNCHANGED.
+
+The guest at ``ip`` must be the VM ``vmid`` names before anything stops it: a MAC of the VM's
+``qm config`` network devices must be one of the guest's adapters (``check_guest_is_vm``).
 
 Every refusal leaves Windows Update held (the repair run held it, and only this use case's last
 step lifts it); the ``error`` step says so with ``wu_held: true``.
@@ -37,7 +43,8 @@ import ntpath
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from pve_winrepair.application.guest_state import read_run_state
+from pve_winrepair.application.guest_identity import GuestMismatchError, check_guest_is_vm
+from pve_winrepair.application.guest_state import read_guest_build, read_run_state
 from pve_winrepair.application.vm import VmStatusTimeoutError, wait_status
 from pve_winrepair.domain.envelope import (
     PROBE_TIMEOUT,
@@ -53,7 +60,7 @@ if TYPE_CHECKING:
 
     from pve_winrepair.application.ports import GuestPort, NodePort, ReceiptStore
     from pve_winrepair.domain.envelope import Fields, RunState
-    from pve_winrepair.domain.receipt import RepairReceipt
+    from pve_winrepair.domain.receipt import GuestBuild, RepairReceipt
 
 __all__ = [
     "ApplyError",
@@ -158,18 +165,16 @@ def remove_profile_copy(staged: GuestPort, rep: Report) -> None:
     rep.add("remove_profile_copy", ok=left is None, **({} if left is None else {"error": left}))
 
 
-def read_build(guest: GuestPort) -> tuple[str, int] | None:
-    """CurrentBuild and UBR, or None if the guest could not be read.
+def read_build(guest: GuestPort) -> GuestBuild | None:
+    """CurrentBuild, UBR and InstallDate (:func:`read_guest_build`), or None if the guest could not be read.
 
     None means CANNOT READ, which is not the same as a wrong build - collapsing the two makes
-    an unreachable guest look like a clean negative. The guest reports UBR as a decimal
-    integer, so there is no hex to parse here.
+    an unreachable guest look like a clean negative.
     """
     try:
-        build = guest.probe("build", timeout=PROBE_TIMEOUT)
+        return read_guest_build(guest, timeout=PROBE_TIMEOUT)
     except READ_FAILURES:
         return None
-    return build.text("current_build"), build.integer("ubr")
 
 
 def wait_ssh(
@@ -343,22 +348,48 @@ def read_receipt(receipts: ReceiptStore, vmid: int, rep: Report) -> RepairReceip
     return receipt
 
 
-def _verify_build(after: tuple[str, int], receipt: RepairReceipt, rep: Report) -> None:
-    """Refuse a build other than the one the receipt recorded (verdict REVERTED_OR_UNCHANGED)."""
-    if after != (str(receipt.image_build), receipt.image_spbuild):
+def _verify_build(after: GuestBuild, receipt: RepairReceipt, rep: Report) -> None:
+    """Refuse a build other than the one the receipt recorded, or same-build media that left no trace.
+
+    Both are verdict REVERTED_OR_UNCHANGED. Media that carried the build the guest already ran
+    (:meth:`RepairReceipt.same_build`) end on that build whether the upgrade applied or rolled back,
+    so there InstallDate, which an in-place upgrade writes anew, must differ from the one the repair
+    recorded.
+    """
+    if (after.build, after.ubr) != (receipt.image_build, receipt.image_spbuild):
         # A revert carrying a successful down-level means the APPLY was cut off.
         rep.add(
             "verify_build",
             ok=False,
-            got=f"{after[0]}.{after[1]}",
+            got=after.text,
             want=receipt.expected_build(),
             note="did not reach the target - check Panther for Setup360Result before re-diagnosing the upgrade",
         )
+        raise ApplyError(f"build is {after.text}, wanted {receipt.expected_build()}", verdict="REVERTED_OR_UNCHANGED")
+    if not receipt.same_build():
+        rep.add("verify_build", ok=True, build=after.text)
+        return
+    if after.install_date == receipt.install_date_before:
+        rep.add(
+            "verify_build",
+            ok=False,
+            got=after.text,
+            install_date=after.install_date,
+            note="same-build media and an unchanged InstallDate: the upgrade did not apply, or it rolled back - "
+            "check Panther for Setup360Result before re-diagnosing the upgrade",
+        )
         raise ApplyError(
-            f"build is {after[0]}.{after[1]}, wanted {receipt.expected_build()}",
+            f"build is {after.text}, the build the guest ran before the repair, and its InstallDate "
+            f"{after.install_date} did not change across the apply reboot - the upgrade did not apply or rolled back",
             verdict="REVERTED_OR_UNCHANGED",
         )
-    rep.add("verify_build", ok=True, build=f"{after[0]}.{after[1]}")
+    rep.add(
+        "verify_build",
+        ok=True,
+        build=after.text,
+        install_date_before=receipt.install_date_before,
+        install_date=after.install_date,
+    )
 
 
 def apply_sequence(request: ApplyRequest, node: NodePort, rep: Report, *, receipt: RepairReceipt) -> str:
@@ -368,12 +399,14 @@ def apply_sequence(request: ApplyRequest, node: NodePort, rep: Report, *, receip
     """
     guest = node.guest(request.ip)
     push_tool(guest, rep)
+    # Before the apply reboot stops the VM: the guest at --ip must be the VM --vmid names.
+    check_guest_is_vm(node, guest, request.vmid, rep)
     before = read_build(guest)
     if before is None:
         raise ApplyError(
             "cannot read the build from the guest - it is unreachable, which is not the same as a wrong build"
         )
-    rep.add("build_before", ok=True, build=f"{before[0]}.{before[1]}")
+    rep.add("build_before", ok=True, build=before.text)
 
     _reboot_into_newos(node, request, guest, rep)
 
@@ -391,7 +424,7 @@ def _verify_and_restore(staged: GuestPort, receipt: RepairReceipt, rep: Report) 
     after = read_build(staged)
     if after is None:
         raise ApplyError("guest answered ssh but its build could not be read")
-    rep.add("build_after", ok=True, build=f"{after[0]}.{after[1]}")
+    rep.add("build_after", ok=True, build=after.text)
     _verify_build(after, receipt, rep)
 
     # Lift the WU hold LAST: only a verified build is worth patching again.
@@ -403,9 +436,10 @@ def run_apply(
 ) -> RunResult:
     """Apply and verify, and map how it ended to an exit and a verdict.
 
-    VERIFIED is OK. An :class:`ApplyError` is REFUSED with the error's own verdict, a VM that never
-    reached the status the reboot waits for (:class:`VmStatusTimeoutError`) REFUSED with verdict
-    ``ERROR``; anything else (a driver/tool mismatch) is INTERNAL.
+    VERIFIED is OK. An :class:`ApplyError` is REFUSED with the error's own verdict; a VM that never
+    reached the status the reboot waits for (:class:`VmStatusTimeoutError`) or a guest at ``ip``
+    that is not the VM (:class:`GuestMismatchError`) is REFUSED with verdict ``ERROR``; anything else
+    (a driver/tool mismatch) is INTERNAL.
 
     Args:
         request: The guest and how long its apply phase may take.
@@ -426,7 +460,7 @@ def run_apply(
     except ApplyError as exc:
         rep.failure("error", str(exc), exc)
         return RunResult(RunExit.REFUSED, exc.verdict, tuple(rep.steps))
-    except VmStatusTimeoutError as exc:
+    except (VmStatusTimeoutError, GuestMismatchError) as exc:
         rep.failure("error", str(exc), exc)
         return RunResult(RunExit.REFUSED, "ERROR", tuple(rep.steps))
     except Exception as exc:  # anything unexpected (a driver/tool mismatch) is an internal error

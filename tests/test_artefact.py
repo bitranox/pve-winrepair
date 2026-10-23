@@ -64,7 +64,7 @@ def test_the_committed_tool_is_a_fresh_pack_of_the_guest_sources(tmp_path: Path)
 
 
 @pytest.mark.os_agnostic
-def test_the_payload_is_the_shim_the_empty_init_and_the_eight_modules() -> None:
+def test_the_payload_is_the_shim_and_every_guest_module_with_an_empty_init() -> None:
     # A member's bytes are compared in a hidden helper: a failing == would print the stale member.
     names, empty_init, differing = _payload_against_sources()
     expected = ["__pwshpy_pack_main__.py", *(f"pve_winrepair_guest/{m}.py" for m in sorted(GUEST_MODULES))]

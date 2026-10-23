@@ -15,12 +15,18 @@ Every in-guest step runs the packed guest tool through the :class:`GuestPort` an
 fields of its JSON envelope.
 
 Once prepare has measured the staged image, its build is recorded in the VM's receipt
-(:class:`ReceiptStore`) before setup is launched; apply verifies against it. The previous receipt
-is removed once the last live-run guard passed, so a run that stops before prepare leaves none.
+(:class:`ReceiptStore`) before setup is launched, together with the build and InstallDate the guest
+runs at that moment (``build_before``); apply verifies against it. The previous receipt is removed
+once the last live-run guard passed, so a run that stops before prepare leaves none.
 
-Once this run has held Windows Update, a refusal, a crash or a poll ending DONE-FAIL, WORKER_GONE
-or TIMEOUT leaves the hold in place (only the apply step lifts it, after a verified build); the
-last step then says so with ``wu_held: true``.
+With ``ip`` (no agent) the guest at that address must be the VM: a MAC of its ``qm config`` network
+devices must be one of the guest's adapters (:func:`check_guest_is_vm`). On a running VM that is
+checked before anything acts on the VM, and on every path again after the agentless boot, before
+anything is staged; a stopped VM cannot be asked before it boots.
+
+Once this run has held Windows Update, a refusal, a crash, a stage-only run (verdict STAGED) or a
+poll ending DONE-FAIL, WORKER_GONE or TIMEOUT leaves the hold in place (only the apply step lifts it,
+after a verified build); the last step then says so with ``wu_held: true``.
 """
 
 from __future__ import annotations
@@ -36,7 +42,8 @@ from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
-from pve_winrepair.application.guest_state import read_run_state
+from pve_winrepair.application.guest_identity import GuestMismatchError, check_guest_is_vm
+from pve_winrepair.application.guest_state import read_guest_build, read_run_state
 from pve_winrepair.application.vm import VmStatusTimeoutError, vm_status, wait_status
 from pve_winrepair.domain.addresses import AmbiguousAddressError, lan_address
 from pve_winrepair.domain.envelope import (
@@ -48,7 +55,7 @@ from pve_winrepair.domain.envelope import (
     GuestProtocolError,
     state_marker,
 )
-from pve_winrepair.domain.receipt import ReceiptError, RepairReceipt
+from pve_winrepair.domain.receipt import GuestBuild, ReceiptError, RepairReceipt
 from pve_winrepair.domain.report import Report, RunExit, RunResult, Step
 
 if TYPE_CHECKING:
@@ -584,6 +591,23 @@ def prepare(guest: GuestPort, rep: Report, root: str) -> tuple[int, int]:
     return image_build, image_spbuild
 
 
+def build_before(guest: GuestPort, rep: Report) -> GuestBuild:
+    """The build and InstallDate the guest runs before the upgrade, for the receipt.
+
+    Apply needs both when the media carry the build the guest already runs: a rolled-back upgrade
+    ends on that build, and only a changed InstallDate tells it from one that applied. A guest that
+    cannot be read is refused before setup is launched, since no receipt could be written.
+    """
+    try:
+        before = read_guest_build(guest, timeout=PROBE_TIMEOUT)
+    except READ_FAILURES as exc:
+        raise RepairError(
+            f"cannot read the guest's build and InstallDate for the receipt: {exc} - not launching setup"
+        ) from exc
+    rep.add("build_before", ok=True, build=before.text, install_date=before.install_date)
+    return before
+
+
 def forget_receipt(receipts: ReceiptStore, vmid: int) -> None:
     """Remove the VM's previous receipt: from here on it no longer describes what is staged.
 
@@ -751,6 +775,9 @@ def _clear_live_run(node: NodePort, request: RepairRequest, rep: Report, network
     Pushing first is safe: a push never writes a tool file that exists and rewrites no DACL of an
     already locked ``C:\winrepair`` (see the ssh adapter).
 
+    With ``ip`` the guest at that address must also be the VM (:func:`check_guest_is_vm`), checked
+    after the push (the check runs the tool) and before the guard.
+
     Its one boundary: it runs only on a RUNNING VM. On a stopped one :func:`ensure_vtpm` and, with
     ``ip``, the offline snapshot plus ``qm start`` come before any guard - inherent, since a
     stopped guest cannot be asked; the guard then runs again before staging and launch.
@@ -761,6 +788,9 @@ def _clear_live_run(node: NodePort, request: RepairRequest, rep: Report, network
     else:
         guest = node.guest(ensure_running(node, request.vmid, rep, network))
     push_tool(guest, rep)
+    if request.ip:
+        # Before anything acts on the VM: the shutdown for the offline snapshot is next.
+        check_guest_is_vm(node, guest, request.vmid, rep)
     refuse_live_run(guest, rep)
     return guest
 
@@ -839,6 +869,10 @@ def repair_sequence(
     # Pushed again after the vTPM reboot and the snapshot, so the steps below never meet a
     # stale copy; the live-run check guards the restaging as well as the launch.
     push_tool(target, rep)
+    if request.ip:
+        # Again after the boot: a VM that was stopped could not be asked before it, and the address
+        # may now answer for another guest.
+        check_guest_is_vm(node, target, request.vmid, rep)
     refuse_live_run(target, rep)
     forget_receipt(receipts, request.vmid)
     stage_root = pick_stage_root(target, rep, request.stage_root, repair=repair)
@@ -848,11 +882,23 @@ def repair_sequence(
     # the earlier pass survived it.
     quiesce_windows_update(target, rep)
     if request.stage_only:
+        rep.add(
+            "staged",
+            ok=True,
+            root=stage_root,
+            note="setup not launched (--stage-only) and no receipt written, so apply cannot follow this run; "
+            "run repair without --stage-only to gate the image and launch setup",
+        )
         return "STAGED"
     image_build, image_spbuild = prepare(target, rep, stage_root)
-    written_at = datetime.fromtimestamp(node.clock(), tz=timezone.utc)
+    before = build_before(target, rep)
     receipt = RepairReceipt(
-        vmid=request.vmid, image_build=image_build, image_spbuild=image_spbuild, written_at=written_at
+        vmid=request.vmid,
+        image_build=image_build,
+        image_spbuild=image_spbuild,
+        build_before=(before.build, before.ubr),
+        install_date_before=before.install_date,
+        written_at=datetime.fromtimestamp(node.clock(), tz=timezone.utc),
     )
     record_receipt(receipts, receipt, rep)
     launch(target, rep, stage_root)
@@ -870,11 +916,13 @@ def run_repair(
 ) -> RunResult:
     """Run the repair and map how it ended to an exit and a verdict.
 
-    ``STATE=DONE-OK`` and ``STAGED`` are OK. Any other verdict the run returns (the poll's
-    ``STATE=DONE-FAIL``, ``WORKER_GONE``, ``TIMEOUT``: answers, not exceptions) is REFUSED with
-    that verdict, its last step flagged when Windows Update is still held. A :class:`RepairError`
-    or a VM that never reached the status a stop or start waits for (:class:`VmStatusTimeoutError`)
-    is REFUSED with verdict ``ERROR``; anything else (a driver/tool mismatch) is INTERNAL.
+    ``STATE=DONE-OK`` and ``STAGED`` are OK. ``STAGED`` leaves Windows Update held with nothing
+    to apply, so its last step is flagged with the hold as well. Any other verdict the run returns
+    (the poll's ``STATE=DONE-FAIL``, ``WORKER_GONE``, ``TIMEOUT``: answers, not exceptions) is
+    REFUSED with that verdict, its last step flagged when Windows Update is still held. A :class:`RepairError`,
+    a VM that never reached the status a stop or start waits for (:class:`VmStatusTimeoutError`) or
+    a guest at ``ip`` that is not the VM (:class:`GuestMismatchError`) is REFUSED with verdict
+    ``ERROR``; anything else (a driver/tool mismatch) is INTERNAL.
 
     Args:
         request: The guest and the operator's choices for this run.
@@ -890,13 +938,15 @@ def run_repair(
     rep = Report(vmid=request.vmid, on_step=on_step)
     try:
         verdict = repair_sequence(request, rep, node, repair=repair, guest=guest, receipts=receipts)
-    except (RepairError, VmStatusTimeoutError) as exc:
+    except (RepairError, VmStatusTimeoutError, GuestMismatchError) as exc:
         rep.failure("error", str(exc), exc)
         return RunResult(RunExit.REFUSED, "ERROR", tuple(rep.steps))
     except Exception as exc:  # anything unexpected (a driver/tool mismatch) is an internal error
         rep.failure("internal", repr(exc), exc)
         return RunResult(RunExit.INTERNAL, "INTERNAL", tuple(rep.steps))
-    if verdict in ("STATE=DONE-OK", "STAGED"):
+    if verdict == "STATE=DONE-OK":
         return RunResult(RunExit.OK, verdict, tuple(rep.steps))
+    # STAGED, like a failed poll, leaves the hold for nobody to lift: only apply lifts it, and a
+    # stage-only run writes no receipt for apply to follow.
     rep.ended_held()
-    return RunResult(RunExit.REFUSED, verdict, tuple(rep.steps))
+    return RunResult(RunExit.OK if verdict == "STAGED" else RunExit.REFUSED, verdict, tuple(rep.steps))

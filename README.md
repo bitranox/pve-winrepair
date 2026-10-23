@@ -22,7 +22,13 @@ keeps the applications, settings and data.
 `pve-winrepair` runs that upgrade from the Proxmox node over ssh, without anyone logging in to the
 guest. It takes two commands. `pve-winrepair repair --vmid N` prepares and starts the upgrade:
 
-1. It refuses a guest on which an upgrade run is still live.
+1. It refuses a guest on which an upgrade run is still live. With `--ip`, it first refuses a guest
+   that is not the VM: one of the MACs of the VM's `netN` devices in `qm config` must be among the
+   guest's network adapters (the guest tool's `nic-macs`). On a running VM that is checked before
+   anything acts on the VM. A stopped VM cannot be asked before it boots, so there the order is:
+   vTPM added if missing, offline snapshot and start, all on the VM `--vmid` names, then the MAC
+   check. On every `--ip` run the check runs again after the boot, before anything is staged or
+   launched at that address.
 2. It holds Windows Update (the service start types set to Disabled, then read back), so no further
    update lands in the broken store. On a running guest reached through the QEMU agent this happens
    first, and `repair` then waits up to 20 minutes for running servicing to finish. A guest reached
@@ -35,11 +41,14 @@ guest. It takes two commands. `pve-winrepair repair --vmid N` prepares and start
 5. It creates the staging directory `<drive>:\upgrade` on the first fixed drive other than `C:`, in
    letter order, with `[repair] stage_free_gb` free (or on the drive `--stage-root` names). With no
    such drive it uses `C:\upgrade`, but only when `C:` has room for both the media and the upgrade.
-   The directory is created already locked to SYSTEM and Administrators, and the installation media
-   are then copied from the node into it.
+   Whichever drive it stages on, `C:` always needs `[repair] system_free_gb` free for the upgrade
+   itself. The directory is created already locked to SYSTEM and Administrators, and the installation
+   media are then copied from the node into it. A staging directory that exists already and is
+   exactly locked is reused, and the copy goes over what is in it: files of other media stay. Remove
+   it (`rd /s /q X:\upgrade`, as an administrator) before staging different media.
 6. It gates on the WIM: `sources\install.wim` must be readable and its image 1 must not be older than
-   the build the guest runs (the build number first, then the servicing build). The image's build
-   goes into a receipt on the node.
+   the build the guest runs (the build number first, then the servicing build). The image's build,
+   with the build and the InstallDate the guest runs at that moment, goes into a receipt on the node.
 7. It launches setup.exe from a SYSTEM scheduled task (ssh kills a process tree that outlives its
    connection, and setup runs for hours) and polls the run's own state log until it reports
    `STATE=DONE-OK` or `STATE=DONE-FAIL`.
@@ -47,9 +56,13 @@ guest. It takes two commands. `pve-winrepair repair --vmid N` prepares and start
 setup.exe runs with `/noreboot`, so the guest keeps running the old OS with the new one staged.
 `pve-winrepair apply --vmid N --ip IP` finishes the job:
 
-1. It refuses unless the upgrade run finished OK and the staged new OS is still there.
+1. It refuses unless the guest at `--ip` is the VM (a MAC of its `qm config`, as for `repair --ip`),
+   the upgrade run finished OK and the staged new OS is still there.
 2. It shuts the guest down cleanly and starts it again, which boots into the new OS.
-3. It waits for ssh, then checks the guest's build against the receipt the repair wrote.
+3. It waits for ssh, then checks the guest's build against the receipt the repair wrote. When the
+   media carried the very build the guest ran before, a rolled-back upgrade ends on that same build,
+   so the guest's InstallDate, which an in-place upgrade writes anew, must also differ from the one
+   in the receipt.
 4. It releases the Windows Update hold, and only once the build matches.
 
 ## Requirements
@@ -68,8 +81,10 @@ On the Windows guest (Windows 10 or 11):
   default shell (the Windows default).
 - The QEMU guest agent. Without it, pass the guest's address with `--ip`; the snapshot is then taken
   with the guest powered off.
-- Internet access the first time the guest tool runs as a given user: it installs `uv` and a Python
-  for that user when the guest has none.
+- Internet access the first time the guest tool runs as a given user, SYSTEM included: it installs
+  `uv` and a Python for that user when the guest has none, and resolves its own pinned dependencies
+  (`pwshpy==1.5.0`, `pywin32==312`) from PyPI at that moment. See [SECURITY.md](SECURITY.md) for
+  what that trusts.
 - Free space: by default 15 GiB on the staging drive for the media and 25 GiB on `C:` (`[repair]
   stage_free_gb` and `system_free_gb`).
 
@@ -162,15 +177,16 @@ SECTION.KEY=VALUE` (repeatable), `--env-file PATH`, `--traceback` / `--no-traceb
 |---------------------|--------------------------|-----------------------------------------------------------------------------------------------------|
 | `--vmid N`          | required                 | The guest's VMID on this node                                                                       |
 | `--snapshot-name S` | `[repair] snapshot_name` | The snapshot to take; an existing snapshot of that name is reused                                   |
-| `--hours H`         | `6.0`                    | How long to poll for the verdict                                                                    |
+| `--hours H`         | `6.0`                    | How long to poll for the verdict; a finite number above 0                                           |
 | `--stage-only`      | off                      | Stage the media and hold Windows Update, but neither gate the WIM nor launch setup (verdict STAGED) |
-| `--ip IP`           | from the agent           | The guest's address, for a guest without the QEMU agent; implies the powered-off snapshot           |
+| `--ip IP`           | from the agent           | The guest's IPv4 address, for a guest without the QEMU agent; implies the powered-off snapshot      |
 | `--stage-root X:`   | measured                 | The drive to stage on; by default a non-system fixed drive with room, else `C:`                     |
-| `--tpm-storage S`   | the guest disk's storage | The PVE storage for a new vTPM volume                                                               |
+| `--tpm-storage S`   | the guest disk's storage | The PVE storage ID for a new vTPM volume                                                            |
 | `--json`            | off                      | Print a JSON envelope on stdout                                                                     |
 
 `apply` takes `--vmid N` and `--ip IP` (both required), `--apply-minutes M` (default `90.0`: how long
-the apply phase may take before it counts as overrun) and `--json`.
+the apply phase may take before it counts as overrun; a finite number above 0) and `--json`. A value
+these options refuse is a usage error (exit 2) before any call.
 
 Both commands print each step on stderr as it happens. stdout carries only the result: one line
 `vm <vmid>: <verdict>`, or with `--json` an envelope like this one:
@@ -293,12 +309,18 @@ After a finished repair, remove `C:\winrepair`, `C:\upgrade-state.log` and the s
 - Every step has `step` and `ok`; the last one says how the run ended. When the guest tool crashed,
   the error step carries `guest_stderr`, the last lines of its traceback.
 - `wu_held: true` on the last step means this run left Windows Update held: after a refusal, a crash,
-  or a poll ending STATE=DONE-FAIL, WORKER_GONE (setup's process went away and no verdict appeared)
-  or TIMEOUT. [Safety and recovery](#safety-and-recovery) shows how to release it.
+  a poll ending STATE=DONE-FAIL, WORKER_GONE (setup's process went away and no verdict appeared) or
+  TIMEOUT, or a `--stage-only` run (verdict STAGED, exit 0: its last step `staged` says so, since it
+  writes no receipt and `apply` cannot follow it). [Safety and recovery](#safety-and-recovery) shows
+  how to release it.
+- A `guest_identity` step (runs with `--ip`, and `apply`) names the MACs the guest at that address
+  shares with the VM's `qm config`; when it shares none, the run is refused before the VM is touched
+  and the step lists both sides.
 - `apply` refuses the reboot with RUN_LIVE (setup is still running), RUN_UNFINISHED (the run
   started, setup is gone and no verdict was written: it was cut off, check the guest), RUN_FAILED
   (`STATE=DONE-FAIL`) or NO_RUN (no state log). REVERTED_OR_UNCHANGED means the guest came back on
-  a build other than the receipt's: setup rolled back, or the apply was cut off.
+  a build other than the receipt's, or, for media of the build it already ran, with an unchanged
+  InstallDate: setup rolled back, or the apply was cut off. Windows Update stays held.
 - The `restore_wu` step passes on the verified start types alone. Its `search` field reports a
   bounded Windows Update search and is informational. TIMEOUT means the search was abandoned after
   180 s, which is normal on the first boot after the apply while servicing runs; run `restore-wu`
@@ -310,8 +332,12 @@ After a finished repair, remove `C:\winrepair`, `C:\upgrade-state.log` and the s
 
 `repair` records the build of the staged image in `<state_dir>/receipt-<vmid>.json`
 (`/var/lib/pve-winrepair/receipt-100.json` for VM 100 with the default `state_dir`), after the WIM
-gate and before it launches setup. `apply` reads it before it touches the guest, refuses to run
-without one, and accepts only that build. A repair removes the VM's previous receipt once it is sure
+gate and before it launches setup, together with the build and InstallDate the guest ran then
+(`build_before`, `install_date_before`). `apply` reads it before it touches the guest, refuses to
+run without one or with one that lacks a field, and accepts only that build; for same-build media
+it also requires a changed InstallDate. That an in-place upgrade always rewrites InstallDate is
+not yet measured on a real upgrade: should it not, every same-build repair ends
+REVERTED_OR_UNCHANGED and its Windows Update hold has to be released by hand. A repair removes the VM's previous receipt once it is sure
 no run is live, so a run that stops before the WIM gate, or a `--stage-only` run, leaves none. The
 file is replaced atomically and only its owner can read it (0600, in a 0700 directory when
 `pve-winrepair` creates the directory).
@@ -331,7 +357,7 @@ admin:
 |-----------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|-------------------------------|
 | `detect-lp-defect`                                              | is this guest affected by the orphaned language pack: AFFECTED, CLEAN or UNKNOWN                                                                                                  | UNKNOWN                       |
 | `drives`                                                        | free bytes per fixed drive (an unparsable volume is skipped)                                                                                                                      | never (2 when no drive reads) |
-| `verify-runners [--task NAME]... [--expected N]`                | did the runner containers and their boot tasks come back after a reboot: OK, SHORT or UNKNOWN                                                                                     | SHORT or UNKNOWN              |
+| `verify-runners [--task NAME]... [--expected N]`                | did the runner containers and their boot tasks come back after a reboot: OK, SHORT or UNKNOWN; bare (no `--task`, `--expected 0`) it checks no task and accepts any count         | SHORT or UNKNOWN              |
 | `build`                                                         | CurrentBuild, UBR and InstallDate (epoch seconds; an in-place upgrade writes it anew)                                                                                             | never                         |
 | `staged-os`                                                     | is the staged NewOS still there: REARMABLE (apply) or RERUN (a rollback deleted it)                                                                                               | never (2 when it cannot look) |
 | `servicing-active`                                              | are TiWorker / TrustedInstaller running                                                                                                                                           | never                         |
@@ -363,8 +389,8 @@ installed its next cumulative update.
 ### Windows Update stays held until the build is verified
 
 Only a successful `apply` releases the hold. A start type left Disabled stops the machine from ever
-patching again, so release the hold by hand when you abandon a repair. Every step that leaves it held
-says how:
+patching again, so release the hold by hand when you abandon a repair, and after a `--stage-only`
+run unless a full `repair` and `apply` follow. Every step that leaves it held says how:
 
 > Windows Update is still held - to lift it if this repair is abandoned, copy the guest tool
 > (`pve-winrepair guest-tool path`) to the ssh user's profile, check that certutil -hashfile

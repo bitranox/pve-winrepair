@@ -43,8 +43,6 @@ system-dependencies-windows-pip = []
 system-dependencies-windows-choco = []
 os = ["ubuntu-latest", "windows-latest", "macos-latest"]
 
-[tool.bmk.pipelines.pack]
-add = [{name = "pack_guest", order = 10, argv = ["uv", "run", "--script", "scripts/pack_guest.py"]}]
 [project.urls]
 Homepage = "https://github.com/bitranox/pve-winrepair"
 Repository = "https://github.com/bitranox/pve-winrepair.git"
@@ -312,4 +310,7 @@ ignores = ["E003"]
 
 [tool.uv]
 exclude-newer = "7 days"
-exclude-newer-package = {lib-cli-exit-tools = false, lib-layered-config = false, lib-log-rich = false, virtualenv = "2026-10-17T16:09:43Z", certifi = "2026-10-20T02:24:17Z",pwshpy = false,lib-registry = false, fake-winreg = false}
+exclude-newer-package = {lib-cli-exit-tools = false, lib-layered-config = false, lib-log-rich = false, virtualenv = "2026-10-17T16:09:43Z", certifi = "2026-10-20T02:24:17Z", pwshpy = false, lib-registry = false, fake-winreg = false}
+
+[tool.bmk.pipelines.pack]
+add = [{name = "pack_guest", order = 10, argv = ["uv", "run", "--script", "scripts/pack_guest.py"]}]

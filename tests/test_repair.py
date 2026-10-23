@@ -18,12 +18,15 @@ from guest_fakes import (
     GONE,
     GUEST_IP,
     IMAGE,
+    INSTALL_DATE,
     LAN_IP,
     MUTATING_QM,
+    NIC_MACS,
     NO_LOG,
     TOOL_DIR,
     TOOL_PATH,
     USER,
+    VM_MAC,
     Answer,
     FakeClock,
     FakePve,
@@ -50,11 +53,11 @@ from guest_fakes import (
 from pve_winrepair.adapters.receipts import FileReceiptStore
 from pve_winrepair.application import repair
 from pve_winrepair.application.repair import RepairError, RepairRequest, run_repair
-from pve_winrepair.domain.envelope import GuestProtocolError
+from pve_winrepair.domain.envelope import WU_HELD_HINT, GuestProtocolError
 from pve_winrepair.domain.receipt import RepairReceipt
 from pve_winrepair.domain.report import Report, RunExit, RunResult, Step
 from pve_winrepair.domain.settings import GuestSettings, RepairSettings
-from pve_winrepair_guest.probes import SetupReport
+from pve_winrepair_guest.probes import NicMacReport, SetupReport
 from pve_winrepair_guest.upgrade import LaunchReport, LockDirsReport, TaskCleanup
 
 if TYPE_CHECKING:
@@ -264,9 +267,9 @@ def test_prepare_pass_reports_the_image_and_the_waiver() -> None:
 
 
 def test_prepare_fail_refuses_with_the_guest_reason() -> None:
-    reply = answer("prepare", prepare_report("FAIL", "image SPBuild 8973 older than running 9711"), ok=False)
+    reply = answer("prepare", prepare_report("FAIL", "image 26200.8973 older than running 26200.9711"), ok=False)
     runner = FakeRunner().on("prepare", reply)
-    with pytest.raises(RepairError, match="guest gate refused: image SPBuild 8973 older than running 9711"):
+    with pytest.raises(RepairError, match=r"guest gate refused: image 26200\.8973 older than running 26200\.9711"):
         repair.prepare(make_guest(runner), Report(vmid=1), "D:\\upgrade")
 
 
@@ -541,6 +544,7 @@ def _live_run_runner(pve: FakePve) -> FakeRunner:
         tool_on_the_guest(FakeRunner())
         .on("qm", pve)
         .on("hostname", Reply(0, "GUEST\r\n"))
+        .on("nic-macs", NIC_MACS)
         .on("setup-alive", ALIVE)
         .on("state", answer("state", state_log("=== start", "launching: setup.exe")))
     )
@@ -572,6 +576,7 @@ def test_an_agentless_run_clears_the_guard_before_its_offline_snapshot(tmp_path:
         tool_on_the_guest(FakeRunner())
         .on("qm", pve)
         .on("hostname", Reply(0, "GUEST\r\n"))
+        .on("nic-macs", NIC_MACS)
         .on("setup-alive", GONE)
         .on("state", answer("state", state_log(present=False)))
         .on("drives", answer("drives", drive_report(C=60.0)))
@@ -616,6 +621,22 @@ def test_guest_ip_without_a_subnet_refuses_several_candidates_naming_them_and_th
         f"the guest agent on 1 reports several candidate LAN addresses (172.17.0.1, {LAN_IP}): "
         "set [guest] subnet to the LAN the node reaches"
     )
+
+
+@pytest.mark.parametrize(
+    "stdout",
+    ['{"ip-addresses": []}', '[{"ip-addresses": "192.0.2.50"}]', '[{"ip-addresses": [{"ip-address": 7}]}]'],
+    ids=["not-a-list", "addresses-not-a-list", "address-not-text"],
+)
+def test_an_agent_answer_that_is_not_the_interface_list_is_an_internal_error(tmp_path: Path, stdout: str) -> None:
+    pve = FakePve()
+
+    def qm(cmd: list[str]) -> Reply:
+        return Reply(0, stdout) if cmd[1] == "guest" else pve(cmd)
+
+    result, steps = _run(agent_runner(pve, qm=qm), _media(tmp_path))
+    assert (result.exit, result.verdict, steps[-1]["step"]) == (RunExit.INTERNAL, "INTERNAL", "internal")
+    assert "validation error for tuple[_AgentInterface, ...]" in str(steps[-1]["message"])
 
 
 def test_guest_ip_with_no_address_in_the_subnet_retries_then_refuses() -> None:
@@ -667,7 +688,7 @@ def test_main_runs_the_whole_agent_path_to_done_ok(tmp_path: Path) -> None:
     assert [s["step"] for s in steps] == [
         "running", "push_tool", "no_live_run", "quiesce_wu", "servicing_idle", "vtpm", "running",
         "snapshot", "push_tool", "no_live_run", "stage_root", "lock_dirs", "stage_media", "quiesce_wu",
-        "prepare", "receipt", "launch", "poll",
+        "prepare", "build_before", "receipt", "launch", "poll",
     ]  # fmt: skip
 
 
@@ -698,7 +719,7 @@ def test_a_missing_media_dir_is_refused_naming_it(tmp_path: Path) -> None:
 
 
 def test_main_refusal_after_the_wu_hold_says_wu_is_still_held(tmp_path: Path) -> None:
-    refused = answer("prepare", prepare_report("FAIL", "image SPBuild 8973 older than running 9711"), ok=False)
+    refused = answer("prepare", prepare_report("FAIL", "image 26200.8973 older than running 26200.9711"), ok=False)
     result, steps = _run(agent_runner(FakePve(), prepare=refused), _media(tmp_path))
     error = steps[-1]
     assert (result.exit, result.verdict, error["step"], error["wu_held"]) == (RunExit.REFUSED, "ERROR", "error", True)
@@ -873,7 +894,12 @@ def test_main_lock_dirs_refusal_copies_no_media_and_says_wu_is_held(tmp_path: Pa
 # --- the repair receipt: the image build prepare measured, for apply to verify ---------------
 
 OLD_RECEIPT = RepairReceipt(
-    vmid=1, image_build=26200, image_spbuild=7462, written_at=datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
+    vmid=1,
+    image_build=26200,
+    image_spbuild=7462,
+    build_before=(26100, 1),
+    install_date_before=1,
+    written_at=datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc),
 )
 
 
@@ -918,10 +944,36 @@ def test_repair_writes_the_receipt_after_prepare_and_before_launch(tmp_path: Pat
     assert labels.index("guest prepare") < store.calls_at_write[1] <= labels.index("guest launch")
     written_at = datetime.fromtimestamp(store.time_at_write[1], tz=timezone.utc)
     assert store.read(1) == RepairReceipt(
-        vmid=1, image_build=IMAGE.build, image_spbuild=IMAGE.spbuild, written_at=written_at
+        vmid=1,
+        image_build=IMAGE.build,
+        image_spbuild=IMAGE.spbuild,
+        build_before=(26200, 7462),
+        install_date_before=INSTALL_DATE,
+        written_at=written_at,
     )
+    assert labels.index("guest prepare") < labels.index("guest build") < store.calls_at_write[1]
     step = next(s for s in result.steps if s["step"] == "receipt")
     assert step == {"step": "receipt", "ok": True, "path": str(store.path(1)), "expected_build": "26200.8973"}
+
+
+def test_a_stage_only_repair_ends_held_on_a_staged_step(tmp_path: Path) -> None:
+    recorded: list[Step] = []
+    result = run_repair(
+        RepairRequest(vmid=1, snapshot_name="pre_kb_test", stage_only=True),
+        make_node(agent_runner(FakePve()), FakeClock()),
+        repair=_repair_settings(_media(tmp_path)),
+        guest=GUEST,
+        receipts=FileReceiptStore(tmp_path / "state"),
+        on_step=recorded.append,
+    )
+    assert (result.exit, result.verdict) == (RunExit.OK, "STAGED")
+    last = result.steps[-1]
+    assert (last["step"], last["ok"], last["wu_held"], last["root"]) == ("staged", True, True, "D:\\upgrade")
+    assert str(last["note"]).endswith(f" - {WU_HELD_HINT}")
+    # Emitted once when recorded and once more with the hold flagged, as a failed poll is.
+    assert [s["step"] for s in recorded[-2:]] == ["staged", "staged"]
+    assert "wu_held" not in recorded[-2]
+    assert recorded[-1] == last
 
 
 def test_a_stage_only_repair_leaves_no_receipt(tmp_path: Path) -> None:
@@ -975,3 +1027,133 @@ def test_a_receipt_that_cannot_be_written_refuses_the_repair_before_launch(tmp_p
     labels = call_labels(runner.calls)
     assert "guest prepare" in labels
     assert "guest launch" not in labels
+
+
+def test_a_build_that_cannot_be_read_before_launch_refuses_without_a_receipt(tmp_path: Path) -> None:
+    store = FileReceiptStore(tmp_path / "state")
+    runner = agent_runner(FakePve(), build=Reply(255, "", "Connection reset"))
+    result, steps = _run(runner, _media(tmp_path), receipts=store)
+    assert (result.exit, result.verdict) == (RunExit.REFUSED, "ERROR")
+    assert str(steps[-1]["message"]).startswith("cannot read the guest's build and InstallDate for the receipt")
+    assert steps[-1]["wu_held"] is True
+    assert "guest launch" not in call_labels(runner.calls)
+    assert store.read(1) is None
+
+
+def test_the_build_before_step_reports_the_build_and_install_date(tmp_path: Path) -> None:
+    _result, steps = _run(agent_runner(FakePve()), _media(tmp_path))
+    step = next(s for s in steps if s["step"] == "build_before")
+    assert step == {"step": "build_before", "ok": True, "build": "26200.7462", "install_date": INSTALL_DATE}
+
+
+# --- --ip: the guest at the address must be the VM --vmid names (a MAC of its config) -----------
+
+OTHER_MACS = answer("nic-macs", NicMacReport(macs=("BC:24:11:FF:FF:01", "BC:24:11:FF:FF:02")))
+UP = Reply(0, "GUEST\r\n")
+
+
+def _agentless(pve: FakePve, **overrides: Answer) -> FakeRunner:
+    """A guest without an agent, reached at :data:`GUEST_IP`, that answers ssh."""
+    return agent_runner(pve, hostname=UP, **overrides)
+
+
+def test_an_agentless_repair_of_a_guest_that_is_not_the_vm_refuses_before_any_qm_action(tmp_path: Path) -> None:
+    pve = FakePve()
+    runner = _agentless(pve, **{"nic-macs": OTHER_MACS})
+    result, steps = _run(runner, _media(tmp_path), ip=GUEST_IP, stage_only=True)
+    assert (result.exit, result.verdict) == (RunExit.REFUSED, "ERROR")
+    labels = call_labels(runner.calls)
+    assert [label for label in labels if label.split()[-1] in MUTATING_QM] == []
+    assert pve.status == "running"
+    check = next(s for s in steps if s["step"] == "guest_identity")
+    assert check == {
+        "step": "guest_identity",
+        "ok": False,
+        "ip": GUEST_IP,
+        "vm_macs": [VM_MAC],
+        "guest_macs": ["BC:24:11:FF:FF:01", "BC:24:11:FF:FF:02"],
+    }
+    assert steps[-1]["message"] == (
+        f"the guest at {GUEST_IP} is not VM 1: none of its NIC MACs (BC:24:11:FF:FF:01, BC:24:11:FF:FF:02) "
+        f"is a MAC of VM 1 in qm config ({VM_MAC}) - check --ip"
+    )
+    # Refused before the live-run guard and before WU was held: nothing to restore.
+    assert "wu_held" not in steps[-1]
+    assert "guest setup-alive" not in labels
+
+
+def test_an_agentless_repair_of_the_vm_s_own_guest_proceeds(tmp_path: Path) -> None:
+    runner = _agentless(FakePve())
+    result, steps = _run(runner, _media(tmp_path), ip=GUEST_IP, stage_only=True)
+    assert (result.exit, result.verdict) == (RunExit.OK, "STAGED")
+    labels = call_labels(runner.calls)
+    checks = [i for i, label in enumerate(labels) if label == "guest nic-macs"]
+    # Once before anything acts on the VM, once after its boot before anything is staged.
+    assert len(checks) == 2
+    assert checks[0] < _first_mutation(labels)
+    assert labels.index("qm start") < checks[1] < next(i for i, c in enumerate(runner.calls) if _media_scp(c))
+    identity = [s for s in steps if s["step"] == "guest_identity"]
+    assert identity == [{"step": "guest_identity", "ok": True, "ip": GUEST_IP, "macs": [VM_MAC]}] * 2
+
+
+def test_a_stopped_vm_reached_by_ip_is_checked_after_its_boot_before_anything_is_staged(tmp_path: Path) -> None:
+    runner = _agentless(FakePve(status="stopped"), **{"nic-macs": OTHER_MACS})
+    result, steps = _run(runner, _media(tmp_path), ip=GUEST_IP, stage_only=True)
+    assert (result.exit, result.verdict) == (RunExit.REFUSED, "ERROR")
+    assert str(steps[-1]["message"]).startswith(f"the guest at {GUEST_IP} is not VM 1")
+    labels = call_labels(runner.calls)
+    assert labels.index("qm start") < labels.index("guest nic-macs")
+    assert not any(_media_scp(cmd) for cmd in runner.calls)
+    assert "guest drives" not in labels
+
+
+def test_the_agent_path_never_asks_for_the_guest_s_macs(tmp_path: Path) -> None:
+    runner = agent_runner(FakePve())
+    result, steps = _run(runner, _media(tmp_path))
+    assert result.exit is RunExit.OK
+    assert "guest nic-macs" not in call_labels(runner.calls)
+    assert "guest_identity" not in [s["step"] for s in steps]
+
+
+def test_a_vm_without_a_network_device_cannot_be_bound_to_the_guest_and_is_refused(tmp_path: Path) -> None:
+    pve = FakePve()
+    pve.config = "scsi0: local-zfs:vm-1-disk-0,size=64G\ntpmstate0: local-zfs:vm-1-disk-1,size=4M\n"
+    runner = _agentless(pve)
+    result, steps = _run(runner, _media(tmp_path), ip=GUEST_IP, stage_only=True)
+    assert (result.exit, result.verdict) == (RunExit.REFUSED, "ERROR")
+    assert steps[-1]["message"] == (
+        f"VM 1 has no network device with a MAC in qm config, so the guest at {GUEST_IP} cannot be bound to it"
+    )
+    assert [label for label in call_labels(runner.calls) if label.split()[-1] in MUTATING_QM] == []
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [crashed("nic-macs", RuntimeError("no network adapter with a MAC address")), Reply(255, "", "reset")],
+    ids=["no-mac", "no-answer"],
+)
+def test_a_guest_whose_macs_cannot_be_read_is_refused(tmp_path: Path, reply: Reply) -> None:
+    pve = FakePve()
+    runner = _agentless(pve, **{"nic-macs": reply})
+    result, steps = _run(runner, _media(tmp_path), ip=GUEST_IP, stage_only=True)
+    assert (result.exit, result.verdict) == (RunExit.REFUSED, "ERROR")
+    assert str(steps[-1]["message"]).startswith(f"cannot read the NIC MACs of the guest at {GUEST_IP}: ")
+    assert pve.status == "running"
+
+
+def test_a_qm_config_that_cannot_be_read_is_refused(tmp_path: Path) -> None:
+    pve = FakePve()
+
+    def qm(cmd: list[str]) -> Reply:
+        return Reply(2, "", "no such VM") if cmd[1] == "config" else pve(cmd)
+
+    runner = _agentless(pve, qm=qm)
+    result, steps = _run(runner, _media(tmp_path), ip=GUEST_IP, stage_only=True)
+    assert (result.exit, result.verdict) == (RunExit.REFUSED, "ERROR")
+    assert steps[-1]["message"] == "cannot read qm config 1 to bind the guest at 192.0.2.10 to it: rc=2: no such VM"
+
+
+def test_a_mac_the_guest_reports_that_is_not_a_mac_is_a_protocol_error(tmp_path: Path) -> None:
+    bad = answer("nic-macs", NicMacReport(macs=("not-a-mac",)))
+    result, _steps = _run(_agentless(FakePve(), **{"nic-macs": bad}), _media(tmp_path), ip=GUEST_IP)
+    assert (result.exit, result.verdict) == (RunExit.INTERNAL, "INTERNAL")

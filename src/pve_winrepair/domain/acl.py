@@ -27,6 +27,7 @@ __all__ = [
     "SddlError",
     "SddlReading",
     "parse_sddl",
+    "trusted_writers",
     "write_problems",
 ]
 
@@ -43,6 +44,12 @@ WRITE_RIGHTS: int = 0x500D0156
 # Only the trusted aliases are resolved: every other principal stays as written and is untrusted,
 # so a missing alias can only make the check stricter.
 _ALIASES = {"SY": "S-1-5-18", "BA": "S-1-5-32-544", "CO": "S-1-3-0"}
+
+# The alias SDDL gives the machine's built-in Administrator (relative ID 500, DOMAIN_USER_RID_ADMIN).
+# Get-Acl prints that account's own SID this way, so on its profile the owner and the user's ACE read
+# LA, never the SID the probe reports. It is trusted only for an ssh user whose SID ends in -500.
+_LOCAL_ADMIN_ALIAS = "LA"
+_ADMINISTRATOR_RID = "500"
 
 _RIGHT_CODES = {
     "GA": 0x10000000,
@@ -201,6 +208,25 @@ def parse_sddl(text: str) -> SddlReading:
         raise SddlError("an empty descriptor")
     present = dacl is not None and "NO_ACCESS_CONTROL" not in dacl[0]
     return SddlReading(seen.get("O", ""), present, dacl[1] if dacl is not None else ())
+
+
+def trusted_writers(user_sid: str) -> frozenset[str]:
+    """The principals that may write the ssh user's profile: SYSTEM, Administrators, CREATOR OWNER, the user.
+
+    For the built-in Administrator (a SID whose last sub-authority is 500, the shipped default
+    ``[ssh] user``) the alias ``LA`` is that same account, so it is trusted too; for any other user
+    ``LA`` stays an untrusted principal.
+
+    Example:
+        >>> sorted(trusted_writers("S-1-5-21-1-2-3-500") - TRUSTED_WELL_KNOWN)
+        ['LA', 'S-1-5-21-1-2-3-500']
+        >>> sorted(trusted_writers("S-1-5-21-1-2-3-1001") - TRUSTED_WELL_KNOWN)
+        ['S-1-5-21-1-2-3-1001']
+    """
+    trusted = TRUSTED_WELL_KNOWN | {user_sid}
+    if user_sid.rsplit("-", 1)[-1] == _ADMINISTRATOR_RID:
+        trusted |= {_LOCAL_ADMIN_ALIAS}
+    return trusted
 
 
 def _ace_problem(ace: SddlAce, trusted: frozenset[str]) -> str | None:

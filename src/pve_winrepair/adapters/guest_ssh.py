@@ -47,7 +47,7 @@ from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from pve_winrepair.domain.acl import TRUSTED_WELL_KNOWN, SddlError, parse_sddl, write_problems
+from pve_winrepair.domain.acl import SddlError, parse_sddl, trusted_writers, write_problems
 from pve_winrepair.domain.envelope import (
     POWERSHELL,
     READ_FAILURES,
@@ -104,10 +104,13 @@ REMOTE_TIMEOUT = 60.0
 LOCK_TIMEOUT = 300.0
 # Options fixed for every guest, either side of the two host-key options (ssh_options keeps that
 # order). BatchMode plus publickey: a rejected key fails at once instead of hanging an unattended
-# run on a password prompt.
+# run on a password prompt. IdentitiesOnly: only the -i key is offered, never an agent's or a
+# default one, so the configured key is the one that authenticates and too many offered keys cannot
+# exhaust the server's MaxAuthTries before it.
 _AUTH_OPTS = (
     "-o", "BatchMode=yes",
     "-o", "PreferredAuthentications=publickey",
+    "-o", "IdentitiesOnly=yes",
 )  # fmt: skip
 _TIMEOUT_OPTS = (
     "-o", "ConnectTimeout=20",
@@ -138,8 +141,10 @@ def _encoded_command(script: str) -> str:
     """``script`` as powershell's -EncodedCommand takes it: base64 of UTF-16LE, without ``=`` padding.
 
     Encoded, the script crosses ssh's join and cmd.exe without any quoting. A script whose length
-    is a multiple of 3 encodes to a multiple of 6 bytes and so needs no ``=``: trailing spaces make
-    it one, because cmd.exe treats ``=`` as an argument delimiter.
+    is a multiple of 3 encodes to a multiple of 6 bytes and so needs no ``=``; trailing spaces make
+    it one. The padding is not needed for cmd.exe, which hands an executable's command line to
+    CreateProcess unchanged (``=`` delimits arguments only for its own built-ins); it keeps the
+    argument within ``[A-Za-z0-9+/]``, which no layer between ssh and powershell treats specially.
     """
     padded = script + " " * (-len(script) % 3)
     return base64.b64encode(padded.encode("utf-16-le")).decode("ascii")
@@ -189,7 +194,7 @@ def ssh_options(ssh: SshSettings) -> tuple[str, ...]:
 
     Example:
         >>> from pve_winrepair.domain.settings import SshSettings
-        >>> ssh_options(SshSettings(strict_host_key_checking=False, known_hosts_file="~/.ssh/kh"))[4:8]
+        >>> ssh_options(SshSettings(strict_host_key_checking=False, known_hosts_file="~/.ssh/kh"))[6:10]
         ('-o', 'StrictHostKeyChecking=no', '-o', 'UserKnownHostsFile=~/.ssh/kh')
     """
     checking = "yes" if ssh.strict_host_key_checking else "no"
@@ -346,7 +351,7 @@ def _check_profile(runner: Runner, ip: str, ssh: SshSettings) -> None:
         raise GuestPushError(f"{exc}; nothing was copied") from exc
     reading = _profile_reading(proc.stdout, what)
     try:
-        problems = write_problems(parse_sddl(reading.sddl), trusted=TRUSTED_WELL_KNOWN | {reading.user})
+        problems = write_problems(parse_sddl(reading.sddl), trusted=trusted_writers(reading.user))
     except SddlError as exc:
         raise GuestPushError(
             f"{what}: the descriptor of {reading.path} cannot be read: {exc}; nothing was copied"

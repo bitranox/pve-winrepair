@@ -64,7 +64,8 @@ def test_module_entry_formats_exceptions_via_exit_helpers(
 
     plain_err = strip_ansi(capsys.readouterr().err)
     assert exc.value.code != 0
-    assert "RuntimeError" in plain_err or FAILING_MESSAGE in plain_err
+    assert "RuntimeError" in plain_err
+    assert FAILING_MESSAGE in plain_err
 
 
 @pytest.mark.os_agnostic
@@ -178,4 +179,5 @@ def test_entry_main_returns_nonzero_on_error(
 
     plain_err = strip_ansi(capsys.readouterr().err)
     assert exit_code != 0
-    assert "RuntimeError" in plain_err or FAILING_MESSAGE in plain_err
+    assert "RuntimeError" in plain_err
+    assert FAILING_MESSAGE in plain_err

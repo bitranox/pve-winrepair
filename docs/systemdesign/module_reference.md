@@ -10,21 +10,22 @@ moves or removes a module, a CLI option or a public name.
 ## Related Files
 
 ### Domain Layer
-- `src/pve_winrepair/domain/acl.py`  -  Who may write a directory, read from its SDDL security descriptor (`parse_sddl`, `write_problems`, `TRUSTED_WELL_KNOWN`); the node's check of the ssh user's profile before a copy of the tool goes there
-- `src/pve_winrepair/domain/addresses.py`  -  `lan_address` picks the guest's LAN address out of what its agent reports (the first one in `[guest] subnet`; without a subnet the only candidate, several refused with `AmbiguousAddressError`)
+- `src/pve_winrepair/domain/acl.py`  -  Who may write a directory, read from its SDDL security descriptor (`parse_sddl`, `write_problems`, `trusted_writers`, `TRUSTED_WELL_KNOWN`; the alias `LA` counts as the ssh user only when its SID ends in -500); the node's check of the ssh user's profile before a copy of the tool goes there
+- `src/pve_winrepair/domain/addresses.py`  -  `lan_address` picks the guest's LAN address out of what its agent reports (the first one in `[guest] subnet`; without a subnet the only candidate, several refused with `AmbiguousAddressError`); `vm_macs` reads the MACs of the `netN` lines of `qm config`, `normalise_mac` puts a MAC in `AA:BB:CC:DD:EE:FF` form
 - `src/pve_winrepair/domain/enums.py`  -  Type-safe enums (`OutputFormat`, `DeployTarget`)
 - `src/pve_winrepair/domain/envelope.py`  -  The guest tool's answer contract: `Envelope`, the typed `Fields`, `parse_envelope`, the error types (`GuestNoAnswerError`, `GuestInternalError`, `GuestProtocolError`, `GuestPushError`, `UnsafeArgumentError`), `check_argument`, the state markers and `RunState`, `READ_FAILURES` and `WU_HELD_HINT`; starts no process
 - `src/pve_winrepair/domain/errors.py`  -  Domain exceptions (`ConfigurationError`)
 - `src/pve_winrepair/domain/guest_tool.py`  -  `PackedTool` (the node's packed tool, its content address and sha256) and `Pushed` (what a push left on the guest)
-- `src/pve_winrepair/domain/receipt.py`  -  `RepairReceipt`, the image build a repair's prepare step measured, and `ReceiptError`
+- `src/pve_winrepair/domain/receipt.py`  -  `RepairReceipt`, the image build a repair's prepare step measured with the guest's `build_before` and `install_date_before` (all required; `same_build`), `GuestBuild` (CurrentBuild, UBR, InstallDate), and `ReceiptError`
 - `src/pve_winrepair/domain/report.py`  -  `Report` collects a run's steps and hands each to `on_step`; `RunExit`, `RunResult`, `Step`; flags a run that leaves Windows Update held
 - `src/pve_winrepair/domain/settings.py`  -  Node CLI settings models (`SshSettings`, `GuestSettings`, `RepairSettings`, `NodeSettings`, `Settings`); see Settings below
 
 ### Application Layer
 - `src/pve_winrepair/application/ports.py`  -  Protocol definitions the adapters satisfy: the configuration and logging callables, `LoadSettings`, `GuestPort`, `NodePort`, `ReceiptStore`, `MakeNode`, `MakeReceipts`
-- `src/pve_winrepair/application/guest_state.py`  -  `read_run_state`, the live-run gate both use cases read before they stop, relaunch or restage a guest
-- `src/pve_winrepair/application/repair.py`  -  `run_repair`: live-run check, Windows Update hold, vTPM, snapshot, push, stage root, locked staging, media copy, WIM gate, receipt, launch, poll; `RepairRequest`, `RepairError`
-- `src/pve_winrepair/application/apply.py`  -  `run_apply`: receipt, run gate, staged-OS gate, clean stop and start, build check against the receipt from a verified profile copy, Windows Update release; `ApplyRequest`, `ApplyError`
+- `src/pve_winrepair/application/guest_state.py`  -  `read_run_state`, the live-run gate both use cases read before they stop, relaunch or restage a guest; `read_guest_build`, the guest's build and InstallDate
+- `src/pve_winrepair/application/guest_identity.py`  -  `check_guest_is_vm`: with `--ip`, a MAC of the VM's `qm config` must be among the guest's `nic-macs` (membership, both sides normalised); `GuestMismatchError`
+- `src/pve_winrepair/application/repair.py`  -  `run_repair`: live-run check (with `--ip`: the MAC check first), Windows Update hold, vTPM, snapshot, push, MAC check again with `--ip`, stage root, locked staging, media copy, WIM gate, build before, receipt, launch, poll (a `--stage-only` run ends on a `staged` step flagged `wu_held`); `RepairRequest`, `RepairError`
+- `src/pve_winrepair/application/apply.py`  -  `run_apply`: receipt, MAC check, run gate, staged-OS gate, clean stop and start, build check against the receipt (same-build media: InstallDate must change) from a verified profile copy, Windows Update release; `ApplyRequest`, `ApplyError`
 - `src/pve_winrepair/application/vm.py`  -  `vm_status` and the bounded `wait_status` over `qm status`; `VmStatusTimeoutError`
 
 ### Adapters Layer
@@ -47,6 +48,7 @@ moves or removes a module, a CLI option or a public name.
   - `config_load.py`  -  Configuration load for the CLI; records a load failure, `require_config` refuses with exit 78, `check_logging` checks the logging settings of a configuration reloaded by `config --profile`, refusing them as the root does
   - `root.py`  -  Root command group
   - `main.py`  -  Entry point
+  - `param_types.py`  -  Click parameter types of the run options: `PositiveFiniteFloat` (`--hours`, `--apply-minutes`), `StorageId` (`--tpm-storage`), `Ipv4Address` (`--ip`)
   - `typed_click.py`  -  Strictly typed wrappers for rich_click's `option`, `version_option` and `get_current_context`
   - `commands/__init__.py`  -  Re-exports every command (`cli_repair`, `cli_apply`, `cli_guest_tool`, `cli_config`, ...)
   - `commands/info.py`  -  info command
@@ -112,7 +114,7 @@ Helpers and fixtures:
 
 Node CLI and its layers:
 - `tests/test_acl.py`  -  Which SDDL descriptors let someone else write the ssh user's profile
-- `tests/test_addresses.py`  -  Picking the guest's LAN address out of what its agent reports
+- `tests/test_addresses.py`  -  Picking the guest's LAN address out of what its agent reports, and the VM's MACs out of `qm config`
 - `tests/test_apply.py`  -  The apply use case's gates and its whole run, through the ssh runner seam
 - `tests/test_envelope.py`  -  The envelope contract: the arguments it refuses, how an answer is read, its typed fields
 - `tests/test_guest_ssh.py`  -  The ssh adapter: the argv it builds from `SshSettings`, the profile check, the push and its hashes, the profile copy
@@ -294,11 +296,11 @@ Repair one guest by an in-place repair upgrade (`application/repair.py`).
 |---------------------|-------------------------------------------------------------------------------------------------------|
 | `--vmid N`          | The guest's VMID on this node  -  required, at least 1                                                |
 | `--snapshot-name S` | Snapshot to take (default `[repair] snapshot_name`, validated by its rule)                            |
-| `--hours H`         | Polling deadline in hours (default 6.0)                                                               |
+| `--hours H`         | Polling deadline in hours, a finite number above 0 (default 6.0)                                      |
 | `--stage-only`      | Stage the media and hold Windows Update, but neither gate the WIM nor launch setup (verdict `STAGED`) |
-| `--ip IP`           | Guest address for a guest without QEMU agent; implies the offline snapshot                            |
+| `--ip IP`           | Guest IPv4 address for a guest without QEMU agent; implies the offline snapshot; MAC-checked          |
 | `--stage-root X:`   | Drive to stage on (default: a non-system fixed drive with room, else `C:`)                            |
-| `--tpm-storage S`   | PVE storage for a new vTPM volume (default: the storage of the guest's disk)                          |
+| `--tpm-storage S`   | PVE storage ID for a new vTPM volume (default: the storage of the guest's disk)                       |
 | `--json`            | Print the envelope `{ok, command, vmid, verdict, steps}` instead of the verdict line                  |
 
 **Exit codes:** 0 (`STATE=DONE-OK`, `STAGED`), 1 (refused; `STATE=DONE-FAIL`, `WORKER_GONE`, `TIMEOUT`, `ERROR`), 2 (internal error, or a usage error), 78 (configuration not loadable or invalid)
@@ -307,12 +309,12 @@ Repair one guest by an in-place repair upgrade (`application/repair.py`).
 
 Apply the upgrade a repair staged and verify the build its receipt recorded (`application/apply.py`).
 
-| Option              | Description                                                                    |
-|---------------------|--------------------------------------------------------------------------------|
-| `--vmid N`          | The guest's VMID on this node  -  required, at least 1                         |
-| `--ip IP`           | The guest's address  -  required                                               |
-| `--apply-minutes M` | How long the apply phase may take before it is reported overrun (default 90.0) |
-| `--json`            | Print the envelope instead of the verdict line                                 |
+| Option              | Description                                                              |
+|---------------------|--------------------------------------------------------------------------|
+| `--vmid N`          | The guest's VMID on this node  -  required, at least 1                   |
+| `--ip IP`           | The guest's IPv4 address  -  required; MAC-checked against `qm config`   |
+| `--apply-minutes M` | Apply phase limit before overrun, a finite number above 0 (default 90.0) |
+| `--json`            | Print the envelope instead of the verdict line                           |
 
 **Exit codes:** 0 (`VERIFIED`), 1 (refused: `RUN_LIVE`, `RUN_UNFINISHED`, `RUN_FAILED`, `NO_RUN`, `REVERTED_OR_UNCHANGED`, `ERROR`), 2 (internal error, or a usage error), 78 (configuration not loadable or invalid)
 

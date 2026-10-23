@@ -6,6 +6,7 @@ reads back from disk, so a round trip through the filesystem is the contract.
 
 from __future__ import annotations
 
+import json
 import stat
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
@@ -22,7 +23,14 @@ WRITTEN_AT = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
 
 
 def _receipt(vmid: int = 1, spbuild: int = 8973) -> RepairReceipt:
-    return RepairReceipt(vmid=vmid, image_build=26200, image_spbuild=spbuild, written_at=WRITTEN_AT)
+    return RepairReceipt(
+        vmid=vmid,
+        image_build=26200,
+        image_spbuild=spbuild,
+        build_before=(26200, 7462),
+        install_date_before=1761206400,
+        written_at=WRITTEN_AT,
+    )
 
 
 def test_expected_build_joins_build_and_spbuild() -> None:
@@ -32,6 +40,29 @@ def test_expected_build_joins_build_and_spbuild() -> None:
 def test_a_receipt_refuses_an_unknown_field() -> None:
     with pytest.raises(ValueError, match="Extra inputs are not permitted"):
         RepairReceipt.model_validate({**_receipt().model_dump(), "ubr": 1})
+
+
+def test_same_build_compares_the_image_with_the_build_before() -> None:
+    assert _receipt().same_build() is False
+    assert _receipt().model_copy(update={"build_before": (26200, 8973)}).same_build() is True
+    assert _receipt().model_copy(update={"build_before": (26100, 8973)}).same_build() is False
+
+
+@pytest.mark.parametrize("missing", ["build_before", "install_date_before"])
+def test_a_receipt_without_a_field_apply_needs_is_refused(tmp_path: Path, missing: str) -> None:
+    store = FileReceiptStore(tmp_path)
+    store.path(1).write_text(_receipt().model_dump_json(exclude={missing}), encoding="utf-8")
+    with pytest.raises(ReceiptError, match=f"is not valid: {missing}: Field required"):
+        store.read(1)
+
+
+@pytest.mark.parametrize("build_before", [[26200], [26200, 1, 2], [26200, "7462"], [26200, -1], [True, 1]], ids=str)
+def test_a_build_before_that_is_not_two_counts_is_refused(tmp_path: Path, build_before: object) -> None:
+    store = FileReceiptStore(tmp_path)
+    document = _receipt().model_dump(mode="json") | {"build_before": build_before}
+    store.path(1).write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(ReceiptError, match="is not valid: build_before"):
+        store.read(1)
 
 
 def test_write_then_read_round_trips(tmp_path: Path) -> None:
@@ -105,7 +136,10 @@ def test_a_receipt_missing_a_field_raises_naming_the_field(tmp_path: Path) -> No
     store.path(1).write_text('{"vmid": 1, "image_build": 26200, "written_at": "2026-01-02T03:04:05Z"}', "utf-8")
     with pytest.raises(ReceiptError) as caught:
         store.read(1)
-    assert str(caught.value) == f"the repair receipt {store.path(1)} is not valid: image_spbuild: Field required"
+    assert str(caught.value) == (
+        f"the repair receipt {store.path(1)} is not valid: image_spbuild: Field required; "
+        "build_before: Field required; install_date_before: Field required"
+    )
 
 
 def test_a_receipt_that_is_not_utf8_raises_naming_the_path(tmp_path: Path) -> None:

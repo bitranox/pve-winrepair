@@ -35,3 +35,28 @@ This project employs the following security measures in CI:
   on every CI run via `pip-audit`.
 - Known CVEs in transitive dependencies are pinned in `pyproject.toml` with
   inline comments referencing the CVE identifier.
+
+## Trust boundaries on the guest
+
+What `pve-winrepair` checks, and what it trusts without checking:
+
+- The guest tool's bytes are checked: every copy the node runs is hashed on the guest
+  (`certutil -hashfile`) and compared with the node's own sha256 before it runs.
+- The software the tool runs with is not. The first run of the tool as a given user (the ssh user,
+  and SYSTEM for the upgrade run) installs `uv` from `https://astral.sh/uv` when the guest has none,
+  and uv then resolves the tool's pinned dependencies `pwshpy==1.5.0` and `pywin32==312` from PyPI.
+  The versions are pinned; their hashes are not. That run trusts astral.sh, PyPI and the guest's
+  TLS trust store. A guest that must not reach the internet needs uv and those packages in its
+  cache beforehand.
+- The ssh user's profile is checked before a copy goes there: only SYSTEM, Administrators and the
+  ssh user may write it. A file that already exists there under the copy's name (left behind by a
+  delete that failed, or put there by one of those principals) keeps its own DACL when the copy
+  overwrites it. The hash check still runs, but a principal that the file's own DACL lets write
+  could swap it between the hash and the run. Delete such a leftover by hand when a push reports
+  `staged_left`.
+- A staging directory that already exists and is exactly locked is reused, and the media copy goes
+  over its contents: files of earlier, different media stay and setup can load them. Remove the
+  directory before staging other media.
+- With `--ip`, the address is bound to the VM only by MAC: the guest must report one of the VM's
+  `qm config` MACs. A guest that can change its own adapter's MAC can claim to be another VM; the
+  check guards against a typo, not against a hostile guest.

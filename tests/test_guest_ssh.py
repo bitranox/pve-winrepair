@@ -385,6 +385,18 @@ def test_stage_tool_runs_later_calls_from_the_verified_profile_copy(tmp_path: Pa
     assert runner.calls[-1] == _ssh("del", "/Q", _staged(dest))
 
 
+def test_a_staged_guest_keeps_the_digest_it_verified_when_the_node_file_changes_afterwards(tmp_path: Path) -> None:
+    # The profile copy was hashed against this digest; a later re-read of the node's file (an
+    # upgrade of the package mid-run) must not make the staged guest name other bytes.
+    source = _packed(tmp_path, "# v1\n")
+    verified = guest_ssh.packed_tool(tmp_path)
+    staged = _guest(_pushing(source), tmp_path).stage_tool()
+    source.write_text("# v2\n", encoding="utf-8")
+    assert guest_ssh.packed_tool(tmp_path).sha256 != verified.sha256
+    assert staged.packed == verified
+    assert staged.tool_path == _staged(verified.guest_path)
+
+
 def test_stage_tool_refuses_and_deletes_a_profile_copy_that_is_not_the_tool(tmp_path: Path) -> None:
     source = _packed(tmp_path)
     runner = _pushing(source)
@@ -445,6 +457,26 @@ def test_a_profile_only_trusted_principals_can_write_is_probed_right_before_the_
     staged = _guest(runner, tmp_path).stage_tool()
     assert staged.profile_copy == _staged(expected_guest_path(source))
     assert _routes(runner) == [PROFILE_ACL, "scp", "certutil"]
+
+
+def test_the_built_in_administrator_s_profile_printed_with_the_alias_la_is_trusted(tmp_path: Path) -> None:
+    # The shipped default [ssh] user is the built-in Administrator (RID 500): Get-Acl prints its own
+    # SID as the alias LA, as owner and in its ACE.
+    source = _packed(tmp_path)
+    admin = "S-1-5-21-1-2-3-500"
+    sddl = "O:LAG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;LA)"
+    runner = _pushing(source).on(PROFILE_ACL, profile_reply(sddl, user=admin))
+    staged = _guest(runner, tmp_path).stage_tool()
+    assert staged.profile_copy == _staged(expected_guest_path(source))
+    assert _routes(runner) == [PROFILE_ACL, "scp", "certutil"]
+
+
+def test_the_alias_la_is_refused_for_an_ssh_user_who_is_not_the_built_in_administrator(tmp_path: Path) -> None:
+    sddl = "O:LAG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;LA)"
+    runner = _pushing(_packed(tmp_path)).on(PROFILE_ACL, profile_reply(sddl))
+    with pytest.raises(GuestPushError, match="the owner LA is not trusted"):
+        _guest(runner, tmp_path).stage_tool()
+    assert _routes(runner) == [PROFILE_ACL]
 
 
 def test_the_probe_runs_an_encoded_script_reading_the_start_directory_descriptor(tmp_path: Path) -> None:
@@ -615,11 +647,13 @@ def test_the_scope_check_takes_the_tool_alone_when_no_stage_root_is_named(tmp_pa
 
 
 def test_ssh_options_keep_the_order_winrepair_shipped() -> None:
-    # Literal on purpose: an expectation built from ssh_options() cannot see a reorder.
+    # Literal on purpose: an expectation built from ssh_options() cannot see a reorder. IdentitiesOnly
+    # joined after winrepair: without it ssh also offers every agent and default key before -i's.
     settings = SshSettings(key="/k", strict_host_key_checking=False, known_hosts_file="~/.ssh/kh")
     assert ssh_options(settings) == (
         "-o", "BatchMode=yes",
         "-o", "PreferredAuthentications=publickey",
+        "-o", "IdentitiesOnly=yes",
         "-o", "StrictHostKeyChecking=no",
         "-o", "UserKnownHostsFile=~/.ssh/kh",
         "-o", "ConnectTimeout=20",
