@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -21,7 +22,8 @@ if TYPE_CHECKING:
 def _run(argv: list[str], services: Callable[[], AppServices] = build_testing) -> tuple[int, str]:
     with CliRunner().isolation() as (stdout, _stderr, _output):
         exit_code = main(argv, services_factory=services)
-    return exit_code, stdout.getvalue().decode("utf-8")
+    # CliRunner's text stream writes each "\n" as os.linesep, as a Windows stdout does: undo that.
+    return exit_code, stdout.getvalue().decode("utf-8").replace(os.linesep, "\n")
 
 
 def test_path_prints_the_packed_tool_this_install_ships() -> None:

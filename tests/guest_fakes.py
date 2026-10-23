@@ -12,6 +12,7 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
+import os
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -19,6 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
+import pytest
 from click.testing import CliRunner
 from lib_layered_config import Config
 
@@ -496,7 +498,8 @@ def cli_config(tmp_path: Path) -> dict[str, dict[str, object]]:
     """The node CLI sections for a run on the fake node: :data:`SSH`, a media dir, a state dir in ``tmp_path``.
 
     The media directory holds only ``setup.exe``; the state directory does not exist yet (the first
-    receipt creates it).
+    receipt creates it). On Windows that state directory is ``C:\\...``, which the node refuses: a
+    test whose run loads it carries :data:`NEEDS_A_POSIX_STATE_DIR`.
     """
     media = tmp_path / "media"
     media.mkdir(exist_ok=True)
@@ -507,6 +510,13 @@ def cli_config(tmp_path: Path) -> dict[str, dict[str, object]]:
         "repair": {"media_dir": str(media)},
         "node": {"state_dir": str(tmp_path / "state")},
     }
+
+
+#: Marks a test whose CLI run loads ``[node] state_dir`` from :func:`cli_config`. The node's state
+#: directory is an absolute POSIX path on every OS (``NodeSettings`` refuses anything else, because
+#: the directory is on a Proxmox node), and the only place this test can put it is ``tmp_path``,
+#: which on Windows is ``C:\\...``: there the run ends with exit 78 before the command starts.
+NEEDS_A_POSIX_STATE_DIR = pytest.mark.os_posix
 
 
 def run_cli(
@@ -540,7 +550,9 @@ def run_cli(
 
     with CliRunner().isolation() as (stdout, stderr, _output):
         exit_code = main(list(argv), services_factory=services)
-    return CliRun(exit_code, stdout.getvalue().decode("utf-8"), stderr.getvalue().decode("utf-8"))
+    # CliRunner's text streams write each "\n" as os.linesep, as a Windows stdout does: undo that.
+    out, err = (stream.getvalue().decode("utf-8").replace(os.linesep, "\n") for stream in (stdout, stderr))
+    return CliRun(exit_code, out, err)
 
 
 def json_envelope(stdout: str) -> dict[str, object]:

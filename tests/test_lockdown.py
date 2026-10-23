@@ -9,8 +9,8 @@ names, so the flags, SIDs and masks handed to the real API are pinned.
 from __future__ import annotations
 
 import hashlib
+import os
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import pytest
 from win32_fakes import (
@@ -29,9 +29,6 @@ from win32_fakes import (
 
 from pve_winrepair_guest import lockdown
 from pve_winrepair_guest.lockdown import Ace, AclReading, LockTarget
-
-if TYPE_CHECKING:
-    import os
 
 SYSTEM, ADMINS, RUNNER, USERS = "S-1-5-18", "S-1-5-32-544", "S-1-5-21-1-2-3-1001", "S-1-5-11"
 PLANTER = "S-1-5-21-1-2-3-1002"
@@ -349,10 +346,14 @@ def test_walk_tree_does_not_enter_a_directory_whose_attributes_say_reparse_point
     (tmp_path / "sources" / "deep").mkdir(parents=True)
     (tmp_path / "sources" / "deep" / "evil.dll").write_bytes(b"MZ")
     (tmp_path / "setup.exe").write_bytes(b"MZ")
-    junction = (tmp_path / "sources").stat().st_ino
+    # The directory is told apart by a planted mtime, not its inode: os.scandir's entries carry the
+    # mtime on every OS, but their st_ino is 0 on Windows, where an inode key would match nothing.
+    # A whole number of 100 ns ticks, so NTFS stores it exactly; set last, after its children.
+    planted = 1_234_567_890_123_456_700
+    os.utime(tmp_path / "sources", ns=(planted, planted))
 
     def attributes(info: os.stat_result) -> int:
-        return FILE_ATTRIBUTE_REPARSE_POINT if info.st_ino == junction else 0
+        return FILE_ATTRIBUTE_REPARSE_POINT if info.st_mtime_ns == planted else 0
 
     entries = sorted(
         (Path(e.path).name, e.reparse, e.directory) for e in lockdown.walk_tree(str(tmp_path), attributes=attributes)

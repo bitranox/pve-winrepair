@@ -14,6 +14,7 @@ from guest_fakes import (
     DONE_OK,
     GONE,
     GUEST_IP,
+    NEEDS_A_POSIX_STATE_DIR,
     RECEIPT,
     FakePve,
     Reply,
@@ -47,6 +48,7 @@ def _runner() -> FakeRunner:
     return apply_runner(FakePve(), GONE, DONE_OK)
 
 
+@NEEDS_A_POSIX_STATE_DIR
 def test_apply_json_with_a_receipt_is_verified(tmp_path: Path) -> None:
     run = run_cli([*APPLY, "--json"], _with_receipt(tmp_path), _runner())
     envelope = json_envelope(run.stdout)
@@ -65,11 +67,13 @@ def test_apply_json_with_a_receipt_is_verified(tmp_path: Path) -> None:
     assert "[ok ] verify_build" in run.stderr
 
 
+@NEEDS_A_POSIX_STATE_DIR
 def test_apply_without_json_prints_one_verdict_line(tmp_path: Path) -> None:
     run = run_cli(APPLY, _with_receipt(tmp_path), _runner())
     assert (run.exit_code, run.stdout) == (0, "vm 1: VERIFIED\n")
 
 
+@NEEDS_A_POSIX_STATE_DIR
 def test_apply_without_a_receipt_is_refused_before_any_call(tmp_path: Path) -> None:
     runner = _runner()
     run = run_cli([*APPLY, "--json"], cli_config(tmp_path), runner)
@@ -81,6 +85,7 @@ def test_apply_without_a_receipt_is_refused_before_any_call(tmp_path: Path) -> N
     assert runner.calls == []
 
 
+@NEEDS_A_POSIX_STATE_DIR
 def test_apply_minutes_option_is_how_long_the_guest_may_take_to_come_back(tmp_path: Path) -> None:
     runner = _runner()
     runner.replies["hostname"] = [Reply(255, "", "Connection timed out")]
@@ -111,6 +116,7 @@ def test_apply_with_an_ip_that_is_no_ipv4_address_is_refused_before_any_call(tmp
     assert runner.calls == []
 
 
+@NEEDS_A_POSIX_STATE_DIR
 def test_apply_with_a_state_dir_that_is_a_regular_file_is_refused_before_any_call(tmp_path: Path) -> None:
     config = cli_config(tmp_path)
     blocker = tmp_path / "state-is-a-file"
@@ -126,6 +132,7 @@ def test_apply_with_a_state_dir_that_is_a_regular_file_is_refused_before_any_cal
     assert runner.calls == []
 
 
+@NEEDS_A_POSIX_STATE_DIR
 def test_apply_with_an_unconfigured_ssh_key_is_refused_before_any_call(tmp_path: Path) -> None:
     config = _with_receipt(tmp_path)
     config["ssh"]["key"] = ""
@@ -136,6 +143,7 @@ def test_apply_with_an_unconfigured_ssh_key_is_refused_before_any_call(tmp_path:
     assert runner.calls == []
 
 
+@NEEDS_A_POSIX_STATE_DIR
 def test_apply_driver_tool_mismatch_exits_2_with_empty_stdout(tmp_path: Path) -> None:
     runner = _runner()
     runner.replies["build"] = [answer("build", {"CurrentBuild": "26200", "UBR": 8973})]

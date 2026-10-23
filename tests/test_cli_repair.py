@@ -21,6 +21,7 @@ from guest_fakes import (
     GONE,
     GUEST_IP,
     KEY,
+    NEEDS_A_POSIX_STATE_DIR,
     NO_LOG,
     NODE_LOGGING,
     CliRun,
@@ -57,6 +58,7 @@ DONE_OK_STEPS = [
 ]  # fmt: skip
 
 
+@NEEDS_A_POSIX_STATE_DIR
 def test_repair_json_runs_the_agent_path_to_done_ok(tmp_path: Path) -> None:
     config = cli_config(tmp_path)
     runner = agent_runner(FakePve())
@@ -76,6 +78,7 @@ def test_repair_json_runs_the_agent_path_to_done_ok(tmp_path: Path) -> None:
     assert all(call[call.index("-i") + 1] == KEY for call in runner.calls if call[0] in ("ssh", "scp"))
 
 
+@NEEDS_A_POSIX_STATE_DIR
 def test_repair_echoes_each_step_to_stderr_as_it_happens(tmp_path: Path) -> None:
     run = run_cli(["repair", "--vmid", "1", "--json"], cli_config(tmp_path), agent_runner(FakePve()))
     lines = [line for line in run.stderr.splitlines() if line.startswith("[")]
@@ -84,11 +87,13 @@ def test_repair_echoes_each_step_to_stderr_as_it_happens(tmp_path: Path) -> None
     assert "verdict=STATE=DONE-OK" in lines[-1]
 
 
+@NEEDS_A_POSIX_STATE_DIR
 def test_repair_without_json_prints_one_verdict_line(tmp_path: Path) -> None:
     run = run_cli(["repair", "--vmid", "1"], cli_config(tmp_path), agent_runner(FakePve()))
     assert (run.exit_code, run.stdout) == (0, "vm 1: STATE=DONE-OK\n")
 
 
+@NEEDS_A_POSIX_STATE_DIR
 def test_repair_snapshot_name_defaults_to_the_setting(tmp_path: Path) -> None:
     config = cli_config(tmp_path)
     config["repair"]["snapshot_name"] = "pre_from_config"
@@ -98,6 +103,7 @@ def test_repair_snapshot_name_defaults_to_the_setting(tmp_path: Path) -> None:
     assert [call[3] for call in snapshots] == ["pre_from_config"]
 
 
+@NEEDS_A_POSIX_STATE_DIR
 def test_repair_snapshot_name_option_overrides_the_setting(tmp_path: Path) -> None:
     runner = agent_runner(FakePve())
     run_cli(["repair", "--vmid", "1", "--snapshot-name", "pre_from_option"], cli_config(tmp_path), runner)
@@ -105,6 +111,7 @@ def test_repair_snapshot_name_option_overrides_the_setting(tmp_path: Path) -> No
     assert [call[3] for call in snapshots] == ["pre_from_option"]
 
 
+@NEEDS_A_POSIX_STATE_DIR
 def test_a_bad_snapshot_name_option_is_refused_naming_it_before_any_call(tmp_path: Path) -> None:
     runner = agent_runner(FakePve())
     run = run_cli(
@@ -135,6 +142,7 @@ def test_a_snapshot_name_override_labels_only_its_own_error_with_the_option() ->
     assert parts[1] == "[repair] stage_free_gb: Input should be greater than 0"
 
 
+@NEEDS_A_POSIX_STATE_DIR
 def test_a_refusal_exits_1_with_verdict_error_naming_the_reason(tmp_path: Path) -> None:
     refused = answer("prepare", prepare_report("FAIL", "image 26200.8973 older than running 26200.9711"), ok=False)
     run = run_cli(["repair", "--vmid", "1", "--json"], cli_config(tmp_path), agent_runner(FakePve(), prepare=refused))
@@ -145,12 +153,14 @@ def test_a_refusal_exits_1_with_verdict_error_naming_the_reason(tmp_path: Path) 
     assert str(last["message"]).startswith("guest gate refused: image 26200.8973 older than running 26200.9711")
 
 
+@NEEDS_A_POSIX_STATE_DIR
 def test_a_refusal_without_json_prints_the_verdict_line(tmp_path: Path) -> None:
     refused = answer("prepare", prepare_report("FAIL", "image too old"), ok=False)
     run = run_cli(["repair", "--vmid", "1"], cli_config(tmp_path), agent_runner(FakePve(), prepare=refused))
     assert (run.exit_code, run.stdout) == (1, "vm 1: ERROR\n")
 
 
+@NEEDS_A_POSIX_STATE_DIR
 def test_a_driver_tool_mismatch_exits_2_internal_with_json(tmp_path: Path) -> None:
     runner = agent_runner(FakePve(), state=answer("state", {"present": True}))
     run = run_cli(["repair", "--vmid", "1", "--json"], cli_config(tmp_path), runner)
@@ -159,6 +169,7 @@ def test_a_driver_tool_mismatch_exits_2_internal_with_json(tmp_path: Path) -> No
     assert envelope_steps(envelope)[-1]["step"] == "internal"
 
 
+@NEEDS_A_POSIX_STATE_DIR
 def test_a_driver_tool_mismatch_without_json_leaves_stdout_empty(tmp_path: Path) -> None:
     runner = agent_runner(FakePve(), state=answer("state", {"present": True}))
     run = run_cli(["repair", "--vmid", "1"], cli_config(tmp_path), runner)
@@ -166,6 +177,7 @@ def test_a_driver_tool_mismatch_without_json_leaves_stdout_empty(tmp_path: Path)
     assert "[FAIL] internal" in run.stderr
 
 
+@NEEDS_A_POSIX_STATE_DIR
 def test_an_unconfigured_ssh_key_is_refused_before_any_call(tmp_path: Path) -> None:
     config = cli_config(tmp_path)
     config["ssh"]["key"] = ""
@@ -188,6 +200,7 @@ def test_an_unknown_setting_exits_78_naming_it_before_any_call(tmp_path: Path) -
     assert runner.calls == []
 
 
+@NEEDS_A_POSIX_STATE_DIR
 def test_a_state_dir_that_is_a_regular_file_is_refused_before_any_call(tmp_path: Path) -> None:
     config = cli_config(tmp_path)
     blocker = tmp_path / "state-is-a-file"
@@ -203,6 +216,7 @@ def test_a_state_dir_that_is_a_regular_file_is_refused_before_any_call(tmp_path:
     assert runner.calls == []
 
 
+@NEEDS_A_POSIX_STATE_DIR
 def test_a_state_dir_below_a_regular_file_is_refused_naming_the_file(tmp_path: Path) -> None:
     config = cli_config(tmp_path)
     blocker = tmp_path / "a-file"
@@ -244,6 +258,7 @@ def _node_logging_run(
     return run_cli(["--env-file", str(env_file), *argv], config, runner, production_logging=True)
 
 
+@NEEDS_A_POSIX_STATE_DIR
 def test_a_waiting_poll_reports_its_progress_on_stderr_through_lib_log_rich_never_on_stdout(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -256,6 +271,7 @@ def test_a_waiting_poll_reports_its_progress_on_stderr_through_lib_log_rich_neve
     assert json_envelope(run.stdout)["verdict"] == "STATE=DONE-OK"
 
 
+@NEEDS_A_POSIX_STATE_DIR
 def test_each_progress_record_reaches_the_root_bridge_once_and_no_handler_of_ours(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -281,6 +297,7 @@ def test_each_progress_record_reaches_the_root_bridge_once_and_no_handler_of_our
     assert any(type(handler).__name__ == "StdlibLoggingHandler" for handler in logging.getLogger().handlers)
 
 
+@NEEDS_A_POSIX_STATE_DIR
 def test_a_console_at_warning_shows_no_progress_line(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     run = _node_logging_run(
         tmp_path, monkeypatch, ["repair", "--vmid", "1"], _waiting_poll_runner(), console_level="WARNING"
@@ -289,6 +306,7 @@ def test_a_console_at_warning_shows_no_progress_line(tmp_path: Path, monkeypatch
     assert PROGRESS not in run.stderr
 
 
+@NEEDS_A_POSIX_STATE_DIR
 def test_stage_only_stops_after_staging(tmp_path: Path) -> None:
     run = run_cli(["repair", "--vmid", "1", "--stage-only", "--json"], cli_config(tmp_path), agent_runner(FakePve()))
     envelope = json_envelope(run.stdout)
@@ -296,6 +314,7 @@ def test_stage_only_stops_after_staging(tmp_path: Path) -> None:
     assert "launch" not in [step["step"] for step in envelope_steps(envelope)]
 
 
+@NEEDS_A_POSIX_STATE_DIR
 def test_stage_only_says_windows_update_is_still_held_and_how_to_lift_it(tmp_path: Path) -> None:
     run = run_cli(["repair", "--vmid", "1", "--stage-only", "--json"], cli_config(tmp_path), agent_runner(FakePve()))
     last = envelope_steps(json_envelope(run.stdout))[-1]
@@ -306,6 +325,7 @@ def test_stage_only_says_windows_update_is_still_held_and_how_to_lift_it(tmp_pat
     assert WU_HELD_HINT in run.stderr.splitlines()[-1]
 
 
+@NEEDS_A_POSIX_STATE_DIR
 def test_stage_root_option_reaches_the_stage_root_step(tmp_path: Path) -> None:
     run = run_cli(
         ["repair", "--vmid", "1", "--stage-root", "C:", "--json"], cli_config(tmp_path), agent_runner(FakePve())
@@ -314,6 +334,7 @@ def test_stage_root_option_reaches_the_stage_root_step(tmp_path: Path) -> None:
     assert (stage_root["root"], stage_root["note"]) == ("C:\\upgrade", "explicit")
 
 
+@NEEDS_A_POSIX_STATE_DIR
 def test_hours_option_is_the_poll_deadline(tmp_path: Path) -> None:
     runner = agent_runner(FakePve(), state=NO_LOG)
     runner.replies["setup-alive"] = [GONE, GONE, ALIVE]  # both guards pass, then setup runs past the deadline
@@ -347,6 +368,7 @@ def test_a_tpm_storage_that_is_no_pve_storage_id_is_refused_before_any_call(tmp_
     assert runner.calls == []
 
 
+@NEEDS_A_POSIX_STATE_DIR
 @pytest.mark.parametrize("value", ["local-zfs", "Tpm.Store_1", "ab"])
 def test_a_tpm_storage_that_is_a_pve_storage_id_reaches_qm_set(tmp_path: Path, value: str) -> None:
     pve = FakePve()
@@ -366,6 +388,7 @@ def test_an_ip_that_is_no_ipv4_address_is_refused_before_any_call(tmp_path: Path
     assert runner.calls == []
 
 
+@NEEDS_A_POSIX_STATE_DIR
 def test_tpm_storage_option_is_where_a_new_vtpm_goes(tmp_path: Path) -> None:
     pve = FakePve()
     pve.config = "scsi0: local-zfs:vm-1-disk-0,size=64G\n"
@@ -375,6 +398,7 @@ def test_tpm_storage_option_is_where_a_new_vtpm_goes(tmp_path: Path) -> None:
     assert [call[3:] for call in sets] == [["-tpmstate0", "tpmstore:1,version=v2.0"]]
 
 
+@NEEDS_A_POSIX_STATE_DIR
 def test_ip_option_takes_the_agentless_path(tmp_path: Path) -> None:
     runner = agent_runner(FakePve(), hostname=Reply(255, "", "Connection timed out"))
     run = run_cli(["repair", "--vmid", "1", "--ip", GUEST_IP, "--json"], cli_config(tmp_path), runner)
@@ -383,6 +407,7 @@ def test_ip_option_takes_the_agentless_path(tmp_path: Path) -> None:
     assert "qm guest" not in call_labels(runner.calls)
 
 
+@NEEDS_A_POSIX_STATE_DIR
 def test_the_testing_composition_without_a_node_runs_nothing(tmp_path: Path) -> None:
     """``build_testing()`` alone never reaches a real ``qm`` or ssh: its node refuses every call."""
     config = Config(cli_config(tmp_path), {})

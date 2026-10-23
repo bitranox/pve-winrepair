@@ -312,6 +312,11 @@ def host(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FakeUpgradeHost:
     a name like ``C:\\upgrade-state.log`` is one plain file in it, so launch reads, hashes and
     deletes the real files at the absolute Windows paths it validates.
     """
+    if sys.platform == "win32":
+        # On Windows an absolute name replaces the base: tmp_path / TOOL IS C:\winrepair\..., so
+        # there is no cwd to map the guest's paths into, and launch would act on the machine's own
+        # files. Every test on this host is therefore POSIX-only.
+        pytest.skip("maps absolute Windows paths onto file names in the cwd, which only POSIX allows")
     monkeypatch.chdir(tmp_path)
     (tmp_path / TOOL).write_bytes(TOOL_BYTES)
     (tmp_path / SETUP).write_bytes(b"MZ")
@@ -1377,6 +1382,8 @@ def test_lock_dirs_refuses_a_lock_that_does_not_read_back_exactly(fresh: FakeUpg
     _lock_refused(fresh, envelope, "carries 3 ACEs")
 
 
+# POSIX-only like the host fixture: Path(TOOL) below is a file in the cwd only on POSIX.
+@pytest.mark.os_posix
 def test_lock_dirs_then_staging_then_launch_is_the_order_launch_accepts(fresh: FakeUpgradeHost) -> None:
     fresh.task_lines = [(30.0, "launching: D:\\upgrade\\setup.exe")]
     assert _lock_dirs(fresh, "--stage-root", r"D:\upgrade")[0] == 0
