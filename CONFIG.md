@@ -237,9 +237,13 @@ pve-winrepair config --profile staging --format json --section ssh
 
 ### Deploy Configuration Files
 
-`config-deploy` writes the bundled defaults, every key with its default and its documentation, into
-a configuration layer, as a starting point to edit. An install whose own configuration management
-writes `/etc/pve-winrepair/config.toml` does not need it.
+`config-deploy` writes a documented copy of the bundled defaults into a configuration layer, as a
+starting point to edit. In the deployed `20-winrepair.toml` (the `[ssh] [guest] [repair] [node]`
+settings) every key is commented out, with its default as the example value: the file documents the
+settings and sets none of them, so the values in `/etc/pve-winrepair/config.toml` stay in force until
+you uncomment a key. `40-layered-config.toml` and `90-logging.toml` are deployed with their keys
+active. An install whose own configuration management writes `/etc/pve-winrepair/config.toml` does
+not need `config-deploy`.
 
 #### Options Reference
 
@@ -264,12 +268,15 @@ writes `/etc/pve-winrepair/config.toml` does not need it.
 With `--profile NAME` the same files go under `profile/NAME/` of the target's directory, for example
 `/etc/xdg/pve-winrepair/profile/production/config.toml`.
 
-**A deploy to a higher layer hides every lower one.** The deployed `20-winrepair.toml` sets every
-key, so whatever layer it lands in decides all of them. A `host` deploy (host beats app) or a `user`
-deploy as root (user beats app and host) therefore puts all settings back to their defaults, the
-values in `/etc/pve-winrepair/config.toml` included. `app` is safe next to that file: it writes
-under `/etc/xdg/`, which is read first. Deploy into one layer only, edit the values there, and check
-the result with `pve-winrepair config`, which names the file each value came from.
+**The deployed logging and layered-config files hide the lower layers for their keys.**
+`40-layered-config.toml` (`[lib_layered_config.default_permissions]`) and `90-logging.toml`
+(`[lib_log_rich]`) are deployed with every key active, so whatever layer they land in decides those
+keys. A `host` deploy (host beats app) or a `user` deploy as root (user beats app and host)
+therefore puts the logging and deploy-permission settings back to their defaults, values for them
+in `/etc/pve-winrepair/config.toml` included. The winrepair settings are not affected: their file is
+deployed commented out, and a key you uncomment there wins over the app file for that key alone.
+`app` is safe next to `/etc/pve-winrepair/config.toml`: it writes under `/etc/xdg/`, which is read
+first. Check the result with `pve-winrepair config`, which names the file each value came from.
 
 #### Basic Examples
 
@@ -286,16 +293,16 @@ pve-winrepair config-deploy --target user
 # Several targets at once
 pve-winrepair config-deploy --target user --target app
 
-# Replace files that differ from the bundled ones (keeps <name>.bak)
+# Replace files that differ from what the deploy writes (keeps <name>.bak)
 pve-winrepair config-deploy --target app --force
 
 # Into a profile directory
 pve-winrepair config-deploy --target app --profile production
 ```
 
-With `--force`, a file whose content differs from the bundled one is replaced and the old file is
-kept as `<name>.bak` (numbered, `<name>.bak.1` and so on, when a backup already exists); a file
-whose content is already identical is left as it is, mode included. When nothing differs,
+With `--force`, a file whose content differs from what the deploy writes is replaced and the old
+file is kept as `<name>.bak` (numbered, `<name>.bak.1` and so on, when a backup already exists); a
+file whose content is already identical is left as it is, mode included. When nothing differs,
 `config-deploy --force` writes nothing and says so. The `app` and `host` targets need write access
 to `/etc/xdg/`, which on a node means root; a target that may not be written exits 13.
 
@@ -591,7 +598,7 @@ The file must exist and be readable; Click validates this before the command run
 
 ## Default Configuration
 
-The `defaultconfig.toml` and files in `defaultconfig.d/` (bundled with the package) provide baseline values. These serve as the fallback when no external configuration files are deployed.
+The `defaultconfig.toml` and files in `defaultconfig.d/` (bundled with the package) provide baseline values. These serve as the fallback when no external configuration files are deployed. The bundled `20-winrepair.toml` keeps its keys active as this defaults layer; only the copy `config-deploy` writes has them commented out.
 
 ---
 

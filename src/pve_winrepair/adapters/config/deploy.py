@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import re
+import shutil
+import tempfile
+from contextlib import contextmanager
+from pathlib import Path
+from typing import TYPE_CHECKING, Final
 
 from lib_layered_config import deploy_config
 from lib_layered_config.examples.deploy import DeployAction
@@ -11,12 +16,87 @@ from pve_winrepair import __init__conf__
 from pve_winrepair.adapters.config.loader import get_default_config_path, validate_profile
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
-    from pathlib import Path
+    from collections.abc import Generator, Mapping, Sequence
 
     from pve_winrepair.domain.enums import DeployTarget
 
 _DEPLOYED_ACTIONS = frozenset({DeployAction.CREATED, DeployAction.OVERWRITTEN})
+
+#: The ``defaultconfig.d`` files deployed as documentation only, every setting commented out. A
+#: deploy writes the host or user layer, which is read after the app layer
+#: (``/etc/pve-winrepair/config.toml``, where a site's settings live), so an active key in a deployed
+#: copy would hide the app file's value for that key. The package's own file stays as it is: it is
+#: the defaults layer.
+DOCUMENTATION_ONLY: Final[frozenset[str]] = frozenset({"20-winrepair.toml"})
+
+#: A ``[table]`` header, kept active so an uncommented key lands in its own table. An
+#: ``[[array-of-tables]]`` header is not matched: it creates a value, so it is commented like a key.
+_TABLE_HEADER = re.compile(r"\s*\[(?!\[)[^\]]*\]\s*(#.*)?")
+
+_COMMENTED_HEADER: Final[str] = (
+    "# Deployed by `pve-winrepair config-deploy` with every setting commented out: this file\n"
+    "# documents the settings and sets none of them, so the values in the app file\n"
+    "# (/etc/pve-winrepair/config.toml on Linux) stay in force. Uncomment a line to set that value\n"
+    "# in this layer; it then hides the app file's value for that key.\n"
+    "\n"
+)
+
+
+def commented_settings(text: str) -> str:
+    r"""Return *text* with every setting commented out, for a deployed documentation copy.
+
+    A line stays as it is when it is blank, already a comment, or a ``[table]`` header; every other
+    line (a key, an ``[[array-of-tables]]`` header, a continuation of a multi-line value) gets
+    ``# `` in front. Line endings are kept. A short note on top says why the file sets nothing.
+    The rule reads lines, not TOML: a multi-line string holding a line that starts with ``#`` would
+    keep that line's text, which is why a test loads the shipped files' result and requires every
+    table empty.
+
+    Args:
+        text: The shipped TOML text.
+
+    Returns:
+        The same document with every setting commented out and the note on top.
+
+    Example:
+        >>> shipped = '[ssh]\n# Purpose: the account\nuser = "admin"\n'
+        >>> print(commented_settings(shipped).split("\n\n", 1)[1], end="")
+        [ssh]
+        # Purpose: the account
+        # user = "admin"
+    """
+    lines = text.splitlines(keepends=True)
+    newline = "\r\n" if lines and lines[0].endswith("\r\n") else "\n"
+    out = [_COMMENTED_HEADER.replace("\n", newline)]
+    for line in lines:
+        body = line.rstrip("\r\n")
+        keep = not body.strip() or body.lstrip().startswith("#") or _TABLE_HEADER.fullmatch(body) is not None
+        out.append(line if keep else f"# {line}")
+    return "".join(out)
+
+
+@contextmanager
+def _staged_source(source: Path) -> Generator[Path]:
+    """Yield a temporary copy of *source* and its ``.d`` directory, the documentation-only files commented.
+
+    lib_layered_config deploys a source file and its companion ``.d`` directory byte for byte, so
+    the deployed text is staged here rather than kept as a second copy of the defaults in the
+    package. The copy is deterministic: a ``--force`` deploy over an identical file writes nothing.
+    """
+    source_dot_d = source.with_suffix(".d")
+    with tempfile.TemporaryDirectory(prefix=f"{__init__conf__.LAYEREDCONF_SLUG}-deploy-") as tmp:
+        staged = Path(tmp) / source.name
+        shutil.copyfile(source, staged)
+        staged_dot_d = staged.with_suffix(".d")
+        staged_dot_d.mkdir()
+        for path in sorted(source_dot_d.iterdir()):
+            target = staged_dot_d / path.name
+            if path.name in DOCUMENTATION_ONLY:
+                text = path.read_bytes().decode("utf-8")
+                target.write_bytes(commented_settings(text).encode("utf-8"))
+            else:
+                shutil.copyfile(path, target)
+        yield staged
 
 
 def deploy_configuration(
@@ -35,7 +115,11 @@ def deploy_configuration(
     (application, host, or user config directories) without manually
     copying files or knowing platform-specific paths. Uses
     lib_layered_config.deploy_config() to copy the bundled defaultconfig.toml
-    to requested target layers (app, host, user).
+    and its ``defaultconfig.d`` files to requested target layers (app, host, user).
+    ``20-winrepair.toml`` is deployed with every setting commented out
+    (:data:`DOCUMENTATION_ONLY`), so a deploy sets no winrepair value and the
+    app file keeps deciding them; ``40-layered-config.toml`` and ``90-logging.toml``
+    are deployed as shipped, with their keys active.
 
     Args:
         targets: Sequence of DeployTarget enum values specifying target layers.
@@ -98,24 +182,23 @@ def deploy_configuration(
     """
     if profile is not None:
         validate_profile(profile)
-    source = get_default_config_path()
-
     # Convert enum values to strings for lib_layered_config
     target_strings = [t.value for t in targets]
 
-    results = deploy_config(
-        source=source,
-        vendor=__init__conf__.LAYEREDCONF_VENDOR,
-        app=__init__conf__.LAYEREDCONF_APP,
-        slug=__init__conf__.LAYEREDCONF_SLUG,
-        profile=profile,
-        targets=target_strings,
-        force=force,
-        set_permissions=set_permissions,
-        dir_mode=dir_mode,
-        file_mode=file_mode,
-        permission_overrides=permission_overrides,
-    )
+    with _staged_source(get_default_config_path()) as source:
+        results = deploy_config(
+            source=source,
+            vendor=__init__conf__.LAYEREDCONF_VENDOR,
+            app=__init__conf__.LAYEREDCONF_APP,
+            slug=__init__conf__.LAYEREDCONF_SLUG,
+            profile=profile,
+            targets=target_strings,
+            force=force,
+            set_permissions=set_permissions,
+            dir_mode=dir_mode,
+            file_mode=file_mode,
+            permission_overrides=permission_overrides,
+        )
 
     # Extract paths where files were actually created or overwritten
     paths: list[Path] = []
@@ -131,5 +214,7 @@ def deploy_configuration(
 
 
 __all__ = [
+    "DOCUMENTATION_ONLY",
+    "commented_settings",
     "deploy_configuration",
 ]

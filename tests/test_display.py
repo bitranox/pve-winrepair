@@ -17,7 +17,9 @@ import pytest
 from lib_layered_config import Config
 
 from pve_winrepair import __init__conf__
+from pve_winrepair.adapters.cli.main import main
 from pve_winrepair.adapters.config.display import display_config
+from pve_winrepair.composition import build_production
 from pve_winrepair.domain.enums import OutputFormat
 
 if TYPE_CHECKING:
@@ -184,3 +186,16 @@ def test_config_shows_the_shipped_scrub_patterns_but_hides_an_added_one(tmp_path
 
     assert _value(shown, f"lib_log_rich.scrub_patterns.{field}") == ".+"
     assert _value(shown, "lib_log_rich.scrub_patterns.api_key") == "***REDACTED***"
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("options", [(), ("--set", "ssh.strict_host_key_checking=false")], ids=["shipped", "with-set"])
+def test_config_shows_whether_ssh_checks_host_keys(
+    isolated_layers: Path, capsys: pytest.CaptureFixture[str], options: tuple[str, ...]
+) -> None:
+    """``strict_host_key_checking`` is a yes/no switch whose name only looks secret: ``config`` shows it."""
+    exit_code = main([*options, "config", "--section", "ssh", "--format", "json"], services_factory=build_production)
+    shown = cast("dict[str, Any]", json.loads(capsys.readouterr().out))
+
+    assert exit_code == 0
+    assert _value(shown, "ssh.strict_host_key_checking") is (not options)

@@ -37,11 +37,20 @@ __all__ = ["cli_repair"]
 @option(
     "--snapshot-name",
     default=None,
-    help="Snapshot taken before anything changes on the guest. Default: [repair] snapshot_name.",
+    help=(
+        "Snapshot taken before the media are staged; one of that name that exists is reused. A missing vTPM "
+        "is added before it, and on a running guest reached through the agent the Windows Update hold too. "
+        "Default: [repair] snapshot_name."
+    ),
 )
 @option("--hours", type=float, default=6.0, show_default=True, help="Polling deadline, in hours.")
 @option("--json", "as_json", is_flag=True, default=False, help="Print a JSON envelope on stdout.")
-@option("--stage-only", is_flag=True, default=False, help="Stage and verify the media, but do not launch setup.")
+@option(
+    "--stage-only",
+    is_flag=True,
+    default=False,
+    help="Stage the media and hold Windows Update, but neither gate the WIM nor launch setup (verdict STAGED).",
+)
 @option(
     "--ip",
     default=None,
@@ -72,10 +81,10 @@ def cli_repair(
 ) -> None:
     """Repair a guest whose cumulative update fails, by an in-place repair upgrade.
 
-    Snapshot, ensure a vTPM, stage the installation media from [repair] media_dir, gate the image,
-    launch setup from a SYSTEM task and poll to its verdict. Each step goes to stderr as it happens.
-    Exit 0 when repaired or staged, 1 when refused, 2 on an internal error, 78 when the
-    configuration does not load.
+    Ensure a vTPM, snapshot, stage the installation media from [repair] media_dir and hold Windows
+    Update, gate the image, launch setup from a SYSTEM task and poll to its verdict. Each step goes
+    to stderr as it happens. Exit 0 when repaired or staged, 1 when refused, 2 on an internal error,
+    78 when the configuration does not load.
     """
     cli_ctx = get_cli_context(ctx)
     settings = load_run_settings(ctx, cli_ctx)

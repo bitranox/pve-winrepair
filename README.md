@@ -146,12 +146,12 @@ SECTION.KEY=VALUE` (repeatable), `--env-file PATH`, `--traceback` / `--no-traceb
 
 | Command                                  | What it does                                                                            |
 |------------------------------------------|-----------------------------------------------------------------------------------------|
-| `repair --vmid N`                        | Snapshot, vTPM, stage the media, gate the WIM, launch setup and poll to a verdict       |
+| `repair --vmid N`                        | vTPM, snapshot, stage the media, gate the WIM, launch setup and poll to a verdict       |
 | `apply --vmid N --ip IP`                 | Reboot into the staged OS, verify the build against the receipt, release Windows Update |
 | `guest-tool path`                        | Print the path of the packed guest tool this install pushes                             |
 | `guest-tool sha256`                      | Print its sha256 and the content address it gets on a guest                             |
 | `config`                                 | Show the merged configuration and where each value came from                            |
-| `config-deploy --target app\|host\|user` | Write the bundled defaults into a configuration layer (see [CONFIG.md](CONFIG.md))      |
+| `config-deploy --target app\|host\|user` | Write the defaults into a layer, winrepair keys commented out ([CONFIG.md](CONFIG.md))  |
 | `config-generate-examples`               | Write lib_layered_config's example files for every layer location                       |
 | `info`                                   | Print the package metadata                                                              |
 

@@ -83,9 +83,12 @@ class RepairRequest:
 
     Attributes:
         vmid: The guest's VMID on this node.
-        snapshot_name: The snapshot taken before anything changes on the guest.
+        snapshot_name: The snapshot taken before the media are staged; one that exists is reused.
+            A missing vTPM is added before it, and on a running guest reached through the agent the
+            Windows Update hold (plus the servicing wait) comes before it too.
         hours: The poll deadline.
-        stage_only: Stage and verify the media but do not launch setup.
+        stage_only: Stage the media and hold Windows Update, but neither gate the WIM
+            (``prepare``) nor launch setup; the run ends with the verdict ``STAGED``.
         ip: The guest's address, for a guest with no QEMU agent; implies the offline snapshot.
         stage_root: The drive to stage the media on (``C:``, ``D:``); default: measured.
         tpm_storage: The PVE storage for a new vTPM volume; default: the storage of the guest's disk.

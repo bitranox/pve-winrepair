@@ -71,7 +71,9 @@ expected_runners = 0
 
 [repair]
 
-# Purpose: Directory on the node that holds the Windows installation media (ISO files)
+# Purpose: Directory on the node that holds the Windows installation media, unpacked as on
+#          the ISO (not the ISO file): setup.exe and sources\install.wim at its top level.
+#          `repair` copies everything in it to the guest's stage root.
 # Type: string (path); required by `repair`
 # Default: "" (not configured)
 # Environment Variable: PVE_WINREPAIR___REPAIR__MEDIA_DIR=/srv/media

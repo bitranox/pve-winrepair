@@ -19,8 +19,9 @@ from pve_winrepair import __init__conf__
 #: Dotted paths whose names look secret to lib_layered_config's redaction but hold no secret, so
 #: ``config`` shows their values: the ``*_max_keys`` limits are plain counts, and the shipped
 #: ``scrub_patterns`` fields hold the regex that says what the log scrubber hides, which a reader
-#: needs to see to check the scrubbing. A field an operator adds to ``scrub_patterns`` is not
-#: declared and stays redacted. Every Config this application builds carries the declaration: the
+#: needs to see to check the scrubbing; ``ssh.strict_host_key_checking`` is a yes/no switch whose
+#: name holds ``key``. A field an operator adds to ``scrub_patterns`` is not declared and stays
+#: redacted. Every Config this application builds carries the declaration: the
 #: loader passes it to ``read_config``, and ``--set`` rebuilds pass it on.
 NOT_SENSITIVE: Final[tuple[str, ...]] = (
     "lib_log_rich.payload_limits.context_max_keys",
@@ -28,6 +29,7 @@ NOT_SENSITIVE: Final[tuple[str, ...]] = (
     "lib_log_rich.scrub_patterns.password",
     "lib_log_rich.scrub_patterns.secret",
     "lib_log_rich.scrub_patterns.token",
+    "ssh.strict_host_key_checking",
 )
 
 

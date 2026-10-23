@@ -29,7 +29,7 @@ moves or removes a module, a CLI option or a public name.
 
 ### Adapters Layer
 - `src/pve_winrepair/adapters/config/loader.py`  -  Configuration loading with LRU caching; `NOT_SENSITIVE` names the keys `config` shows unredacted
-- `src/pve_winrepair/adapters/config/deploy.py`  -  Configuration deployment
+- `src/pve_winrepair/adapters/config/deploy.py`  -  Configuration deployment: stages the bundled defaults in a temporary directory with `20-winrepair.toml` commented out (`DOCUMENTATION_ONLY`, `commented_settings`) and hands that copy to lib_layered_config's `deploy_config`
 - `src/pve_winrepair/adapters/config/display.py`  -  Configuration display (TOML/JSON output, redaction)
 - `src/pve_winrepair/adapters/config/overrides.py`  -  CLI `--set` override parsing and deep-merge
 - `src/pve_winrepair/adapters/config/settings.py`  -  `load_settings` validates the `[ssh] [guest] [repair] [node]` sections into `Settings`; `SettingsError` carries one `<section>.<field>: <reason>` line per problem
@@ -138,6 +138,7 @@ CLI:
 Configuration and logging:
 - `tests/test_cache_effectiveness.py`  -  Configuration loading returns consistent (cached) results
 - `tests/test_config_overrides.py`  -  `--set` parsing tests
+- `tests/test_config_deploy_layers.py`  -  A `host` or `user` deploy leaves the app file's winrepair settings in force; the deployed `20-winrepair.toml` sets no key and documents every one
 - `tests/test_deploy_mode_safety.py`  -  `--dir-mode`/`--file-mode` literal, range and safety checks
 - `tests/test_deploy_permissions.py`  -  `config-deploy` permission options
 - `tests/test_display.py`  -  Config display formatting tests
@@ -259,7 +260,9 @@ Display merged configuration from all sources.
 
 ### config-deploy
 
-Deploy default configuration to system or user directories.
+Deploy default configuration to system or user directories: `config.toml` plus `config.d/` with
+`20-winrepair.toml` (every key commented out, so the deploy sets no winrepair value and the app file
+keeps deciding them), `40-layered-config.toml` and `90-logging.toml` (keys active).
 
 | Option                             | Description                                                      |
 |------------------------------------|------------------------------------------------------------------|
@@ -383,7 +386,8 @@ because lib_layered_config reads an unquoted digit-only `.env` or environment va
 `adapters/config/settings.py` `load_settings(config)` validates the four sections of a loaded
 `Config` (an absent section takes its defaults) and raises `SettingsError(ValueError)` with one
 `<section>.<field>: <reason>` line per problem, never echoing the refused value. The shipped defaults
-are `adapters/config/defaultconfig.d/20-winrepair.toml`; an empty `ssh.key` or `repair.media_dir`
+are `adapters/config/defaultconfig.d/20-winrepair.toml` (the defaults layer, keys active; the copy
+`config-deploy` writes has them commented out); an empty `ssh.key` or `repair.media_dir`
 loads and means "not configured". Override one key per run with
 `PVE_WINREPAIR___<SECTION>__<KEY>`, e.g. `PVE_WINREPAIR___SSH__KEY=<path>`.
 

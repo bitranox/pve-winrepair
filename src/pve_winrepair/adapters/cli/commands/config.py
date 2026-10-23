@@ -255,9 +255,14 @@ def cli_config_deploy(
     - host: System-wide host config (requires privileges)
     - user: User-specific config (~/.config on Linux)
 
-    Every target gets config.toml plus config.d/40-layered-config.toml and
-    config.d/90-logging.toml (host: hosts/<hostname>.toml
-    plus hosts/<hostname>.d/).
+    Every target gets config.toml plus config.d/20-winrepair.toml,
+    config.d/40-layered-config.toml and config.d/90-logging.toml (host:
+    hosts/<hostname>.toml plus hosts/<hostname>.d/). In 20-winrepair.toml every
+    key is commented out: it documents the [ssh] [guest] [repair] [node]
+    settings and sets none, so the app file (/etc/pve-winrepair/config.toml)
+    keeps deciding them until a key is uncommented. The other two files are
+    written with their keys active, and a host or user deploy hides the app
+    file's logging and permission settings with them.
 
     By default, existing files are not overwritten. With --force, a file whose
     content differs is replaced and the old one is kept as <name>.bak (numbered,
@@ -477,7 +482,7 @@ def _report_deployment_result(
             # files were already written, so exit 1 misreports a deploy that actually succeeded.
             safe_console.echo(f"  + {path}")
     elif force:
-        safe_console.echo("\nNo files were written: every target file is already identical to the bundled one.")
+        safe_console.echo("\nNo files were written: every target file is already identical to what this deploy writes.")
     else:
         safe_console.echo("\nNo files were created (all target files already exist).")
         safe_console.echo("Use --force to overwrite existing configuration files.")
