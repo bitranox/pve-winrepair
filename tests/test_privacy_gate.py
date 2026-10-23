@@ -164,7 +164,11 @@ def load_private_list(path: Path) -> PrivateList:
     unknown = sorted(set(entries) - set(KEYS))
     if unknown:
         raise PrivacyListError(f"{path}: unknown key(s) {', '.join(unknown)}; allowed: {', '.join(sorted(KEYS))}")
-    parsed = {key: _entries(path, key, entries.get(key, [])) for key in KEYS}
+    # A loop, not a comprehension: before Python 3.12 a comprehension runs in a frame of its own,
+    # which no __tracebackhide__ reaches, and with -l pytest prints its locals - ``entries`` too.
+    parsed: dict[str, tuple[tuple[str, str], ...]] = {}
+    for key in KEYS:
+        parsed[key] = _entries(path, key, entries.get(key, []))
     tokens = tuple(entry for key in TOKEN_KEYS for entry in parsed[key])
     if not tokens and not parsed["paths"]:
         raise PrivacyListError(f"{path}: the list holds no token, so it would check nothing")
