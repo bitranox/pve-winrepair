@@ -10,7 +10,6 @@ moves or removes a module, a CLI option or a public name.
 ## Related Files
 
 ### Domain Layer
-- `src/pve_winrepair/domain/behaviors.py`  -  Pure domain functions (greeting)
 - `src/pve_winrepair/domain/enums.py`  -  Type-safe enums (OutputFormat, DeployTarget)
 - `src/pve_winrepair/domain/errors.py`  -  Domain exceptions (ConfigurationError)
 - `src/pve_winrepair/domain/settings.py`  -  Node CLI settings models (`SshSettings`, `GuestSettings`, `RepairSettings`, `NodeSettings`, `Settings`); see Settings below
@@ -68,7 +67,7 @@ moves or removes a module, a CLI option or a public name.
 
 ### Tests
 - `tests/conftest.py`  -  Shared fixtures (see Test Fixtures below)
-- `tests/test_behaviors.py`  -  Domain function tests
+- `tests/cli_fakes.py`  -  The command name and message of the `failing_command` fixture, which the tests assert on
 - `tests/test_cache_effectiveness.py`  -  Configuration loading returns consistent (cached) results
 - `tests/test_cli_config.py`  -  `config`, `config-deploy`, `config-generate-examples` commands
 - `tests/test_cli_config_errors.py`  -  A configuration that cannot be loaded: who reports it, and who still runs

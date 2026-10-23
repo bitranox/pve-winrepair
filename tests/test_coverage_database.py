@@ -35,7 +35,7 @@ def test_a_pytest_run_leaves_another_sessions_coverage_database_alone(tmp_path: 
     environment.update(TMPDIR=str(tmp_path), TEMP=str(tmp_path), TMP=str(tmp_path))
 
     finished = subprocess.run(
-        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "tests/test_behaviors.py"],
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "tests/test_errors.py"],
         cwd=REPO,
         env=environment,
         capture_output=True,

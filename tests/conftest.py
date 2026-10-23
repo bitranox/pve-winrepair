@@ -21,6 +21,7 @@ import lib_cli_exit_tools
 import lib_log_rich.runtime
 import pytest
 import rich_click.rich_click
+from cli_fakes import FAILING_COMMAND, FAILING_MESSAGE
 from click.testing import CliRunner
 from lib_layered_config import Config
 
@@ -248,11 +249,6 @@ def managed_traceback_state() -> Iterator[None]:
         yield
     finally:
         _restore_cli_config(snapshot)
-
-
-#: The name the ``failing_command`` fixture registers; no shipped command is called this.
-FAILING_COMMAND = "test-only-fail"
-FAILING_MESSAGE = "I should fail"
 
 
 @pytest.fixture

@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any
 
 import lib_cli_exit_tools
 import pytest
+from cli_fakes import FAILING_MESSAGE
 
 from pve_winrepair import __init__conf__
 from pve_winrepair.adapters import cli as cli_mod
@@ -146,7 +147,7 @@ def test_traceback_flag_displays_full_exception_traceback(
 
     assert exit_code != 0
     assert "Traceback (most recent call last)" in plain_err
-    assert "RuntimeError: I should fail" in plain_err
+    assert f"RuntimeError: {FAILING_MESSAGE}" in plain_err
     assert "[TRUNCATED" not in plain_err
     assert lib_cli_exit_tools.config.traceback is False
     assert lib_cli_exit_tools.config.traceback_force_color is False
