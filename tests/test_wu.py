@@ -3,7 +3,7 @@
 The commands reach Windows only through the ``WuHost`` port. ``FakeWuHost`` behaves like the
 service control manager the old scripts fought with: a Start value written to the registry is
 what WMI reports as StartMode (unless the service reverts it, as WaaSMedicSvc exists to do), and
-``sc.exe stop`` only ISSUES a stop, so a service leaves Running some time later or never. Time is
+``stop_service(wait=False)`` only ISSUES a stop, so a service leaves Running some time later or never. Time is
 a fake clock the poll advances through ``sleep``. The search itself is pwshpy's
 ``get_windows_update`` (a killable child process); here its outcomes are mapped to the probe.
 """
@@ -22,17 +22,18 @@ from pwshpy import (
     CimInstance,
     NativeCallError,
     OperationTimeoutError,
-    ProcessResult,
     RegistryHive,
     RegistryValue,
     RegistryValueType,
+    ServiceInfo,
+    ServiceState,
     WindowsUpdate,
 )
 
 from pve_winrepair_guest import winrepair_guest, wu
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Sequence
+    from collections.abc import Callable, Iterable
 
 SERVICES = r"HKLM\SYSTEM\CurrentControlSet\Services"
 MODES = {2: "Auto", 3: "Manual", 4: "Disabled"}
@@ -50,7 +51,7 @@ class FakeWuHost:
     stop_delay: dict[str, float] = field(default_factory=dict[str, float])
     reverting: set[str] = field(default_factory=set[str])
     write_fails: set[str] = field(default_factory=set[str])
-    sc_fails: set[str] = field(default_factory=set[str])
+    stop_fails: set[str] = field(default_factory=set[str])
     cim_fails: bool = False
     search: wu.SearchProbe = SEARCH_OK
     now: float = 0.0
@@ -100,17 +101,14 @@ class FakeWuHost:
         if service not in self.reverting:
             self.start[service] = value
 
-    def exec(self, argv: Sequence[str], *, timeout: float) -> ProcessResult:
-        assert list(argv[:2]) == ["sc.exe", "stop"]
-        assert timeout == 30.0
-        service = argv[2]
-        self.calls.append(f"stop {service}")
-        if service in self.sc_fails:
-            raise NativeCallError(f"Command {list(argv)!r} exceeded its 30.0s timeout and was killed.")
-        if self.state.get(service) == "Running":
-            self.stopping[service] = self.now + self.stop_delay.get(service, 0.0)
-            return ProcessResult(argv=list(argv), exit_code=0, stdout="STOP_PENDING", stderr="", duration_s=0.1)
-        return ProcessResult(argv=list(argv), exit_code=1062, stdout="", stderr="", duration_s=0.1)
+    def stop_service(self, name: str) -> ServiceInfo:
+        self.calls.append(f"stop {name}")
+        if name in self.stop_fails:
+            raise NativeCallError("(1052, 'ControlService', 'Das angeforderte Steuerelement ist ungueltig.')")
+        if self.state.get(name) == "Running":
+            self.stopping[name] = self.now + self.stop_delay.get(name, 0.0)
+            return ServiceInfo(name=name, display_name=name, status=ServiceState.STOP_PENDING)
+        return ServiceInfo(name=name, display_name=name, status=ServiceState.STOPPED)
 
     def monotonic(self) -> float:
         return self.now
@@ -231,14 +229,27 @@ def test_quiesce_skips_a_service_without_a_key_and_judges_the_rest() -> None:
     assert data["verdict"] == "OK"
 
 
-def test_quiesce_records_a_hung_sc_stop_and_carries_on() -> None:
-    host = FakeWuHost(sc_fails={"wuauserv"})
+def test_quiesce_reports_the_state_each_stop_left_a_service_in() -> None:
+    host = FakeWuHost()
+
+    _, envelope = _run(host, "quiesce-wu")
+
+    assert items(envelope, "data", "stops") == [
+        {"service": "wuauserv", "state": "StopPending", "error": None},
+        {"service": "UsoSvc", "state": "StopPending", "error": None},
+        {"service": "BITS", "state": "StopPending", "error": None},
+        {"service": "WaaSMedicSvc", "state": "Stopped", "error": None},
+    ]
+
+
+def test_quiesce_records_a_refused_stop_and_carries_on() -> None:
+    host = FakeWuHost(stop_fails={"wuauserv"})
 
     _, envelope = _run(host, "quiesce-wu")
 
     stop = obj(at(envelope, "data", "stops", 0))
-    assert (stop["service"], stop["exit_code"]) == ("wuauserv", None)
-    assert "timeout" in str(stop["error"])
+    assert (stop["service"], stop["state"]) == ("wuauserv", None)
+    assert "1052" in str(stop["error"])
     assert len([c for c in host.calls if c.startswith("stop ")]) == 4
 
 

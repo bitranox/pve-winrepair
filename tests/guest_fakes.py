@@ -329,7 +329,7 @@ def quiesce_report(verdict: str, *, running: tuple[str, ...] = ()) -> QuiesceRep
     return QuiesceReport(
         previous_start_modes={"wuauserv": "Manual", "UsoSvc": "Auto"},
         writes=(StartWrite("wuauserv", 4, "WRITTEN", None),),
-        stops=(StopIssued("wuauserv", 0, None),),
+        stops=(StopIssued("wuauserv", "StopPending", None),),
         wait=StopWait(10.0, False, running),
         services=rows,
         not_disabled=(),

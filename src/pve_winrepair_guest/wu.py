@@ -13,13 +13,8 @@ Why the quiesce works the way it does (all measured on test guests):
   written in the REGISTRY.
 * Nothing may block: on one guest ``Stop-Service -Force`` never returned because wuauserv sat in Stop
   Pending, and the driver killed the step at its 600 s timeout. So: registry first (cannot hang),
-  then ``sc.exe stop``, which only ISSUES the stop, then a BOUNDED poll.
-
-The stop is ``sc.exe`` through ``ps.exec`` and not ``ps.stop_service``: pwshpy 1.5.0's stop
-(adapters/native/service_control.py ``NativeServiceController.stop``) issues ControlService and
-then ``_wait_for_state(..., SERVICE_STOPPED, timeout)`` polls until STOPPED and raises
-NativeCallError on the deadline. There is no issue-only mode, and the deadline error is the same
-type as a refused stop, so a short timeout would turn every Stop Pending into an ambiguous error.
+  then ``ps.stop_service(wait=False)``, which only ISSUES the stop (one ControlService; a service
+  already in Stop Pending gets none) and returns the state right after it, then a BOUNDED poll.
 
 Contents:
     * :func:`commands` - quiesce-wu and restore-wu for the entry's command table.
@@ -37,7 +32,6 @@ from typing import TYPE_CHECKING, Protocol
 from pwshpy import (
     CimInstance,
     OperationTimeoutError,
-    ProcessResult,
     PwshPyError,
     RegistryValue,
     RegistryValueType,
@@ -49,7 +43,7 @@ from pve_winrepair_guest.envelope import Command, Outcome
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping, Sequence
 
-    from pwshpy import WindowsUpdate
+    from pwshpy import ServiceInfo, WindowsUpdate
 
 __all__ = [
     "RESTORE_START",
@@ -76,7 +70,6 @@ TARGETS = ("wuauserv", "UsoSvc", "BITS", "WaaSMedicSvc")
 RESTORE_START = (("wuauserv", 3), ("UsoSvc", 2), ("BITS", 2), ("WaaSMedicSvc", 3))
 DISABLED = 4
 SERVICES_KEY = r"HKLM\SYSTEM\CurrentControlSet\Services"
-SC_STOP_TIMEOUT = 30.0
 STOP_WAIT = 180.0
 STOP_POLL = 10.0
 SEARCH_TIMEOUT = 180.0
@@ -122,8 +115,11 @@ class WuHost(Protocol):
         """Write a REG_DWORD value; raises when it cannot be written."""
         ...
 
-    def exec(self, argv: Sequence[str], *, timeout: float) -> ProcessResult:
-        """Run a program without a shell; raises on timeout or a missing executable."""
+    def stop_service(self, name: str) -> ServiceInfo:
+        """Issue a stop and return the service's state right after it, without waiting for Stopped.
+
+        Raises a pwshpy error when the service cannot be opened or refuses the control.
+        """
         ...
 
     def monotonic(self) -> float:
@@ -154,9 +150,13 @@ class PwshpyHost:
         """See :meth:`WuHost.set_dword`."""
         ps.set_item_property(key, name, value, RegistryValueType.REG_DWORD)
 
-    def exec(self, argv: Sequence[str], *, timeout: float) -> ProcessResult:
-        """See :meth:`WuHost.exec`."""
-        return ps.exec(list(argv), timeout=timeout)
+    def stop_service(self, name: str) -> ServiceInfo:
+        """See :meth:`WuHost.stop_service`.
+
+        ControlService itself returns once the service acknowledged the control; the service
+        control manager bounds a handler that never answers (ERROR_SERVICE_REQUEST_TIMEOUT).
+        """
+        return ps.stop_service(name, wait=False)
 
     def monotonic(self) -> float:
         """See :meth:`WuHost.monotonic`."""
@@ -239,10 +239,17 @@ class StartWrite:
 
 @dataclass(frozen=True)
 class StopIssued:
-    """One ``sc.exe stop``: its exit code, or the error when it could not run (None code)."""
+    """One issued stop: the service's state right after it, or the error when it was refused.
+
+    Attributes:
+        service: The service name.
+        state: Get-Service's Status right after the control (typically StopPending; Stopped when it
+            was not running), or None when the stop could not be issued.
+        error: Why the stop could not be issued, else None.
+    """
 
     service: str
-    exit_code: int | None
+    state: str | None
     error: str | None
 
 
@@ -329,7 +336,7 @@ class QuiesceReport:
     Attributes:
         previous_start_modes: StartMode per service BEFORE the change, for restoring by hand.
         writes: The registry Start=4 writes.
-        stops: The ``sc.exe stop`` calls.
+        stops: The issued stops.
         wait: The bounded wait for the services to leave Running.
         services: The verified state afterwards.
         not_disabled: Services whose StartMode is not Disabled.
@@ -365,12 +372,12 @@ def write_start(host: WuHost, service: str, value: int) -> StartWrite:
 
 
 def issue_stop(host: WuHost, service: str) -> StopIssued:
-    """Issue ``sc.exe stop``; it returns once the control is sent, so it cannot block on Stop Pending."""
+    """Issue a stop without waiting for Stopped, so it cannot block on Stop Pending."""
     try:
-        result = host.exec(["sc.exe", "stop", service], timeout=SC_STOP_TIMEOUT)
+        info = host.stop_service(service)
     except PwshPyError as exc:
         return StopIssued(service, None, str(exc))
-    return StopIssued(service, result.exit_code, None)
+    return StopIssued(service, info.status.value, None)
 
 
 def _running(host: WuHost) -> tuple[str, ...]:
@@ -436,7 +443,7 @@ def commands(host_factory: Callable[[], WuHost] = PwshpyHost) -> tuple[Command, 
     return (
         Command(
             "quiesce-wu",
-            "hold Windows Update (Start=4, sc stop, bounded wait) and verify",
+            "hold Windows Update (Start=4, issue stops, bounded wait) and verify",
             lambda _a: run_quiesce(host_factory()),
         ),
         Command(
