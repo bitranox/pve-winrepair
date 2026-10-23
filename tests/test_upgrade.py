@@ -33,10 +33,12 @@ from pwshpy import (
     CimInstance,
     CurrentIdentity,
     NativeCallError,
+    Pipeline,
     ProcessInfo,
     RegistryHive,
     RegistryValue,
     RegistryValueType,
+    ScheduledTaskInfo,
     TaskState,
     ps,
 )
@@ -47,7 +49,7 @@ from pve_winrepair_guest.lockdown import Ace, AclReading, LockTarget
 from pve_winrepair_guest.upgrade import WimImage
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Sequence
+    from collections.abc import Iterable, Iterator, Sequence
 
 # The real 208-byte header plus the real XML resource of a Windows 11 Pro 25H2 (de-DE, 26200.8973)
 # ``sources/install.wim``, with only the XML offset (bytes 80-87) rewritten to 208 so it points into
@@ -1237,6 +1239,40 @@ def test_pwshpy_host_reads_this_process_identity_from_pwshpy() -> None:
 
     assert host.user_sid() == me.sid
     assert host.whoami() == upgrade.account_text(me)
+
+
+class _UnlistableScheduler:
+    """pwshpy's facade over a Task Scheduler whose root folder refuses to list its tasks."""
+
+    def __init__(self) -> None:
+        self.strict: list[bool] = []
+
+    def get_scheduled_task(self, folder_path: str = "\\", *, strict: bool = False) -> Pipeline[ScheduledTaskInfo]:
+        self.strict.append(strict)
+
+        def walk() -> Iterator[ScheduledTaskInfo]:
+            if strict:  # what pwshpy does with an item it cannot read under strict=True
+                raise NativeCallError(f"cannot list the tasks in folder '{folder_path}': (5, 'Zugriff verweigert')")
+            yield from ()  # lenient: the folder is skipped, which reads exactly like an absent task
+
+        return Pipeline(walk())
+
+
+def test_pwshpy_host_task_state_raises_for_a_folder_it_cannot_list(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The cleanup's read-back: "no such task" must mean the task is gone, never that it could not
+    # be read, or a task still defined would be reported deleted. pwshpy is the third-party edge.
+    scheduler = _UnlistableScheduler()
+    monkeypatch.setattr(upgrade, "ps", scheduler)
+
+    with pytest.raises(NativeCallError, match="cannot list the tasks"):
+        upgrade.PwshpyHost().task_state(r"\OVMRepairUpgrade")
+    assert scheduler.strict == [True]
+
+
+@pytest.mark.os_windows
+def test_pwshpy_host_task_state_reads_an_absent_task_as_none_on_the_real_scheduler() -> None:
+    # A strict walk of the whole tree: any task this elevated account cannot read would raise here.
+    assert upgrade.PwshpyHost().task_state(r"\OVMRepairUpgrade-absent-by-test") is None
 
 
 _GRANDCHILD = """

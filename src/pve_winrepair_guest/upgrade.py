@@ -277,7 +277,11 @@ class UpgradeHost(Protocol):
         ...
 
     def task_state(self, task_path: str) -> TaskState | None:
-        """Return a task's state (RUNNING while an instance runs), or None when there is no such task."""
+        """Return a task's state (RUNNING while an instance runs), or None when there is no such task.
+
+        Raises a PwshPyError when the task, or a folder that could hold it, cannot be read: an
+        unreadable task never reads as absent.
+        """
         ...
 
     def stop_task(self, task_path: str) -> None:
@@ -392,11 +396,19 @@ class PwshpyHost:
         ps.start_scheduled_task(task_path)
 
     def task_state(self, task_path: str) -> TaskState | None:
-        """See :meth:`UpgradeHost.task_state`."""
+        """See :meth:`UpgradeHost.task_state`.
+
+        ``strict=True``: a folder or task this account cannot read raises instead of being skipped,
+        so None means the task is gone, never that it could not be read (the cleanup's read-back
+        relies on that). A task under the root is not found before the whole tree is walked, so
+        any unreadable task anywhere raises too; an elevated admin session read every task of a
+        Windows 11 test machine that way (measured).
+        """
         folder, _, name = task_path.rpartition("\\")
         folder += "\\"
         # get_scheduled_task recurses the folder tree, so the folder must match too.
-        task = ps.get_scheduled_task(folder).first(lambda t: t.task_name == name and t.task_path == folder)
+        tasks = ps.get_scheduled_task(folder, strict=True)
+        task = tasks.first(lambda t: t.task_name == name and t.task_path == folder)
         return None if task is None else task.state
 
     def stop_task(self, task_path: str) -> None:
