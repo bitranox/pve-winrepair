@@ -628,7 +628,7 @@ def test_the_scan_examines_the_tree_and_the_payload() -> None:
     entries = len(_tracked())
     members = len(decoded_payload(_artefact_text()))
     assert entries >= 100
-    assert members == 9
+    assert members == 8
 
 
 @pytest.mark.os_agnostic

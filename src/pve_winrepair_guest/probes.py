@@ -41,7 +41,6 @@ from pwshpy import (
 )
 
 from pve_winrepair_guest.envelope import Command, Outcome, Skip
-from pve_winrepair_guest.evtlog import EvtApi, iter_events
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -162,14 +161,6 @@ class ProbeHost(Protocol):
 class PwshpyHost:
     """The real :class:`ProbeHost`: pwshpy's native Windows bindings."""
 
-    def __init__(self, event_api: EvtApi | None = None) -> None:
-        """Bind the host; ``event_api`` replaces pywin32's event-log binding (tests only).
-
-        Args:
-            event_api: The event-log binding, or None for the real one (loaded on first read).
-        """
-        self._event_api = event_api
-
     def registry(self, key: str) -> Iterable[RegistryValue]:
         """See :meth:`ProbeHost.registry`."""
         return ps.get_item_property(key)
@@ -177,11 +168,12 @@ class PwshpyHost:
     def win_events(self, log_name: str) -> Iterable[EventLogEntry]:
         """See :meth:`ProbeHost.win_events`.
 
-        Not ``ps.get_win_event``: pwshpy 1.5.0 formats messages without the provider's metadata
-        and swallows the failure, so every Setup message came back as a Win32 error string and
-        detect-lp-defect could never match (see ``evtlog.py``).
+        pwshpy renders each message through its provider's publisher metadata, as Get-WinEvent
+        does, and reports one it cannot format as None, never as a Win32 error string in its
+        place (formatting without the metadata returned "Das System kann die angegebene Datei
+        nicht finden." for every Setup event on a German guest).
         """
-        return iter_events(log_name, api=self._event_api)
+        return ps.get_win_event(log_name)
 
     def cim(self, class_name: str, *, where: str | None = None) -> Iterable[CimInstance]:
         """See :meth:`ProbeHost.cim`."""
@@ -409,7 +401,7 @@ def lp_verdict(scan: SetupScan | None) -> tuple[str, str | None]:
 
     A Win32 error string in place of a message cannot be told from event text here (pwshpy
     1.5.0 produced three different ones on one guest), so keeping those out is the adapter's
-    job: ``evtlog`` reports a message it cannot format as None.
+    job: pwshpy's ``get_win_event`` reports a message it cannot format as None.
     """
     if scan is None:
         return "UNKNOWN", "the Setup event log could not be read"

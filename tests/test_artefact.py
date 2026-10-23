@@ -20,7 +20,6 @@ if TYPE_CHECKING:
 GUEST_MODULES = (
     "__init__",
     "envelope",
-    "evtlog",
     "lockdown",
     "probes",
     "upgrade",

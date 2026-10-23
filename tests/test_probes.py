@@ -9,6 +9,7 @@ decision logic and the envelope are all exercised together; only the OS reads ar
 from __future__ import annotations
 
 import io
+import itertools
 import json
 import os
 import sys
@@ -773,3 +774,14 @@ def test_task_time_renders_pwshpys_utc_as_the_guests_local_wall_time() -> None:
     # Whole seconds, as the docstring shows; None stays None (never ran).
     assert probes.task_time(labelled) == "2026-10-21T19:57:06"
     assert probes.task_time(None) is None
+
+
+@pytest.mark.os_windows
+def test_the_real_setup_log_renders_servicing_messages_with_their_provider_metadata() -> None:
+    # Without the provider's metadata every message came back as one Win32 error string ("the
+    # system cannot find the file"), which never names a KB; rendered, servicing events do.
+    events = list(itertools.islice(probes.PwshpyHost().win_events("Setup"), 200))
+    servicing = [e for e in events if e.provider_name == "Microsoft-Windows-Servicing"]
+    if not servicing:
+        pytest.skip("no servicing event in this machine's newest 200 Setup events")
+    assert any("KB" in (e.message or "") for e in servicing)

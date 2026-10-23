@@ -87,7 +87,6 @@ moves or removes a module, a CLI option or a public name.
 - `src/pve_winrepair_guest/wu.py`  -  `quiesce-wu` and `restore-wu`, and the bounded Windows Update search probe (pwshpy `get_windows_update`)
 - `src/pve_winrepair_guest/lockdown.py`  -  `lock-dirs` and the protected DACL that keeps non-admins away from what the SYSTEM task executes
 - `src/pve_winrepair_guest/upgrade.py`  -  `prepare` (the WIM gate and the compat waiver), `launch` (the trigger-less SYSTEM task) and `upgrade-run` (setup.exe, the state log and its marker)
-- `src/pve_winrepair_guest/evtlog.py`  -  Reads a Windows event log with each message rendered by its provider's metadata
 
 ### Scripts
 - `scripts/pack_guest.py`  -  Packs the guest tool into the committed artefact with pwshpy (`make custom pack`); `--check` exits 1 when the artefact is stale
@@ -150,7 +149,6 @@ Configuration and logging:
 
 Guest tool:
 - `tests/test_entry.py`  -  The guest tool's entry point and its one-envelope-per-run contract; the README's subcommand table lists every subcommand
-- `tests/test_evtlog.py`  -  The event-log reader
 - `tests/test_lockdown.py`  -  `lock-dirs` and the DACL that keeps non-admins away from what the SYSTEM task executes
 - `tests/test_probes.py`  -  The read-only probe subcommands
 - `tests/test_upgrade.py`  -  `prepare`, `launch` and `upgrade-run`

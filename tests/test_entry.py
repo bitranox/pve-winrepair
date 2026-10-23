@@ -144,7 +144,7 @@ def test_non_ascii_data_is_escaped_so_a_cp1252_console_cannot_crash_the_write() 
 
 
 def test_header_pins_pywin32_for_windows_only() -> None:
-    # A direct dependency (win32security, win32evtlog, win32com) must not float on pwshpy's own
+    # A direct dependency (win32security, win32file, win32com) must not float on pwshpy's own
     # unpinned requirement; the marker keeps Linux tests and packing free of it.
     block = GUEST.read_text(encoding="utf-8").split("# ///")[1]
     line = next(raw for raw in block.splitlines() if raw.startswith("# dependencies"))
