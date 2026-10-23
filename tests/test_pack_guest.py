@@ -175,11 +175,37 @@ def _member_summary(text: str) -> tuple[list[str], bool]:
     return sorted(members), members.get("pve_winrepair_guest/__init__.py") == b""
 
 
+def _removed_line_by_line(text: str) -> str:
+    """``text`` without its payload here-string and its sha line, found line by line, not by regex.
+
+    The here-string goes from its ``$PwshPyPayload = @'`` line through the ``'@`` that closes it;
+    what follows ``'@`` on that line stays, as the packer leaves it.
+    """
+    __tracebackhide__ = True  # its locals hold the artefact text
+    kept: list[str] = []
+    inside = False
+    for line in text.splitlines(keepends=True):
+        if inside:
+            inside = not line.startswith("'@")
+            if not inside:
+                kept.append(line[2:])
+        elif line.startswith("$PwshPyPayload = @'"):
+            inside = True
+        elif not line.startswith("$PwshPySha = '"):
+            kept.append(line)
+    return "".join(kept)
+
+
 def _wrapper_summary() -> tuple[bool, bool, bool]:
-    """(holds the payload here-string, holds the sha line, under a quarter of the whole) of the wrapper."""
+    """(holds the payload here-string, holds the sha line, is exactly the rest) of the wrapper.
+
+    "Exactly the rest" is the artefact minus those two parts and nothing else: a size bound would
+    only say the payload dominates, which a bigger pwshpy runner stops being true of.
+    """
     __tracebackhide__ = True  # its locals hold the wrapper text
-    wrapper = pack_guest.wrapper_without_payload(_committed())
-    return "$PwshPyPayload = @'" in wrapper, "$PwshPySha = '" in wrapper, len(wrapper) < len(_committed()) // 4
+    text = _committed()
+    wrapper = pack_guest.wrapper_without_payload(text)
+    return "$PwshPyPayload = @'" in wrapper, "$PwshPySha = '" in wrapper, wrapper == _removed_line_by_line(text)
 
 
 def _with_a_flipped_sha() -> str:
@@ -236,10 +262,10 @@ def test_same_pack_is_false_when_a_side_does_not_decode() -> None:
 
 @pytest.mark.os_agnostic
 def test_wrapper_without_payload_drops_the_payload_and_the_sha_line() -> None:
-    has_payload, has_sha, is_small = _wrapper_summary()
+    has_payload, has_sha, is_exactly_the_rest = _wrapper_summary()
     assert not has_payload
     assert not has_sha
-    assert is_small
+    assert is_exactly_the_rest
 
 
 @pytest.mark.os_agnostic

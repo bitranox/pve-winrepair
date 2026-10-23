@@ -43,8 +43,13 @@ What `pve-winrepair` checks, and what it trusts without checking:
 - The guest tool's bytes are checked: every copy the node runs is hashed on the guest
   (`certutil -hashfile`) and compared with the node's own sha256 before it runs.
 - The software the tool runs with is not. The first run of the tool as a given user (the ssh user,
-  and SYSTEM for the upgrade run) installs `uv` from `https://astral.sh/uv` when the guest has none,
-  and uv then resolves the tool's pinned dependencies `pwshpy==1.5.0` and `pywin32==312` from PyPI.
+  and SYSTEM for the upgrade run) installs `uv` from `https://astral.sh/uv` when the guest has none
+  that user can trust, downloads a uv-managed Python into that user's profile, and uv then resolves
+  the tool's pinned dependencies `pwshpy==1.6.0` and `pywin32==312` from PyPI. Every run is
+  elevated, so pwshpy's packed runner only runs a uv and a Python that no account other than that
+  user, SYSTEM, Administrators, TrustedInstaller and the two service accounts can modify, and
+  ignores the caller's proxy, index and interpreter variables (pwshpy 1.6.0
+  `docs/power-tools.md`).
   The versions are pinned; their hashes are not. That run trusts astral.sh, PyPI and the guest's
   TLS trust store. A guest that must not reach the internet needs uv and those packages in its
   cache beforehand.

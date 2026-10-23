@@ -149,7 +149,7 @@ def test_header_pins_pywin32_for_windows_only() -> None:
     block = GUEST.read_text(encoding="utf-8").split("# ///")[1]
     line = next(raw for raw in block.splitlines() if raw.startswith("# dependencies"))
     dependencies = ast.literal_eval(line.split("=", 1)[1].strip())
-    assert "pwshpy==1.5.0" in dependencies
+    assert "pwshpy==1.6.0" in dependencies
     assert [d for d in dependencies if d.startswith("pywin32")] == ["pywin32==312; sys_platform == 'win32'"]
 
 

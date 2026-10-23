@@ -1745,7 +1745,7 @@ requires-dist = [
     { name = "lib-log-rich", specifier = ">=6.5.7" },
     { name = "orjson", specifier = ">=3.13.0" },
     { name = "pip-audit", marker = "extra == 'dev'", specifier = ">=2.10.1" },
-    { name = "pwshpy", marker = "extra == 'dev'", specifier = "==1.5.0" },
+    { name = "pwshpy", marker = "extra == 'dev'", specifier = "==1.6.0" },
     { name = "pydantic", specifier = ">=2.14.1" },
     { name = "pynacl", marker = "extra == 'dev'", specifier = ">=1.6.2" },
     { name = "pyright", extras = ["nodejs"], marker = "extra == 'dev'", specifier = ">=1.1.414" },
@@ -1766,7 +1766,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "pwshpy"
-version = "1.5.0"
+version = "1.6.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "click" },
@@ -1785,9 +1785,9 @@ dependencies = [
     { name = "rich-click" },
     { name = "wmi", marker = "sys_platform == 'win32'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/d5/76/8edc90727f2ccfd6ab7915466b8a01798dbf6ea29868774ad18e0fc71ac8/pwshpy-1.5.0.tar.gz", hash = "sha256:82fa84c8cdcc1a7fe32b804fdce7bcb55ce32356975fc0dc0827b0021d36616c", size = 364326, upload-time = "2026-10-18T09:51:45.905Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/86/46/2e650b86ac10c4a923f693bcf6d9c5487b410ee526ad6552bdb7b1dfeda0/pwshpy-1.6.0.tar.gz", hash = "sha256:1a4770cb840c28e6fb52be4b7794fd70b26b06e15ae09a2b0e5a40a02a3b6417", size = 646517, upload-time = "2026-10-23T11:57:57.476Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/fe/c0/9cec39fd288ee2f8d3398a7d39f07270b1bc76d9a8b0778f9b3c6294e228/pwshpy-1.5.0-py3-none-any.whl", hash = "sha256:25df3c2f7e3160e9fe3005b2c65d588075d73624640a8464f31ce525a048d83f", size = 243901, upload-time = "2026-10-18T09:51:44.365Z" },
+    { url = "https://files.pythonhosted.org/packages/6f/04/cbfe95230391d80d59bdce01a924ab50a9632d7eeaf40ffe91ad21ce973c/pwshpy-1.6.0-py3-none-any.whl", hash = "sha256:741d445b267c7a71b514b83ee178194e1e47abd18cf17a7d7144905595a83762", size = 360821, upload-time = "2026-10-23T11:57:55.549Z" },
 ]
 
 [[package]]
