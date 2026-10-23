@@ -385,9 +385,11 @@ class PwshpyHost:
     def register_task(self, spec: TaskSpec) -> None:
         """See :meth:`UpgradeHost.register_task`.
 
-        pwshpy 1.5.0's register_scheduled_task registers with the caller's interactive token only
-        (no SYSTEM principal, no run level, no settings; filed in pwshpy's OPEN-WORK.md), so this
-        drives the Task Scheduler COM API directly, as pwshpy itself does.
+        pwshpy's register_scheduled_task takes the SYSTEM principal, the run level and no trigger,
+        but sets no task settings: DisallowStartIfOnBatteries and StopIfGoingOnBatteries would keep
+        the scheduler's True (a VM with an emulated battery could refuse or end setup), and the time
+        limit and IgnoreNew could not be pinned. So this drives the Task Scheduler COM API directly,
+        as pwshpy itself does, until pwshpy takes settings (its OPEN-WORK [45]).
         """
         register_on_demand(_connect_scheduler, spec)
 

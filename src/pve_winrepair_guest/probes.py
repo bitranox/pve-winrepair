@@ -399,9 +399,9 @@ def lp_verdict(scan: SetupScan | None) -> tuple[str, str | None]:
     an unrendered message as a non-match would read an unrendered log as a confident CLEAN, and an
     in-place upgrade starts a fresh, empty Setup log, where CLEAN would be an absence, not evidence.
 
-    A Win32 error string in place of a message cannot be told from event text here (pwshpy
-    1.5.0 produced three different ones on one guest), so keeping those out is the adapter's
-    job: pwshpy's ``get_win_event`` reports a message it cannot format as None.
+    A Win32 error string in place of a message cannot be told from event text here (formatting
+    without the provider's metadata produced three different ones on one guest), so keeping those
+    out is the adapter's job: pwshpy's ``get_win_event`` reports a message it cannot format as None.
     """
     if scan is None:
         return "UNKNOWN", "the Setup event log could not be read"
