@@ -24,29 +24,36 @@ type as a refused stop, so a short timeout would turn every Stop Pending into an
 Contents:
     * :func:`commands` - quiesce-wu and restore-wu for the entry's command table.
     * :class:`WuHost`, :class:`PwshpyHost` - the OS port and its adapter.
-    * :func:`run_bounded`, :func:`search_probe` - the abandonable Windows Update search.
+    * :func:`search_probe` - the abandonable Windows Update search (pwshpy's ``get_windows_update``).
     * the pure verdict helpers and their records.
 """
 
 from __future__ import annotations
 
-import importlib
-import multiprocessing
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import TYPE_CHECKING, Protocol
 
-from pwshpy import CimInstance, ProcessResult, PwshPyError, RegistryValue, RegistryValueType, ps
+from pwshpy import (
+    CimInstance,
+    OperationTimeoutError,
+    ProcessResult,
+    PwshPyError,
+    RegistryValue,
+    RegistryValueType,
+    ps,
+)
 
 from pve_winrepair_guest.envelope import Command, Outcome
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping, Sequence
 
+    from pwshpy import WindowsUpdate
+
 __all__ = [
     "RESTORE_START",
     "TARGETS",
-    "BoundedRun",
     "PwshpyHost",
     "QuiesceReport",
     "RestoreReport",
@@ -59,7 +66,6 @@ __all__ = [
     "commands",
     "quiesce_verdict",
     "restore_verdict",
-    "run_bounded",
     "search_probe",
     "wait_until_stopped",
 ]
@@ -134,7 +140,7 @@ class WuHost(Protocol):
 
 
 class PwshpyHost:
-    """The real :class:`WuHost`: pwshpy's native bindings plus a spawned search worker."""
+    """The real :class:`WuHost`: pwshpy's native bindings."""
 
     def cim(self, class_name: str, *, where: str | None = None) -> Iterable[CimInstance]:
         """See :meth:`WuHost.cim`."""
@@ -161,109 +167,45 @@ class PwshpyHost:
         time.sleep(seconds)
 
     def search_updates(self, timeout: float) -> SearchProbe:
-        """See :meth:`WuHost.search_updates`."""
-        return search_probe(run_bounded(search_worker, (SEARCH_CRITERIA,), timeout=timeout), timeout=timeout)
+        """See :meth:`WuHost.search_updates`.
+
+        pwshpy runs the search in a ``spawn`` child it kills after ``timeout``, so the entry
+        script needs its ``if __name__ == "__main__":`` guard (the child re-imports it).
+        """
+        return search_probe(
+            lambda: ps.get_windows_update(criteria=SEARCH_CRITERIA, timeout=timeout).to_list(), timeout=timeout
+        )
 
 
 # --- the bounded search ---------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
-class BoundedRun:
-    """How a call in a child process ended.
+def search_probe(search: Callable[[], Iterable[WindowsUpdate]], *, timeout: float) -> SearchProbe:
+    """Run a Windows Update search and map how it ended to a :class:`SearchProbe`.
 
-    Attributes:
-        status: DONE (returned), RAISED (raised), DIED (exited without answering), TIMEOUT (killed).
-        value: What the call returned when DONE, else None.
-        error: The exception or exit reason for RAISED / DIED, else None.
-    """
-
-    status: str
-    value: object
-    error: str | None
-
-
-def _child_main(conn: Any, target: Callable[..., object], args: tuple[object, ...]) -> None:
-    """Run ``target`` in the child and send ``(status, payload)`` back once."""
-    try:
-        conn.send(("DONE", target(*args)))
-    except BaseException as exc:  # the child must answer whatever happened, then exit
-        conn.send(("RAISED", f"{type(exc).__name__}: {exc}"))
-    finally:
-        conn.close()
-
-
-def run_bounded(target: Callable[..., object], args: tuple[object, ...], *, timeout: float) -> BoundedRun:
-    """Run ``target(*args)`` in a spawned child and kill it if it has not answered in ``timeout``.
-
-    Why a process and not a thread: the Windows Update search is one synchronous COM call that
-    cannot be interrupted in-process, and after an in-place upgrade it runs against an EMPTY
-    datastore (measured on a freshly upgraded guest: 25+ minutes, worker CPU flat, which hung the calling
-    unit long after the repair was proven). Only a separate process can be abandoned.
-
-    Args:
-        target: A module-level function (the child imports it by name).
-        args: Its arguments; they and the result must pickle.
-        timeout: Seconds to wait for the answer.
-
-    Returns:
-        How the call ended; a TIMEOUT child has been killed and reaped.
-    """
-    context = multiprocessing.get_context("spawn")
-    receiver, sender = context.Pipe(duplex=False)
-    child = context.Process(target=_child_main, args=(sender, target, args), daemon=True)
-    child.start()
-    sender.close()  # only the child holds the sending end, so its death reads as EOF here
-    try:
-        if not receiver.poll(timeout):
-            child.kill()
-            child.join(30)
-            return BoundedRun(status="TIMEOUT", value=None, error=None)
-        status, payload = receiver.recv()
-    except EOFError:
-        child.join(30)
-        return BoundedRun(status="DIED", value=None, error=f"worker exited with code {child.exitcode}")
-    finally:
-        receiver.close()
-    child.join(30)
-    if status == "DONE":
-        return BoundedRun(status="DONE", value=payload, error=None)
-    return BoundedRun(status="RAISED", value=None, error=str(payload))
-
-
-def search_worker(criteria: str) -> dict[str, object]:
-    """Search for pending updates through the Windows Update Agent COM API (runs in the child).
-
-    Returns:
-        ``{"count": int, "titles": [str, ...]}``.
-    """
-    # import_module: pywin32 is a Windows-only pwshpy dependency without stubs on the dev host.
-    client: Any = importlib.import_module("win32com.client")
-    session = client.Dispatch("Microsoft.Update.Session")
-    result = session.CreateUpdateSearcher().Search(criteria)
-    updates = result.Updates
-    return {"count": int(updates.Count), "titles": [str(updates.Item(i).Title) for i in range(updates.Count)]}
-
-
-def search_probe(run: BoundedRun, *, timeout: float) -> SearchProbe:
-    """Map a bounded run of :func:`search_worker` to a :class:`SearchProbe`.
+    Why a killable child process and not a thread (pwshpy's ``get_windows_update`` does this): the
+    search is one synchronous COM call that cannot be interrupted in-process, and after an
+    in-place upgrade it runs against an EMPTY datastore (measured on a freshly upgraded guest: 25+
+    minutes, worker CPU flat, which hung the calling unit long after the repair was proven).
 
     A TIMEOUT stays a TIMEOUT: it says nothing about Windows Update either way, so it must never
     be reported as success or as a failure of Windows Update.
+
+    Args:
+        search: Runs the search and returns its updates; raises a pwshpy error when it cannot.
+        timeout: The bound the search runs under, reported in the probe.
+
+    Returns:
+        OK with the count and titles, TIMEOUT (abandoned), or FAILED with the error.
     """
-    if run.status == "TIMEOUT":
+    try:
+        updates = list(search())
+    except OperationTimeoutError:  # a NativeCallError subclass, so it must be caught first
         return SearchProbe(status="TIMEOUT", pending=None, titles=(), error=None, timeout_s=timeout)
-    if run.status != "DONE":
-        return SearchProbe(status="FAILED", pending=None, titles=(), error=run.error, timeout_s=timeout)
-    # The child's answer crossed a process boundary; check its shape instead of trusting it.
-    raw: object = run.value
-    value: Mapping[str, object] = cast("Mapping[str, object]", raw) if isinstance(raw, dict) else {}
-    count, titles = value.get("count"), value.get("titles")
-    if not isinstance(count, int) or isinstance(count, bool) or not isinstance(titles, list):
-        error = f"malformed search result: {raw!r}"[:300]
-        return SearchProbe(status="FAILED", pending=None, titles=(), error=error, timeout_s=timeout)
-    names = tuple(str(title) for title in cast("list[object]", titles))
-    return SearchProbe(status="OK", pending=count, titles=names, error=None, timeout_s=timeout)
+    except PwshPyError as exc:
+        return SearchProbe(status="FAILED", pending=None, titles=(), error=str(exc), timeout_s=timeout)
+    titles = tuple(update.title for update in updates)
+    return SearchProbe(status="OK", pending=len(updates), titles=titles, error=None, timeout_s=timeout)
 
 
 # --- service state and verdicts -------------------------------------------------------------

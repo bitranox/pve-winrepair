@@ -202,3 +202,17 @@ def test_readme_lists_every_guest_subcommand() -> None:
     section = readme.split("## Guest tool subcommands", 1)[1].split("\n## ", 1)[0]
     listed = [row.split("|")[1].strip().strip("`").split()[0] for row in section.splitlines() if row.startswith("| `")]
     assert listed == [command.name for command in winrepair_guest.default_commands()]
+
+
+def test_the_entry_runs_main_only_under_its_main_guard() -> None:
+    # pwshpy's get_windows_update searches in a spawn child, which re-imports this script: without
+    # the guard the child would run a whole command instead of the search.
+    tree = ast.parse(GUEST.read_text(encoding="utf-8"))
+    guards = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.If) and ast.unparse(node.test) in {"__name__ == '__main__'", '__name__ == "__main__"'}
+    ]
+    calls = [node for node in tree.body if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)]
+    assert len(guards) == 1
+    assert calls == []

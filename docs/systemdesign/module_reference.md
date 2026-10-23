@@ -84,7 +84,7 @@ moves or removes a module, a CLI option or a public name.
 - `src/pve_winrepair_guest/winrepair_guest.py`  -  The entry script: one subcommand per run (`default_commands`), one JSON envelope on stdout, exit 0 ok, 1 refused, 2 internal error
 - `src/pve_winrepair_guest/envelope.py`  -  The tool's output contract: the envelope, `Outcome`, `Skip` and the exit code they imply
 - `src/pve_winrepair_guest/probes.py`  -  The read-only probes: `detect-lp-defect`, `drives`, `verify-runners`, `build`, `staged-os`, `servicing-active`, `setup-alive`, `state`, `nic-macs`
-- `src/pve_winrepair_guest/wu.py`  -  `quiesce-wu` and `restore-wu`, and the bounded Windows Update search probe (a `multiprocessing` child)
+- `src/pve_winrepair_guest/wu.py`  -  `quiesce-wu` and `restore-wu`, and the bounded Windows Update search probe (pwshpy `get_windows_update`)
 - `src/pve_winrepair_guest/lockdown.py`  -  `lock-dirs` and the protected DACL that keeps non-admins away from what the SYSTEM task executes
 - `src/pve_winrepair_guest/upgrade.py`  -  `prepare` (the WIM gate and the compat waiver), `launch` (the trigger-less SYSTEM task) and `upgrade-run` (setup.exe, the state log and its marker)
 - `src/pve_winrepair_guest/evtlog.py`  -  Reads a Windows event log with each message rendered by its provider's metadata
@@ -105,7 +105,6 @@ Helpers and fixtures:
 - `tests/cli_fakes.py`  -  The command name and message of the `failing_command` fixture, which the tests assert on
 - `tests/guest_fakes.py`  -  A fake ssh/scp runner answering with the guest tool's real envelopes, plus fake `qm` and clock, the whole-run guests of a repair and an apply, and `run_cli` (the real `main()` with a node on the fake runner)
 - `tests/win32_fakes.py`  -  In-memory stand-ins for the pywin32 modules the guest tool calls
-- `tests/mp_targets.py`  -  Module-level targets for the real `multiprocessing` tests of the Windows Update search probe
 - `tests/json_paths.py`  -  Typed reads of a parsed JSON envelope
 - `tests/build_wim_fixture.py`  -  Builds the small WIM fixture from a real `install.wim`
 - `tests/fixtures/install_wim_header_xml.bin`  -  The WIM fixture: a header plus the image XML

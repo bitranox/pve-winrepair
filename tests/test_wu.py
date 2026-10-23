@@ -4,8 +4,8 @@ The commands reach Windows only through the ``WuHost`` port. ``FakeWuHost`` beha
 service control manager the old scripts fought with: a Start value written to the registry is
 what WMI reports as StartMode (unless the service reverts it, as WaaSMedicSvc exists to do), and
 ``sc.exe stop`` only ISSUES a stop, so a service leaves Running some time later or never. Time is
-a fake clock the poll advances through ``sleep``. ``run_bounded`` is tested with real spawned
-processes, because killing a hung child is exactly what a fake could not prove.
+a fake clock the poll advances through ``sleep``. The search itself is pwshpy's
+``get_windows_update`` (a killable child process); here its outcomes are mapped to the probe.
 """
 
 from __future__ import annotations
@@ -13,26 +13,26 @@ from __future__ import annotations
 import io
 import json
 import math
-import multiprocessing
-import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-import mp_targets
+import pytest
 from json_paths import at, items, obj
 from pwshpy import (
     CimInstance,
     NativeCallError,
+    OperationTimeoutError,
     ProcessResult,
     RegistryHive,
     RegistryValue,
     RegistryValueType,
+    WindowsUpdate,
 )
 
 from pve_winrepair_guest import winrepair_guest, wu
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Sequence
+    from collections.abc import Callable, Iterable, Sequence
 
 SERVICES = r"HKLM\SYSTEM\CurrentControlSet\Services"
 MODES = {2: "Auto", 3: "Manual", 4: "Disabled"}
@@ -331,54 +331,38 @@ def test_restore_with_no_service_readable_is_unknown() -> None:
 # --- the bounded search probe ---------------------------------------------------------------
 
 
-def test_search_probe_maps_a_finished_search() -> None:
-    run = wu.BoundedRun(status="DONE", value={"count": 2, "titles": ["A", "B"]}, error=None)
+def _updates(*titles: str) -> Callable[[], Iterable[WindowsUpdate]]:
+    return lambda: [WindowsUpdate(update_id=f"u{i}", title=title) for i, title in enumerate(titles)]
 
-    probe = wu.search_probe(run, timeout=180.0)
+
+def _raising(error: Exception) -> Callable[[], Iterable[WindowsUpdate]]:
+    def search() -> Iterable[WindowsUpdate]:
+        raise error
+
+    return search
+
+
+def test_search_probe_maps_a_finished_search() -> None:
+    probe = wu.search_probe(_updates("A", "B"), timeout=180.0)
 
     assert probe == wu.SearchProbe(status="OK", pending=2, titles=("A", "B"), error=None, timeout_s=180.0)
 
 
-def test_search_probe_maps_timeout_raise_and_death() -> None:
-    timed_out = wu.search_probe(wu.BoundedRun(status="TIMEOUT", value=None, error=None), timeout=5.0)
-    raised = wu.search_probe(wu.BoundedRun(status="RAISED", value=None, error="com_error: x"), timeout=5.0)
-    died = wu.search_probe(wu.BoundedRun(status="DIED", value=None, error="worker exited with code 7"), timeout=5.0)
+def test_search_probe_keeps_a_timeout_apart_from_a_failure() -> None:
+    # OperationTimeoutError IS a NativeCallError: caught second, a timeout would read FAILED.
+    timeout = OperationTimeoutError("Windows Update search timed out after 5s", timeout=5.0)
+    timed_out = wu.search_probe(_raising(timeout), timeout=5.0)
+    failed = wu.search_probe(_raising(NativeCallError("HRESULT 0x8024402C")), timeout=5.0)
+    died = wu.search_probe(_raising(NativeCallError("worker exited without a result (exit code 7)")), timeout=5.0)
 
     assert (timed_out.status, timed_out.pending, timed_out.error) == ("TIMEOUT", None, None)
-    assert (raised.status, raised.pending, raised.error) == ("FAILED", None, "com_error: x")
-    assert (died.status, died.error) == ("FAILED", "worker exited with code 7")
+    assert (failed.status, failed.pending, failed.error) == ("FAILED", None, "HRESULT 0x8024402C")
+    assert (died.status, died.error) == ("FAILED", "worker exited without a result (exit code 7)")
 
 
-def test_search_probe_refuses_a_malformed_result_as_failed() -> None:
-    probe = wu.search_probe(wu.BoundedRun(status="DONE", value={"count": "two"}, error=None), timeout=5.0)
+@pytest.mark.os_posix  # on Windows this would run a real Windows Update search for up to 180 s
+def test_the_real_search_reaches_pwshpy_and_reports_its_refusal_as_failed() -> None:
+    probe = wu.PwshpyHost().search_updates(wu.SEARCH_TIMEOUT)
 
-    assert (probe.status, probe.pending) == ("FAILED", None)
-
-
-def test_run_bounded_returns_the_child_value() -> None:
-    run = wu.run_bounded(mp_targets.answer, (42,), timeout=60.0)
-
-    assert run == wu.BoundedRun(status="DONE", value={"value": 42}, error=None)
-
-
-def test_run_bounded_reports_an_exception_in_the_child() -> None:
-    run = wu.run_bounded(mp_targets.raise_error, (), timeout=60.0)
-
-    assert (run.status, run.error) == ("RAISED", "RuntimeError: 0x8024402c search failed")
-
-
-def test_run_bounded_reports_a_child_that_died_without_answering() -> None:
-    run = wu.run_bounded(mp_targets.die_hard, (), timeout=60.0)
-
-    assert (run.status, run.error) == ("DIED", "worker exited with code 7")
-
-
-def test_run_bounded_kills_a_hung_child_at_the_timeout() -> None:
-    started = time.monotonic()
-
-    run = wu.run_bounded(mp_targets.sleep_forever, (), timeout=1.0)
-
-    assert run.status == "TIMEOUT"
-    assert run.error is None
-    assert time.monotonic() - started < 15.0
-    assert multiprocessing.active_children() == []  # killed and reaped, not abandoned
+    assert (probe.status, probe.pending, probe.timeout_s) == ("FAILED", None, 180.0)
+    assert probe.error == "Windows Update search is Windows-only."
