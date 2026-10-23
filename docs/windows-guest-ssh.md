@@ -77,16 +77,33 @@ Match Group administrators
 The group name in that block is written in English and still applies on a localised Windows, where
 the group itself is called something else. Keep the block as it is.
 
-Copy the node's public key (the `.pub` file next to the private key in `[ssh] key`, one line that
-starts with `ssh-ed25519` or `ssh-rsa`) into
-`C:\ProgramData\ssh\administrators_authorized_keys`. One key per line; append the line if the file
-already holds other keys.
+Add the node's public key (the `.pub` file next to the private key in `[ssh] key`, one line that
+starts with `ssh-ed25519` or `ssh-rsa`) to `C:\ProgramData\ssh\administrators_authorized_keys`,
+one key per line. Paste the whole line between the single quotes:
+
+```powershell
+$keys = "$env:ProgramData\ssh\administrators_authorized_keys"
+Add-Content -Path $keys -Value 'ssh-ed25519 AAAA... root@node' -Encoding ascii
+```
+
+Write the file as plain ASCII, as this command does. In Windows PowerShell 5.1, `>`, `>>` and
+`Out-File` write UTF-16 (the file starts with the bytes `FF FE`), and `Set-Content -Encoding utf8`
+puts a byte order mark (`EF BB BF`) in front of the first line. sshd does not match a key in such a
+file, and the login fails with "Permission denied (publickey)". `-Encoding ascii` does not fix a file
+that is already UTF-16: `Add-Content` keeps appending in the encoding the file already has. Check
+the first bytes:
+
+```powershell
+([IO.File]::ReadAllBytes($keys) | Select-Object -First 3 | ForEach-Object { '{0:X2}' -f $_ }) -join ' '
+```
+
+`73 73 68` is the text `ssh`, which is what you want. If you see `FF FE` or `EF BB BF`, write the file
+again in ASCII: `Set-Content -Path $keys -Value (Get-Content $keys) -Encoding ascii`.
 
 sshd ignores that file unless only SYSTEM and the Administrators group have access to it. Remove
 the inherited entries and grant both full control by SID:
 
 ```powershell
-$keys = "$env:ProgramData\ssh\administrators_authorized_keys"
 icacls.exe $keys /inheritance:r /grant '*S-1-5-18:F' /grant '*S-1-5-32-544:F'
 "icacls exit code: $LASTEXITCODE"
 ```
@@ -188,6 +205,9 @@ sshd did not accept the key. Usual causes:
   Read it back as in step 2.
 - The user is wrong: `[ssh] user` names an account that is not in the Administrators group, or not
   the one whose key you installed.
+- The key file is UTF-16 or starts with a byte order mark. That happens when it was written with
+  `>`, `>>`, `Out-File` or `Set-Content -Encoding utf8` in Windows PowerShell 5.1. Check its first
+  bytes and write it again in ASCII, as in step 2.
 - The key file holds a broken line: a line wrapped by an editor, or a private key pasted in place of
   the public one.
 
