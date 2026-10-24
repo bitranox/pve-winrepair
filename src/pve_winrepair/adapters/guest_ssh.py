@@ -3,7 +3,7 @@ r"""Talk to the winrepair guest tool over ssh: push it, run one subcommand, read
 The ssh and scp side of a guest call, run ON the PVE node by the repair and apply-and-verify
 drivers: :class:`Guest` builds every argv (:func:`ssh_options` from the ``[ssh]`` settings), runs it
 through its runner, and hands the finished process to
-:func:`~pve_winrepair.domain.envelope.parse_envelope`, which owns the answer contract and the error
+:func:`~pve_winrepair.domain.envelope.parse_answer`, which owns the answer contract and the error
 types.
 
 The tool lives on the guest under a content address,
@@ -53,21 +53,25 @@ from pve_winrepair.domain.envelope import (
     READ_FAILURES,
     Envelope,
     Fields,
+    GuestAnswer,
     GuestCallError,
     GuestNoAnswerError,
     GuestProtocolError,
     GuestPushError,
+    PayloadT,
     Runner,
+    check_argument,
+    describe_validation_error,
+    parse_answer,
     parse_envelope,
     snippet,
     tool_argv,
 )
+from pve_winrepair.domain.guest_answers import GuestCommand, LockDirsAnswer, LockDirsVerdict
 from pve_winrepair.domain.guest_tool import PackedTool, Pushed
 
 if TYPE_CHECKING:
     from collections.abc import Generator, Sequence
-
-    from pydantic_core import ErrorDetails
 
     from pve_winrepair.domain.settings import SshSettings
 
@@ -80,6 +84,7 @@ __all__ = [
     "TOOL_DIR",
     "TOOL_NAME",
     "Guest",
+    "ask_guest",
     "guest_tool",
     "packed_tool",
     "push_tool",
@@ -235,15 +240,34 @@ def _call(runner: Runner, argv: Sequence[str], timeout: float, what: str) -> sub
         raise GuestNoAnswerError(f"{what}: could not run {argv[0]}: {exc}") from exc
 
 
+def ask_guest(
+    guest: Guest, command: GuestCommand, payload: type[PayloadT], *args: str, timeout: float
+) -> GuestAnswer[PayloadT]:
+    """Run one subcommand of the tool copy at ``guest.tool_path`` and return its typed answer (ok or refused).
+
+    Raises:
+        UnsafeArgumentError: Before ssh, see :func:`check_argument`.
+        GuestPushError: The packed tool is missing on this node, so its guest path is unknown.
+        GuestNoAnswerError, GuestInternalError, GuestProtocolError: See :func:`parse_answer`.
+    """
+    argv = _ssh_argv(guest.ip, guest.ssh_settings, tool_argv(guest.tool_path, command, args))
+    proc = _call(guest.runner, argv, timeout, f"guest tool {command.value}")
+    return parse_answer(command, payload, proc)
+
+
 def guest_tool(guest: Guest, command: str, *args: str, timeout: float) -> Envelope:
-    """Run one subcommand of the tool copy at ``guest.tool_path`` and return its envelope (ok or refused).
+    """Run one subcommand and return its envelope, read by name (ok or refused).
+
+    TEMPORARY(data-arch): removed once repair.py/apply.py read typed answers.
 
     Raises:
         UnsafeArgumentError: Before ssh, see :func:`check_argument`.
         GuestPushError: The packed tool is missing on this node, so its guest path is unknown.
         GuestNoAnswerError, GuestInternalError, GuestProtocolError: See :func:`parse_envelope`.
     """
-    argv = _ssh_argv(guest.ip, guest.ssh_settings, tool_argv(guest.tool_path, command, args))
+    # check_argument first, so an unsafe name is refused as unsafe rather than as an unknown command.
+    known = GuestCommand(check_argument(command))
+    argv = _ssh_argv(guest.ip, guest.ssh_settings, tool_argv(guest.tool_path, known, args))
     return parse_envelope(command, _call(guest.runner, argv, timeout, f"guest tool {command}"))
 
 
@@ -286,15 +310,16 @@ def _lock_tool_dir(runner: Runner, ip: str, ssh: SshSettings, staged: str, dest:
         GuestPushError: It refused, gave no answer, or crashed (the guest traceback is chained).
         GuestProtocolError: Its answer broke the envelope contract.
     """
-    command = "lock-dirs"
+    command = GuestCommand.LOCK_DIRS
     argv = _ssh_argv(ip, ssh, tool_argv(staged, command, ("--tool", dest)))
     try:
-        envelope = parse_envelope(command, _call(runner, argv, LOCK_TIMEOUT, f"guest tool {command}"))
+        proc = _call(runner, argv, LOCK_TIMEOUT, f"guest tool {command.value}")
+        answer = parse_answer(command, LockDirsAnswer, proc)
     except READ_FAILURES as exc:
-        raise GuestPushError(f"{command} before the push: {exc}") from exc
-    if envelope.gate("verdict", "OK") != "OK":
-        raise GuestPushError(f"{command} refused, nothing was copied in: {envelope.data.text_or_none('reason')}")
-    return envelope.data.flag("tool_present")
+        raise GuestPushError(f"{command.value} before the push: {exc}") from exc
+    if answer.data.verdict is not LockDirsVerdict.OK:
+        raise GuestPushError(f"{command.value} refused, nothing was copied in: {answer.data.reason}")
+    return answer.data.tool_present
 
 
 def _guest_sha256(runner: Runner, ip: str, ssh: SshSettings, path: str) -> str:
@@ -320,17 +345,12 @@ def _verify(runner: Runner, ip: str, ssh: SshSettings, path: str, tool: PackedTo
         )
 
 
-def _answer_problem(item: ErrorDetails) -> str:
-    """``<field>: <reason>`` for one validation error; never the input, which came from the guest."""
-    return f"{'.'.join(str(part) for part in item['loc']) or 'answer'}: {item['msg']}"
-
-
 def _profile_reading(stdout: str, what: str) -> _ProfileReading:
     try:
         return _ProfileReading.model_validate_json(stdout.strip())
     except ValidationError as error:
-        problems = "; ".join(_answer_problem(item) for item in error.errors())
-        raise GuestPushError(f"{what}: not the probe's JSON object ({problems}); nothing was copied") from None
+        problems = describe_validation_error(error, root="answer")
+        raise GuestPushError(f"{what}: not the probe's JSON object ({problems}); nothing was copied") from error
 
 
 def _check_profile(runner: Runner, ip: str, ssh: SshSettings) -> None:
@@ -504,10 +524,16 @@ class Guest:
         """Delete the profile copy this Guest runs; None once done, else why not (never raises)."""
         return remove_staged(self.runner, self.ip, self.ssh_settings, self.packed.staged)
 
+    def ask(self, command: GuestCommand, payload: type[PayloadT], *args: str, timeout: float) -> GuestAnswer[PayloadT]:
+        """See :func:`ask_guest`; runs the copy at :attr:`tool_path`."""
+        return ask_guest(self, command, payload, *args, timeout=timeout)
+
+    # TEMPORARY(data-arch): removed once repair.py/apply.py read typed answers
     def tool(self, command: str, *args: str, timeout: float) -> Envelope:
         """See :func:`guest_tool`; runs the copy at :attr:`tool_path`."""
         return guest_tool(self, command, *args, timeout=timeout)
 
+    # TEMPORARY(data-arch): removed once repair.py/apply.py read typed answers
     def probe(self, command: str, *args: str, timeout: float) -> Fields:
         """Run a subcommand that never refuses (a pure probe) and return its data.
 

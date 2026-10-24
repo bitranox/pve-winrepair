@@ -510,7 +510,8 @@ def refuse_live_run(guest: GuestPort, rep: Report) -> None:
             f"{state.log_path} shows a run that started and has no DONE marker - "
             f"it may still be running; check the guest before relaunching"
         )
-    rep.add("no_live_run", ok=True, previous_verdict=state.verdict)
+    # .value: the step is echoed with an f-string, which renders a str-mixin enum as its NAME on 3.11+.
+    rep.add("no_live_run", ok=True, previous_verdict=None if state.verdict is None else state.verdict.value)
 
 
 def quiesce_windows_update(guest: GuestPort, rep: Report) -> None:

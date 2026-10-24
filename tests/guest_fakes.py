@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, cast
 import pytest
 from click.testing import CliRunner
 from lib_layered_config import Config
+from pwshpy import ServiceState
 
 from pve_winrepair.adapters.cli.main import main
 from pve_winrepair.adapters.guest_ssh import Guest
@@ -40,6 +41,7 @@ from pve_winrepair_guest.probes import (
     ServicingReport,
     SetupReport,
     StagedOs,
+    StagedVerdict,
     StateLog,
     state_verdict,
 )
@@ -54,12 +56,19 @@ from pve_winrepair_guest.upgrade import (
 )
 from pve_winrepair_guest.wu import (
     QuiesceReport,
+    QuiesceVerdict,
     RestoreReport,
+    RestoreVerdict,
     SearchProbe,
+    SearchStatus,
     ServiceRow,
+    ServiceStart,
+    StartMode,
     StartWrite,
     StopIssued,
     StopWait,
+    WmiServiceState,
+    WriteResult,
 )
 
 if TYPE_CHECKING:
@@ -338,17 +347,18 @@ GIB = 1024**3
 
 
 def quiesce_report(verdict: str, *, running: tuple[str, ...] = ()) -> QuiesceReport:
-    """quiesce-wu's answer with ``verdict``; ``running`` names the services still running."""
-    rows = (ServiceRow(name="wuauserv", start_mode="Disabled", state="Running" if running else "Stopped"),)
+    """quiesce-wu's answer with ``verdict`` (its value text); ``running`` names the services still running."""
+    state = WmiServiceState.RUNNING if running else WmiServiceState.STOPPED
+    rows = (ServiceRow(name="wuauserv", start_mode=StartMode.DISABLED, state=state),)
     return QuiesceReport(
-        previous_start_modes={"wuauserv": "Manual", "UsoSvc": "Auto"},
-        writes=(StartWrite(service="wuauserv", value=4, result="WRITTEN", error=None),),
-        stops=(StopIssued(service="wuauserv", state="StopPending", error=None),),
+        previous_start_modes={"wuauserv": StartMode.MANUAL, "UsoSvc": StartMode.AUTO},
+        writes=(StartWrite(service="wuauserv", value=ServiceStart.DISABLED, result=WriteResult.WRITTEN, error=None),),
+        stops=(StopIssued(service="wuauserv", state=ServiceState.STOP_PENDING, error=None),),
         wait=StopWait(waited_s=10.0, timed_out=False, still_running=running),
         services=rows,
         not_disabled=(),
         still_running=running,
-        verdict=verdict,
+        verdict=QuiesceVerdict(verdict),
     )
 
 
@@ -460,20 +470,24 @@ def agent_runner(pve: FakePve, **overrides: Answer) -> FakeRunner:
 
 
 NEWOS = r"C:\$WINDOWS.~BT\NewOS\Windows\System32\winload.efi"
-TIMED_OUT = SearchProbe(status="TIMEOUT", pending=None, titles=(), error=None, timeout_s=180.0)
+TIMED_OUT = SearchProbe(status=SearchStatus.TIMEOUT, pending=None, titles=(), error=None, timeout_s=180.0)
 
 
 def restore_report(verdict: str, still: tuple[str, ...] = (), search: SearchProbe = TIMED_OUT) -> RestoreReport:
-    """restore-wu's answer with ``verdict``; ``still`` names the services left disabled."""
+    """restore-wu's answer with ``verdict`` (its value text); ``still`` names the services left disabled."""
     rows = tuple(
-        ServiceRow(name=name, start_mode="Disabled" if name in still else "Manual", state="Stopped")
+        ServiceRow(
+            name=name,
+            start_mode=StartMode.DISABLED if name in still else StartMode.MANUAL,
+            state=WmiServiceState.STOPPED,
+        )
         for name in ("wuauserv", "UsoSvc")
     )
     return RestoreReport(
-        writes=(StartWrite(service="wuauserv", value=3, result="WRITTEN", error=None),),
+        writes=(StartWrite(service="wuauserv", value=ServiceStart.MANUAL, result=WriteResult.WRITTEN, error=None),),
         services=rows,
         still_disabled=still,
-        verdict=verdict,
+        verdict=RestoreVerdict(verdict),
         search=search,
     )
 
@@ -486,7 +500,7 @@ def apply_runner(pve: FakePve, alive: Reply, state: Reply) -> FakeRunner:
         .on("build", answer("build", BUILD_BEFORE), answer("build", BUILD_AFTER))
         .on("setup-alive", alive)
         .on("state", state)
-        .on("staged-os", answer("staged-os", StagedOs(path=NEWOS, present=True, verdict="REARMABLE")))
+        .on("staged-os", answer("staged-os", StagedOs(path=NEWOS, present=True, verdict=StagedVerdict.REARMABLE)))
         .on("hostname", Reply(0, "GUEST\r\n"))
         .on("nic-macs", NIC_MACS)
         .on("restore-wu", answer("restore-wu", restore_report("RESTORED")))

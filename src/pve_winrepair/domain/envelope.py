@@ -1,28 +1,28 @@
-r"""The guest tool's answer contract: its envelope, the typed fields, and every way a call fails.
+r"""The guest tool's answer contract: its envelope, the typed answer, and every way a call fails.
 
 The guest tool (``winrepair_guest.ps1``, packed by ``pwshpy pack``) answers every subcommand with
 exactly one line ``{"ok": bool, "command": str, "data": {...}, "skipped": [...]}`` on stdout and
 exits 0 (ok), 1 (refused: its own gate said no) or 2 (internal error, still with an envelope).
-:func:`parse_envelope` turns that into three distinct outcomes, so a failed read can never pass for
-an empty or negative answer:
+:func:`parse_answer` validates that line ONCE into a :class:`GuestAnswer` whose ``data`` is the
+command's payload model (:mod:`pve_winrepair.domain.guest_answers`), and keeps three outcomes
+apart, so a failed read can never pass for an empty or negative answer:
 
-* an :class:`Envelope` - exit 0, or exit 1 (refused); the caller gates on its typed ``data``;
+* a :class:`GuestAnswer` - exit 0, or exit 1 (refused); its ``ok`` agrees with the payload's verdict;
 * :class:`GuestInternalError` - exit 2: the tool ran and crashed, or did not know the command;
 * :class:`GuestNoAnswerError` - no envelope at all: ssh failed, timed out, or stdout held nothing
   parseable (a non-zero exit without an envelope included).
 
-A malformed or inconsistent answer (two envelopes, ``ok`` disagreeing with the exit code, a
-missing or mistyped field) is :class:`GuestProtocolError`: the driver and the packed tool disagree
-about the contract, which is a bug, not a guest state.
+A malformed or inconsistent answer (two envelopes, ``ok`` disagreeing with the exit code or with
+the payload's verdict, a missing, unknown or mistyped field) is :class:`GuestProtocolError`: the
+driver and the packed tool disagree about the contract, which is a bug, not a guest state.
 
 Arguments are checked BEFORE ssh (:func:`check_argument`): the guest's ssh shell is ``cmd.exe``,
 which split ``D:\up&grade`` at the ``&`` and ran the rest as a second command.
 
-Also here, because both drivers gate on them: the state log's verdicts (:data:`STATE_MARKERS`,
-:class:`RunState`, :func:`state_marker`), :data:`READ_FAILURES`, :data:`PROBE_TIMEOUT`,
-:func:`guest_stderr` and :data:`WU_HELD_HINT`. Nothing here starts a process: the ssh adapter
-(:mod:`pve_winrepair.adapters.guest_ssh`) runs a call and hands the finished process to
-:func:`parse_envelope`.
+Also here, because both drivers gate on them: :class:`RunState`, :data:`READ_FAILURES`,
+:data:`PROBE_TIMEOUT`, :func:`guest_stderr` and :data:`WU_HELD_HINT`. Nothing here starts a
+process: the ssh adapter (:mod:`pve_winrepair.adapters.guest_ssh`) runs a call and hands the
+finished process to :func:`parse_answer`.
 """
 
 from __future__ import annotations
@@ -31,11 +31,17 @@ import json
 import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Generic, TypeVar, cast
+
+from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
+
+from pve_winrepair.domain.guest_answers import GatedPayload, GuestCommand, ProbePayload, StateVerdict
 
 if TYPE_CHECKING:
     # The finished process is only a type here; nothing in this module runs one.
     from subprocess import CompletedProcess  # nosec B404
+
+    from pydantic_core import ErrorDetails
 
 __all__ = [
     "EXIT_INTERNAL",
@@ -44,21 +50,27 @@ __all__ = [
     "POWERSHELL",
     "PROBE_TIMEOUT",
     "READ_FAILURES",
-    "STATE_MARKERS",
     "STDERR_TAIL_LINES",
     "WU_HELD_HINT",
     "Envelope",
     "Fields",
+    "GuestAnswer",
     "GuestCallError",
     "GuestInternalError",
     "GuestNoAnswerError",
     "GuestProtocolError",
     "GuestPushError",
+    "InternalErrorAnswer",
+    "InternalErrorData",
+    "PayloadT",
     "RunState",
     "Runner",
+    "SkippedItem",
     "UnsafeArgumentError",
     "check_argument",
+    "describe_validation_error",
     "guest_stderr",
+    "parse_answer",
     "parse_envelope",
     "snippet",
     "state_marker",
@@ -88,7 +100,6 @@ _SAFE_ARGUMENT = re.compile(r"[A-Za-z0-9_.:\\/-]+")
 # The pack wrapper consumes these switches itself (matched case-insensitively), so a value
 # spelled like one would never reach the tool.
 _WRAPPER_SWITCH = re.compile(r"-pwshpy", re.IGNORECASE)
-_ENVELOPE_KEYS = frozenset({"ok", "command", "data", "skipped"})
 EXIT_OK, EXIT_REFUSED, EXIT_INTERNAL = 0, 1, 2
 # How much of a crashed tool's stderr (its Python traceback) is kept: enough for the frames that
 # matter, short enough for an operator's terminal and a --json step.
@@ -134,22 +145,79 @@ class GuestProtocolError(GuestCallError):
     """An answer broke the envelope contract: the driver and the packed tool disagree."""
 
 
+# --- the answer models ----------------------------------------------------------------------
+
+
+class SkippedItem(BaseModel):
+    """Something the command could not check, and why (the guest's ``Skip``)."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    item: str
+    reason: str
+
+
+class InternalErrorData(BaseModel):
+    """The payload of an exit-2 envelope: the exception's message and its type name."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    error: str
+    error_type: str
+
+
+class InternalErrorAnswer(BaseModel):
+    """An exit-2 envelope.
+
+    ``command`` is text, not a :class:`GuestCommand`: a tool whose argument parse failed names the
+    first known command token it was given, or "" when it saw none, and the value only labels the
+    error message.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    ok: bool
+    command: str
+    data: InternalErrorData
+    skipped: tuple[SkippedItem, ...]
+
+
+PayloadT = TypeVar("PayloadT", bound="ProbePayload | GatedPayload")
+
+
+class GuestAnswer(BaseModel, Generic[PayloadT]):
+    """One guest tool answer that the caller gates on (exit 0 ok, or exit 1 refused).
+
+    Attributes:
+        ok: True on exit 0; False when the command's own gate refused (exit 1).
+        command: The subcommand that answered (always the one asked).
+        data: The command's payload.
+        skipped: What the command could not check.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    ok: bool
+    command: GuestCommand
+    data: PayloadT
+    skipped: tuple[SkippedItem, ...]
+
+
 class GuestInternalError(GuestCallError):
     """The tool answered exit 2: it crashed, or did not know the command.
 
     Attributes:
-        envelope: The internal-error envelope (``data.error``, ``data.error_type``).
+        answer: The internal-error envelope (``data.error``, ``data.error_type``).
         stderr_tail: The last lines of the tool's stderr: its traceback, which the envelope's one
             ``error`` line does not carry.
     """
 
-    def __init__(self, envelope: Envelope, stderr: str = "") -> None:
-        """Keep the envelope and the stderr tail; name the guest's error and its last line."""
-        error = envelope.data.raw("error") if "error" in envelope.data else None
+    def __init__(self, answer: InternalErrorAnswer, stderr: str = "") -> None:
+        """Keep the answer and the stderr tail; name the guest's error and its last line."""
         tail = tuple(line for line in stderr.splitlines() if line.strip())[-STDERR_TAIL_LINES:]
         last = f" (guest stderr ends: {tail[-1].strip()})" if tail else ""
-        super().__init__(f"guest tool {envelope.command or '?'} failed: {error}{last}")
-        self.envelope = envelope
+        super().__init__(f"guest tool {answer.command or '?'} failed: {answer.data.error}{last}")
+        self.answer = answer
         self.stderr_tail = tail
 
 
@@ -204,12 +272,181 @@ def check_argument(argument: str) -> str:
     return argument
 
 
-def tool_argv(tool: str, command: str, args: Sequence[str]) -> list[str]:
+def tool_argv(tool: str, command: GuestCommand, args: Sequence[str]) -> list[str]:
     """The remote command line running ``tool`` (a guest path) for one subcommand, every argument checked."""
-    return [*POWERSHELL, check_argument(tool), *(check_argument(a) for a in (command, *args)), "--json"]
+    return [*POWERSHELL, check_argument(tool), *(check_argument(a) for a in (command.value, *args)), "--json"]
 
 
-# --- typed fields ---------------------------------------------------------------------------
+def _problem(item: ErrorDetails, root: str) -> str:
+    """``<dotted loc>: <reason>`` for one problem; a validator's own message without pydantic's prefix."""
+    where = ".".join(str(part) for part in item["loc"]) or root
+    ctx = item.get("ctx") or {}
+    reason = str(ctx["error"]) if item["type"] == "value_error" and "error" in ctx else item["msg"]
+    return f"{where}: {reason}"
+
+
+def describe_validation_error(error: ValidationError, *, root: str) -> str:
+    """Every problem of ``error`` as ``<dotted loc>: <reason>``, joined by ``; ``.
+
+    Never the rejected input (it came from outside) nor pydantic's own rendering; ``root`` names a
+    problem with no location (the whole document).
+
+    Example:
+        >>> try:
+        ...     SkippedItem.model_validate_json('{"item": 1}', strict=True)
+        ... except ValidationError as error:
+        ...     describe_validation_error(error, root="skipped")
+        'item: Input should be a valid string; reason: Field required'
+    """
+    return "; ".join(_problem(item, root) for item in error.errors())
+
+
+def snippet(text: str) -> str:
+    r"""``text`` on one line, cut to 300 characters: a process's output quoted in an error message.
+
+    Example:
+        >>> snippet("CertUtil: failed\r\n  0x80070002\r\n")
+        'CertUtil: failed 0x80070002'
+    """
+    return " ".join(text.split())[:300]
+
+
+# --- reading one answer ---------------------------------------------------------------------
+
+
+class _EnvelopeShape(BaseModel):
+    """What makes a stdout line an envelope rather than wrapper noise: a JSON object with the four keys.
+
+    Lenient on purpose: a line of this shape with the wrong types is a broken envelope (a protocol
+    error), not noise, so the types are checked only once the line is known to be the envelope.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    ok: JsonValue
+    command: JsonValue
+    data: JsonValue
+    skipped: JsonValue
+
+
+class _EnvelopeHeader(BaseModel):
+    """The envelope with its payload still unread: enough to check ``command`` and ``ok`` first."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    ok: bool
+    command: GuestCommand
+    data: dict[str, JsonValue]
+    skipped: tuple[SkippedItem, ...]
+
+
+def _is_envelope(line: str) -> bool:
+    text = line.strip()
+    if not text.startswith("{"):
+        return False
+    try:
+        _EnvelopeShape.model_validate_json(text)
+    except ValidationError:
+        return False
+    return True
+
+
+def _no_answer(command: str, proc: CompletedProcess[str], why: str) -> GuestNoAnswerError:
+    return GuestNoAnswerError(
+        f"guest tool {command}: {why} (exit {proc.returncode}; stdout: {snippet(proc.stdout)!r}; "
+        f"stderr: {snippet(proc.stderr)!r})"
+    )
+
+
+def _envelope_line(command: str, proc: CompletedProcess[str]) -> str:
+    """The one envelope line in stdout, under an exit code the tool uses; anything around it is noise.
+
+    Raises:
+        GuestNoAnswerError: No envelope, or an exit code the tool never uses.
+        GuestProtocolError: More than one envelope.
+        GuestInternalError: Exit 2 with a well-formed internal-error envelope.
+    """
+    found = [line.strip() for line in proc.stdout.splitlines() if _is_envelope(line)]
+    if not found:
+        raise _no_answer(command, proc, "no envelope on stdout")
+    if len(found) > 1:
+        raise GuestProtocolError(f"guest tool {command}: {len(found)} envelopes on stdout, expected one")
+    if proc.returncode not in _TOOL_EXITS:
+        raise _no_answer(command, proc, "an exit code the tool never uses")
+    line = found[0]
+    if proc.returncode == EXIT_INTERNAL:
+        raise GuestInternalError(_validated(InternalErrorAnswer, line, command), proc.stderr)
+    return line
+
+
+ModelT = TypeVar("ModelT", bound=BaseModel)
+
+
+def _validated(model: type[ModelT], line: str, command: str) -> ModelT:
+    """``line`` validated as ``model`` in strict JSON mode; a refusal is a protocol error naming each problem.
+
+    Strict JSON mode takes an enum's value string and refuses a bool where an int is declared.
+    """
+    try:
+        return model.model_validate_json(line, strict=True)
+    except ValidationError as error:
+        problems = describe_validation_error(error, root="envelope")
+        raise GuestProtocolError(f"guest tool {command}: the answer breaks the contract: {problems}") from error
+
+
+def _check_header(command: GuestCommand, header: _EnvelopeHeader, exit_code: int) -> None:
+    if header.command is not command:
+        raise GuestProtocolError(f"asked {command.value!r}, the envelope answers {header.command.value!r}")
+    if header.ok != _TOOL_EXITS[exit_code]:
+        raise GuestProtocolError(f"guest tool {command.value}: ok={header.ok} with exit {exit_code}")
+
+
+def _passing_text(gate_passing: frozenset[str]) -> str:
+    return " or ".join(repr(value) for value in sorted(gate_passing))
+
+
+def _check_verdict(answer: GuestAnswer[PayloadT]) -> None:
+    """Refuse an answer whose ``ok`` contradicts its payload: a probe that refused, or a verdict that disagrees."""
+    data = answer.data
+    command = answer.command.value
+    if isinstance(data, ProbePayload):
+        if not answer.ok:
+            raise GuestProtocolError(f"probe {command} refused (exit {EXIT_REFUSED}); it never should")
+        return
+    gate = data.ok_gate()
+    if gate.passed != answer.ok:
+        value = cast("str", gate.value.value)
+        passing = _passing_text(frozenset(cast("str", member.value) for member in gate.passing))
+        raise GuestProtocolError(f"{command}: ok={answer.ok} contradicts {gate.field}={value!r} (pass is {passing})")
+
+
+def parse_answer(command: GuestCommand, payload: type[PayloadT], proc: CompletedProcess[str]) -> GuestAnswer[PayloadT]:
+    """Read one guest tool answer into its typed model.
+
+    Args:
+        command: The subcommand that was run (the envelope must name it).
+        payload: The command's payload model (:class:`~pve_winrepair.domain.guest_answers.BuildAnswer`, ...).
+        proc: The finished ssh call.
+
+    Returns:
+        The answer, for exit 0 (ok) and exit 1 (refused); ``ok`` agrees with the payload's verdict,
+        and a probe payload is never refused.
+
+    Raises:
+        GuestNoAnswerError: No envelope, or an exit code the tool never uses (ssh's 255 included).
+        GuestInternalError: Exit 2.
+        GuestProtocolError: The envelope contradicts its exit code, the command or its own verdict,
+            or a field is missing, unknown or mistyped.
+    """
+    line = _envelope_line(command.value, proc)
+    _check_header(command, _validated(_EnvelopeHeader, line, command.value), proc.returncode)
+    answer = _validated(GuestAnswer[payload], line, command.value)
+    _check_verdict(answer)
+    return answer
+
+
+# --- TEMPORARY(data-arch): the name-keyed read path ------------------------------------------
+# TEMPORARY(data-arch): removed once repair.py/apply.py read typed answers
 
 
 def _kind(value: object) -> str:
@@ -217,7 +454,7 @@ def _kind(value: object) -> str:
 
 
 @dataclass(frozen=True)
-class Fields:
+class Fields:  # TEMPORARY(data-arch): removed once repair.py/apply.py read typed answers
     """A JSON object from an envelope, read by name and type.
 
     A missing or mistyped field raises :class:`GuestProtocolError` instead of reading as a
@@ -310,8 +547,8 @@ class Fields:
 
 
 @dataclass(frozen=True)
-class Envelope:
-    """One guest tool answer that the caller gates on (exit 0 ok, or exit 1 refused).
+class Envelope:  # TEMPORARY(data-arch): removed once repair.py/apply.py read typed answers
+    """One guest tool answer that the caller gates on (exit 0 ok, or exit 1 refused), read by name.
 
     Attributes:
         ok: True on exit 0; False when the command's own gate refused (exit 1).
@@ -339,95 +576,40 @@ class Envelope:
         return value
 
 
-def _envelope_object(line: str) -> Mapping[str, object] | None:
-    """The line as an envelope-shaped JSON object, or None for any other line."""
-    text = line.strip()
-    if not text.startswith("{"):
-        return None
-    try:
-        parsed: object = json.loads(text)
-    except ValueError:
-        return None
-    if not isinstance(parsed, dict):
-        return None
-    obj = cast("dict[str, object]", parsed)
-    return obj if obj.keys() >= _ENVELOPE_KEYS else None
-
-
-def snippet(text: str) -> str:
-    r"""``text`` on one line, cut to 300 characters: a process's output quoted in an error message.
-
-    Example:
-        >>> snippet("CertUtil: failed\r\n  0x80070002\r\n")
-        'CertUtil: failed 0x80070002'
-    """
-    return " ".join(text.split())[:300]
-
-
-def _no_answer(command: str, proc: CompletedProcess[str], why: str) -> GuestNoAnswerError:
-    return GuestNoAnswerError(
-        f"guest tool {command}: {why} (exit {proc.returncode}; stdout: {snippet(proc.stdout)!r}; "
-        f"stderr: {snippet(proc.stderr)!r})"
-    )
-
-
-def _single_envelope(command: str, proc: CompletedProcess[str]) -> Mapping[str, object]:
-    """The one envelope line in stdout; anything else around it is wrapper noise."""
-    found = [obj for obj in map(_envelope_object, proc.stdout.splitlines()) if obj is not None]
-    if not found:
-        raise _no_answer(command, proc, "no envelope on stdout")
-    if len(found) > 1:
-        raise GuestProtocolError(f"guest tool {command}: {len(found)} envelopes on stdout, expected one")
-    return found[0]
-
-
-def _build_envelope(obj: Mapping[str, object], exit_code: int) -> Envelope:
-    ok, name, data, skipped = obj["ok"], obj["command"], obj["data"], obj["skipped"]
-    if not isinstance(ok, bool) or not isinstance(name, str):
-        raise GuestProtocolError(f"envelope ok/command have the wrong type: {ok!r}, {name!r}")
-    if not isinstance(data, dict) or not isinstance(skipped, list):
-        raise GuestProtocolError(f"envelope {name}: data must be an object and skipped a list")
-    top = Fields({"skipped": cast("list[object]", skipped)}, f"{name}")
-    return Envelope(
-        ok,
-        name,
-        Fields(cast("Mapping[str, object]", data), f"{name}.data"),
-        top.sections("skipped"),
-        exit_code,
-    )
-
-
 def parse_envelope(command: str, proc: CompletedProcess[str]) -> Envelope:
-    """Read one guest tool answer.
-
-    Args:
-        command: The subcommand that was run (the envelope must name it).
-        proc: The finished ssh call.
-
-    Returns:
-        The envelope, for exit 0 (ok) and exit 1 (refused).
+    """Read one guest tool answer by name (TEMPORARY(data-arch): removed once repair.py/apply.py read typed answers).
 
     Raises:
         GuestNoAnswerError: No envelope, or an exit code the tool never uses (ssh's 255 included).
         GuestInternalError: Exit 2.
         GuestProtocolError: The envelope contradicts its exit code or the command, or is malformed.
     """
-    obj = _single_envelope(command, proc)
-    if proc.returncode not in _TOOL_EXITS:
-        raise _no_answer(command, proc, "an exit code the tool never uses")
-    envelope = _build_envelope(obj, proc.returncode)
-    if proc.returncode == EXIT_INTERNAL:
-        raise GuestInternalError(envelope, proc.stderr)
-    if envelope.command != command:
-        raise GuestProtocolError(f"asked {command!r}, the envelope answers {envelope.command!r}")
-    if envelope.ok != _TOOL_EXITS[proc.returncode]:
-        raise GuestProtocolError(f"guest tool {command}: ok={envelope.ok} with exit {proc.returncode}")
-    return envelope
+    line = _envelope_line(command, proc)
+    header = _validated(_EnvelopeHeader, line, command)
+    _check_header(GuestCommand(command), header, proc.returncode)
+    # json.loads here only: Fields reads the payload by name until its last readers are migrated.
+    obj = cast("dict[str, object]", json.loads(line))
+    data = Fields(cast("Mapping[str, object]", obj["data"]), f"{command}.data")
+    skipped = tuple(Fields(item.model_dump(), f"{command}.skipped[{i}]") for i, item in enumerate(header.skipped))
+    return Envelope(header.ok, command, data, skipped, proc.returncode)
 
 
-# The guest's state-log verdicts and the marker line each stands for. The marker text is a contract:
-# the guest writes exactly these lines and every reader of the log matches on them.
-STATE_MARKERS = {"DONE-OK": "STATE=DONE-OK", "DONE-FAIL": "STATE=DONE-FAIL"}
+def state_marker(state: Fields) -> str | None:  # TEMPORARY(data-arch): removed once repair.py reads StateAnswer
+    """The marker line (``STATE=DONE-OK``) for a ``state`` probe's verdict, or None while it has none.
+
+    Raises:
+        GuestProtocolError: The log carries a verdict this driver does not know.
+    """
+    verdict = state.text_or_none("verdict")
+    if verdict is None:
+        return None
+    known = {member.value: member for member in StateVerdict}
+    if verdict not in known:
+        raise GuestProtocolError(f"state: unknown verdict {verdict!r}")
+    return known[verdict].marker
+
+
+# --- the run state --------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
@@ -438,18 +620,18 @@ class RunState:
         alive: SetupHost is running.
         log_present: The state log exists.
         log_path: Where the state log is on the guest.
-        verdict: ``DONE-OK`` / ``DONE-FAIL`` from the log's last marker line, or None.
+        verdict: How the log's last marker line says the run ended, or None.
     """
 
     alive: bool
     log_present: bool
     log_path: str
-    verdict: str | None
+    verdict: StateVerdict | None
 
     @property
     def marker(self) -> str | None:
         """The verdict as its marker line (``STATE=DONE-OK``), or None."""
-        return None if self.verdict is None else STATE_MARKERS[self.verdict]
+        return None if self.verdict is None else self.verdict.marker
 
     @property
     def live(self) -> bool:
@@ -459,17 +641,3 @@ class RunState:
         read as finished, even with SetupHost gone.
         """
         return self.alive or (self.log_present and self.verdict is None)
-
-
-def state_marker(state: Fields) -> str | None:
-    """The marker line (``STATE=DONE-OK``) for a ``state`` probe's verdict, or None while it has none.
-
-    Raises:
-        GuestProtocolError: The log carries a verdict this driver does not know.
-    """
-    verdict = state.text_or_none("verdict")
-    if verdict is None:
-        return None
-    if verdict not in STATE_MARKERS:
-        raise GuestProtocolError(f"state: unknown verdict {verdict!r}")
-    return STATE_MARKERS[verdict]

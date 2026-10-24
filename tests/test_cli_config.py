@@ -11,6 +11,7 @@ import pytest
 
 from pve_winrepair.adapters import cli as cli_mod
 from pve_winrepair.adapters.config import loader as config_mod
+from pve_winrepair.domain.enums import DeployTarget
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping
@@ -42,6 +43,19 @@ def test_when_config_is_invoked_with_json_format_it_outputs_json(
     assert result.exit_code == 0
     # Use result.stdout to avoid async log messages from stderr
     assert "{" in result.stdout
+
+
+@pytest.mark.os_agnostic
+def test_config_format_is_matched_in_any_case(
+    cli_runner: CliRunner,
+    production_factory: Callable[[], Any],
+) -> None:
+    """The choice is matched case-insensitively and yields the same output as the lowercase value."""
+    lower: Result = cli_runner.invoke(cli_mod.cli, ["config", "--format", "json"], obj=production_factory)
+    upper: Result = cli_runner.invoke(cli_mod.cli, ["config", "--format", "JSON"], obj=production_factory)
+
+    assert upper.exit_code == 0
+    assert upper.stdout == lower.stdout
 
 
 @pytest.mark.os_agnostic
@@ -314,20 +328,18 @@ def test_when_config_deploy_supports_multiple_targets(
     tmp_path: Any,
     inject_deploy_configuration: Callable[[Callable[..., list[Path]]], Callable[[], Any]],
 ) -> None:
-    """Verify config-deploy accepts multiple --target options."""
-    from pve_winrepair.domain.enums import DeployTarget
-
+    """Verify config-deploy accepts multiple --target options, in any case, as DeployTarget members."""
     path1 = tmp_path / "config1.toml"
     path2 = tmp_path / "config2.toml"
     path1.touch()
     path2.touch()
 
-    deployed = {"user": path1, "host": path2}
-    seen: list[str] = []
+    deployed = {DeployTarget.USER: path1, DeployTarget.HOST: path2}
+    seen: list[DeployTarget] = []
 
     def mock_deploy(
         *,
-        targets: Any,
+        targets: tuple[DeployTarget, ...],
         force: bool = False,
         profile: str | None = None,
         set_permissions: bool | None = None,
@@ -335,18 +347,18 @@ def test_when_config_deploy_supports_multiple_targets(
         file_mode: int | None = None,
         permission_overrides: Mapping[str, object] | None = None,
     ) -> list[Path]:
-        target_values = [t.value if isinstance(t, DeployTarget) else t for t in targets]
-        seen.extend(target_values)
-        return [deployed[value] for value in target_values]
+        seen.extend(targets)
+        return [deployed[target] for target in targets]
 
     factory = inject_deploy_configuration(mock_deploy)
 
     result: Result = cli_runner.invoke(
-        cli_mod.cli, ["config-deploy", "--target", "user", "--target", "host"], obj=factory
+        cli_mod.cli, ["config-deploy", "--target", "user", "--target", "HOST"], obj=factory
     )
 
     assert result.exit_code == 0
-    assert seen == ["user", "host"]
+    assert seen == [DeployTarget.USER, DeployTarget.HOST]
+    assert all(type(target) is DeployTarget for target in seen)
     assert str(path1) in result.output
     assert str(path2) in result.output
 

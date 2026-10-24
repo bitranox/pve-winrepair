@@ -91,6 +91,7 @@ from pve_winrepair_guest.probes import (
     Drive,
     StateLog,
     build_info,
+    current_version,
     drive_from_cim,
     fixed_drives,
     read_state,
@@ -728,7 +729,7 @@ def run_prepare(host: UpgradeHost, stage_root: str) -> Outcome:
     """Clear read-only, gate on the WIM; on PASS write the waiver and report TPM and free space."""
     cleared, skipped = clear_read_only(stage_root)
     failed = len(skipped)
-    running = build_info(_values(host, CURRENT_VERSION_KEY))
+    running = build_info(current_version(host.registry(CURRENT_VERSION_KEY)))
     wim_path = os.fspath(Path(stage_root, "sources", "install.wim"))
     images, reason = _read_wim(wim_path)
     gate, image = "FAIL", None
@@ -1573,7 +1574,7 @@ def _info(read: Callable[[], str]) -> tuple[str | None, str]:
 
 
 def _build(host: UpgradeHost) -> str:
-    return build_info(_values(host, CURRENT_VERSION_KEY)).build
+    return build_info(current_version(host.registry(CURRENT_VERSION_KEY))).build
 
 
 def _free_c_gb(host: UpgradeHost) -> str:

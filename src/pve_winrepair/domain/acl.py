@@ -19,10 +19,13 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from enum import Enum
 
 __all__ = [
     "TRUSTED_WELL_KNOWN",
     "WRITE_RIGHTS",
+    "AceFlag",
+    "AceKind",
     "SddlAce",
     "SddlError",
     "SddlReading",
@@ -74,7 +77,6 @@ _RIGHT_CODES = {
     "LO": 0x80,
     "CR": 0x100,
 }
-_ACE_FLAGS = frozenset({"CI", "OI", "NP", "IO", "ID", "SA", "FA", "TP", "CR"})
 
 _COMPONENT = re.compile(r"([OGDS]):")
 _SID = re.compile(r"S-1(?:-[0-9]+)+|[A-Z]{2}")
@@ -89,12 +91,49 @@ class SddlError(ValueError):
     """The descriptor text is malformed, or uses a form this parser does not support."""
 
 
+class AceKind(str, Enum):
+    """How an ACE is judged: allow and deny are; every other kind (audit, object, callback) is OTHER."""
+
+    ALLOW = "A"
+    DENY = "D"
+    OTHER = "other"
+
+
+class AceFlag(str, Enum):
+    """The two-letter ACE flags SDDL writes."""
+
+    CONTAINER_INHERIT = "CI"
+    OBJECT_INHERIT = "OI"
+    NO_PROPAGATE = "NP"
+    INHERIT_ONLY = "IO"
+    INHERITED = "ID"
+    SUCCESSFUL_ACCESS = "SA"
+    FAILED_ACCESS = "FA"
+    TRUST_PROTECTED_FILTER = "TP"
+    CRITICAL = "CR"
+
+
+_KINDS = {AceKind.ALLOW.value: AceKind.ALLOW, AceKind.DENY.value: AceKind.DENY}
+_FLAGS = {flag.value: flag for flag in AceFlag}
+
+
 @dataclass(frozen=True)
 class SddlAce:
-    """One ACE: its kind (``A`` allow, ``D`` deny, ...), flags as written, rights mask, SID (aliases resolved)."""
+    """One ACE of a parsed descriptor.
 
-    kind: str
-    flags: str
+    Attributes:
+        kind: Allow, deny, or another kind (reported, never judged).
+        code: The kind as written (``A``, ``D``, ``AU``, ``XA``, ...), for messages.
+        flags: The ACE flags.
+        flags_text: The flags as written (``OICI``), for messages.
+        rights: The rights mask.
+        sid: The trustee's SID, the trusted aliases resolved.
+    """
+
+    kind: AceKind
+    code: str
+    flags: frozenset[AceFlag]
+    flags_text: str
     rights: int
     sid: str
 
@@ -128,24 +167,30 @@ def _rights(text: str) -> int:
     return mask
 
 
-def _flag_codes(flags: str) -> tuple[str, ...]:
+def _flags(flags: str) -> frozenset[AceFlag]:
     """The two-letter ACE flags, read in pairs: a substring test would find "IO" inside "CIOI"."""
     codes = tuple(flags[i : i + 2] for i in range(0, len(flags), 2))
-    if len(flags) % 2 or not set(codes) <= _ACE_FLAGS:
+    if len(flags) % 2 or not all(code in _FLAGS for code in codes):
         raise SddlError(f"unknown ACE flags {flags!r}")
-    return codes
+    return frozenset(_FLAGS[code] for code in codes)
 
 
 def _ace(body: str) -> SddlAce:
     fields = body.split(";", _ACE_FIELDS)
     # Only a callback ACE carries a seventh field; on an allow or deny ACE one is malformed.
-    if len(fields) < _ACE_FIELDS or (fields[0] in ("A", "D") and len(fields) > _ACE_FIELDS):
+    if len(fields) < _ACE_FIELDS or (fields[0] in _KINDS and len(fields) > _ACE_FIELDS):
         raise SddlError(f"an ACE needs {_ACE_FIELDS} fields: ({body})")
-    kind, flags, rights, _object, _inherit, sid = fields[:_ACE_FIELDS]
-    if not re.fullmatch(r"[A-Z]{1,2}", kind):
-        raise SddlError(f"unknown ACE kind {kind!r}")
-    _flag_codes(flags)
-    return SddlAce(kind, flags, _rights(rights), _sid(sid))
+    code, flags, rights, _object, _inherit, sid = fields[:_ACE_FIELDS]
+    if not re.fullmatch(r"[A-Z]{1,2}", code):
+        raise SddlError(f"unknown ACE kind {code!r}")
+    return SddlAce(
+        kind=_KINDS.get(code, AceKind.OTHER),
+        code=code,
+        flags=_flags(flags),
+        flags_text=flags,
+        rights=_rights(rights),
+        sid=_sid(sid),
+    )
 
 
 def _ace_end(text: str, start: int) -> int:
@@ -230,18 +275,17 @@ def trusted_writers(user_sid: str) -> frozenset[str]:
 
 
 def _ace_problem(ace: SddlAce, trusted: frozenset[str]) -> str | None:
-    if ace.kind == "D":  # a deny ACE only removes rights
+    if ace.kind is AceKind.DENY:  # a deny ACE only removes rights
         return None
-    if ace.kind != "A":
-        return f"an ACE of kind {ace.kind} for {ace.sid} is not judged (only allow and deny are)"
+    if ace.kind is AceKind.OTHER:
+        return f"an ACE of kind {ace.code} for {ace.sid} is not judged (only allow and deny are)"
     if ace.sid in trusted or not ace.rights & WRITE_RIGHTS:
         return None
-    codes = _flag_codes(ace.flags)
     # Inherit-only reaches the directory itself never; it still reaches a copy created there when
     # files inherit it (OI). A container-only inherit-only ACE reaches neither.
-    if "IO" in codes and "OI" not in codes:
+    if AceFlag.INHERIT_ONLY in ace.flags and AceFlag.OBJECT_INHERIT not in ace.flags:
         return None
-    return f"{ace.sid} may write: allow {ace.rights:#x} (flags {ace.flags or 'none'})"
+    return f"{ace.sid} may write: allow {ace.rights:#x} (flags {ace.flags_text or 'none'})"
 
 
 def write_problems(reading: SddlReading, *, trusted: frozenset[str]) -> tuple[str, ...]:

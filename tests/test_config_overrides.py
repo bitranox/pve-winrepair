@@ -10,6 +10,7 @@ from typing import Any
 
 import pytest
 from lib_layered_config import Config
+from pydantic import ValidationError
 
 from pve_winrepair.adapters.config.overrides import (
     ConfigOverride,
@@ -102,6 +103,23 @@ def test_parse_override_rejects_bare_equals() -> None:
     """Bare '=' with empty everything raises ValueError."""
     with pytest.raises(ValueError, match="must contain at least one dot"):
         parse_override("=")
+
+
+@pytest.mark.os_agnostic
+def test_a_refused_override_is_a_plain_value_error_in_the_validator_s_words() -> None:
+    """The message is exactly the validator's text; pydantic's report is kept only as the cause."""
+    with pytest.raises(ValueError) as caught:
+        parse_override("section.key_no_equals")
+
+    assert type(caught.value) is ValueError
+    assert str(caught.value) == "Invalid override 'section.key_no_equals': must contain '='"
+    assert isinstance(caught.value.__cause__, ValidationError)
+
+
+@pytest.mark.os_agnostic
+def test_config_override_validates_from_the_raw_text() -> None:
+    """The model itself parses one --set text, so the boundary has one parser."""
+    assert ConfigOverride.model_validate("s.a.b=[1]") == ConfigOverride(section="s", key_path=("a", "b"), value=[1])
 
 
 # ======================== coerce_value tests ========================

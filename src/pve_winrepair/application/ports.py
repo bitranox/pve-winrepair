@@ -26,7 +26,8 @@ if TYPE_CHECKING:
     from lib_layered_config import Config
 
     from ..domain.enums import DeployTarget, OutputFormat
-    from ..domain.envelope import Envelope, Fields
+    from ..domain.envelope import Envelope, Fields, GuestAnswer, PayloadT
+    from ..domain.guest_answers import GuestCommand
     from ..domain.guest_tool import PackedTool, Pushed
     from ..domain.receipt import RepairReceipt
     from ..domain.settings import Settings, SshSettings
@@ -115,7 +116,7 @@ class MakeReceipts(Protocol):
 
 
 class GuestPort(Protocol):
-    """One guest as the drivers reach it: push or stage the packed tool, run it, run raw commands."""
+    """One guest as the drivers reach it: push or stage the packed tool, ask it, run raw commands."""
 
     @property
     def ip(self) -> str:
@@ -144,12 +145,18 @@ class GuestPort(Protocol):
         """Delete the profile copy; None once done, else why not (never raises)."""
         ...
 
-    def tool(self, command: str, *args: str, timeout: float) -> Envelope:
-        """Run one subcommand of the tool and return its envelope (ok or refused)."""
+    def ask(self, command: GuestCommand, payload: type[PayloadT], *args: str, timeout: float) -> GuestAnswer[PayloadT]:
+        """Run one subcommand of the tool and return its typed answer (ok or refused; a probe never refuses)."""
         ...
 
+    # TEMPORARY(data-arch): removed once repair.py/apply.py read typed answers
+    def tool(self, command: str, *args: str, timeout: float) -> Envelope:
+        """Run one subcommand of the tool and return its envelope, read by name (ok or refused)."""
+        ...
+
+    # TEMPORARY(data-arch): removed once repair.py/apply.py read typed answers
     def probe(self, command: str, *args: str, timeout: float) -> Fields:
-        """Run a subcommand that never refuses and return its data."""
+        """Run a subcommand that never refuses and return its data, read by name."""
         ...
 
     def ssh(self, *remote: str, timeout: float) -> CompletedProcess[str]:

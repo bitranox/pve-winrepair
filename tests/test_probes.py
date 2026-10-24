@@ -34,6 +34,7 @@ from pwshpy import (
     ServiceState,
     TaskState,
 )
+from pydantic import ValidationError
 
 from pve_winrepair_guest import probes, winrepair_guest
 
@@ -281,7 +282,7 @@ def test_lp_defect_empty_setup_log_is_unknown_not_clean() -> None:
 
 
 def test_lp_verdict_over_no_events_is_unknown() -> None:
-    assert probes.lp_verdict(probes.scan_setup_events([]))[0] == "UNKNOWN"
+    assert probes.lp_verdict(probes.scan_setup_events([]))[0] is probes.LpVerdict.UNKNOWN
 
 
 def test_lp_defect_missing_nls_key_is_skipped_not_fatal() -> None:
@@ -347,8 +348,49 @@ def test_build_without_a_dword_install_date_is_an_internal_error(install_date: R
 
 
 def test_install_date_refuses_a_bool_although_bool_is_an_int() -> None:
-    with pytest.raises(probes.ProbeError, match="InstallDate"):
-        probes.install_date({"InstallDate": True})
+    # RegistryValue coerces a bool to 1, so only a record built around its validation carries one.
+    flag = RegistryValue.model_construct(
+        hive=RegistryHive.HKLM, key="x", name="InstallDate", type=RegistryValueType.REG_DWORD, data=True
+    )
+    with pytest.raises(probes.ProbeError, match="InstallDate is missing or not a DWORD: True"):
+        probes.install_date(probes.current_version([flag]))
+
+
+@pytest.mark.parametrize(
+    ("values", "message"),
+    [
+        ([], "CurrentBuild is missing or not text: None"),
+        ([_reg("CurrentBuild", "   ")], "CurrentBuild is missing or not text: '   '"),
+        ([_reg("CurrentBuild", 26200, RegistryValueType.REG_DWORD)], "CurrentBuild is missing or not text: 26200"),
+        ([_reg("CurrentBuild", "26200"), _reg("UBR", "9711")], "UBR is missing or not a DWORD: '9711'"),
+        (
+            [_reg("CurrentBuild", "26200"), _reg("UBR", ["1"], RegistryValueType.REG_MULTI_SZ)],
+            "UBR is missing or not a DWORD: ['1']",
+        ),
+    ],
+    ids=["missing", "blank", "dword-build", "text-ubr", "multi-ubr"],
+)
+def test_build_refusal_names_what_the_registry_held(values: list[RegistryValue], message: str) -> None:
+    with pytest.raises(probes.ProbeError) as raised:
+        probes.build_info(probes.current_version(values))
+
+    assert str(raised.value) == message
+
+
+def test_lp_defect_reports_a_wrong_typed_build_as_unknown_not_refused() -> None:
+    host = lp_host(
+        events=[_event("Language Pack installed, state Installed", datetime(2026, 8, 1, tzinfo=timezone.utc))],
+        registry_values={
+            CURRENT_VERSION: [_reg("CurrentBuild", "26200"), _reg("UBR", "9711"), _reg("DisplayVersion", 25)],
+            NLS_LANGUAGE: [_reg("InstallLanguage", "0407")],
+        },
+    )
+
+    code, envelope = _run(host, "detect-lp-defect")
+
+    assert code == 0
+    data = _data(envelope)
+    assert (data["current_build"], data["ubr"], data["build"], data["display_version"]) == ("26200", None, None, None)
 
 
 def test_build_unreadable_registry_is_an_internal_error() -> None:
@@ -586,6 +628,22 @@ def test_verify_runners_ignores_lines_that_are_not_container_objects() -> None:
     ]
 
 
+def test_parse_containers_keeps_only_lines_whose_names_and_status_are_text() -> None:
+    stdout = "\n".join(
+        [
+            json.dumps({"Names": "a", "Status": "Up", "ID": "f00", "Labels": ""}),
+            json.dumps({"Names": 5, "Status": "Up"}),
+            json.dumps({"ID": "f00"}),
+            "[1, 2]",
+            "",
+        ]
+    )
+
+    containers = probes.parse_containers(stdout)
+
+    assert containers == (probes.Container(name="a", status="Up"), probes.Container(name="", status=""))
+
+
 def test_verify_runners_rejects_a_negative_expected_count() -> None:
     code, envelope = _run(_runner_host(18), "verify-runners", *RUNNER_ARGS, "--expected", "-1")
 
@@ -652,13 +710,13 @@ def test_staged_os_present_is_rearmable(tmp_path: Path) -> None:
 
     report = probes.staged_os(winload)
 
-    assert (report.present, report.verdict) == (True, "REARMABLE")
+    assert (report.present, report.verdict) == (True, probes.StagedVerdict.REARMABLE)
 
 
 def test_staged_os_absent_is_rerun(tmp_path: Path) -> None:
     report = probes.staged_os(tmp_path / "NewOS" / "Windows" / "winload.efi")
 
-    assert (report.present, report.verdict) == (False, "RERUN")
+    assert (report.present, report.verdict) == (False, probes.StagedVerdict.RERUN)
 
 
 def test_staged_os_under_a_file_component_is_absent(tmp_path: Path) -> None:
@@ -766,6 +824,20 @@ def test_state_unreadable_log_is_an_internal_error_not_absent(tmp_path: Path) ->
 
     assert code == 2
     assert envelope["ok"] is False
+
+
+def test_state_verdict_is_the_enum_and_its_marker_is_what_the_log_carries() -> None:
+    verdict, line = probes.state_verdict(["x  STATE=DONE-FAIL rc=0x1", "y  progress"])
+
+    assert (verdict, line) == (probes.StateVerdict.DONE_FAIL, "x  STATE=DONE-FAIL rc=0x1")
+    assert [v.marker for v in probes.StateVerdict] == ["STATE=DONE-OK", "STATE=DONE-FAIL"]
+
+
+def test_a_state_log_refuses_a_verdict_the_run_never_writes() -> None:
+    with pytest.raises(ValidationError, match="verdict"):
+        probes.StateLog.model_validate(
+            {"path": "x", "present": True, "verdict": "DONE-MAYBE", "marker": None, "line_count": 0, "tail": []}
+        )
 
 
 def test_task_time_renders_pwshpys_utc_as_the_guests_local_wall_time() -> None:

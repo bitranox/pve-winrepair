@@ -44,12 +44,28 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# The two options below list their choices as the enum VALUES and convert in a callback: a
+# click.Choice built from the enum itself matches the member NAME, so the lowercase value the
+# help shows would be refused.
+def _to_output_format(_ctx: click.Context, _param: click.Parameter, value: str) -> OutputFormat:
+    """The ``config --format`` callback: the chosen value as an :class:`OutputFormat`."""
+    return OutputFormat(value.lower())
+
+
+def _to_deploy_targets(
+    _ctx: click.Context, _param: click.Parameter, value: tuple[str, ...]
+) -> tuple[DeployTarget, ...]:
+    """The ``config-deploy --target`` callback: each chosen value as a :class:`DeployTarget`."""
+    return tuple(DeployTarget(target.lower()) for target in value)
+
+
 @click.command("config", context_settings=CLICK_CONTEXT_SETTINGS)
 @option(
     "--format",
     "output_format",
     type=click.Choice([f.value for f in OutputFormat], case_sensitive=False),
     default=OutputFormat.HUMAN.value,
+    callback=_to_output_format,
     help="Output format (human-readable or JSON)",
 )
 @option(
@@ -65,7 +81,7 @@ logger = logging.getLogger(__name__)
     help="Override profile from root command (e.g., 'production', 'test')",
 )
 @click.pass_context
-def cli_config(ctx: click.Context, output_format: str, section: str | None, profile: str | None) -> None:
+def cli_config(ctx: click.Context, output_format: OutputFormat, section: str | None, profile: str | None) -> None:
     """Display the current merged configuration from all sources.
 
     Shows configuration loaded from defaults, application/user config files,
@@ -82,18 +98,17 @@ def cli_config(ctx: click.Context, output_format: str, section: str | None, prof
     """
     cli_ctx = get_cli_context(ctx)
     effective_config, effective_profile = _resolve_config(ctx, cli_ctx, profile)
-    fmt = OutputFormat(output_format.lower())
 
-    extra = {"command": "config", "format": fmt.value, "profile": effective_profile}
+    extra = {"command": "config", "format": output_format.value, "profile": effective_profile}
     with lib_log_rich.runtime.bind(job_id="cli-config", extra=extra):
         logger.info(
             "Displaying configuration",
-            extra={"format": fmt.value, "section": section, "profile": effective_profile},
+            extra={"format": output_format.value, "section": section, "profile": effective_profile},
         )
         safe_console.echo()
         try:
             cli_ctx.services.display_config(
-                effective_config, output_format=fmt, section=section, profile=effective_profile
+                effective_config, output_format=output_format, section=section, profile=effective_profile
             )
         except ValueError as exc:
             safe_console.echo(f"\nError: {exc}", err=True)
@@ -198,6 +213,7 @@ def _check_profile_name(_ctx: click.Context, _param: click.Parameter, value: str
     type=click.Choice([t.value for t in DeployTarget], case_sensitive=False),
     multiple=True,
     required=True,
+    callback=_to_deploy_targets,
     help="Target configuration layer(s) to deploy to (can specify multiple)",
 )
 @option(
@@ -240,7 +256,7 @@ def _check_profile_name(_ctx: click.Context, _param: click.Parameter, value: str
 def cli_config_deploy(
     ctx: click.Context,
     *,
-    targets: tuple[str, ...],
+    targets: tuple[DeployTarget, ...],
     force: bool,
     profile: str | None,
     set_permissions: bool | None,
@@ -292,14 +308,13 @@ def cli_config_deploy(
         )
     cli_ctx = get_cli_context(ctx)
     effective_profile = _get_effective_profile(cli_ctx, profile)
-    deploy_targets = tuple(DeployTarget(t.lower()) for t in targets)
-    target_values = tuple(t.value for t in deploy_targets)
+    target_values = tuple(t.value for t in targets)
 
     extra = {"command": "config-deploy", "targets": target_values, "force": force, "profile": effective_profile}
     with lib_log_rich.runtime.bind(job_id="cli-config-deploy", extra=extra):
         _execute_deploy(
             cli_ctx,
-            targets=deploy_targets,
+            targets=targets,
             force=force,
             profile=effective_profile,
             set_permissions=set_permissions,

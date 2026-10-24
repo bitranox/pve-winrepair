@@ -32,16 +32,19 @@ import re
 import sys
 import tempfile
 import zipfile
+from enum import IntEnum
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from typing import TextIO
 
 __all__ = [
     "ARTEFACT",
     "ENTRY",
     "PROJECT",
+    "ExitCode",
     "PackError",
     "decode_payload",
     "main",
@@ -58,6 +61,17 @@ ARTEFACT = Path("src/pve_winrepair/adapters/guest_tool/winrepair_guest.ps1")
 _PAYLOAD = re.compile(r"^\$PwshPyPayload = @'\r?\n(.*?)^'@", re.S | re.M)
 _SHA = re.compile(r"^\$PwshPySha = '([0-9a-f]{64})'", re.M)
 _SHA_LINE = re.compile(r"^\$PwshPySha = '[0-9a-f]{64}'\r?\n?", re.M)
+
+
+class ExitCode(IntEnum):
+    """The script's exit codes; an error never shares a code with drift."""
+
+    OK = 0
+    """Packed, or ``--check`` found the artefact up to date."""
+    STALE = 1
+    """``--check`` found the artefact stale or missing."""
+    ERROR = 2
+    """pwshpy is missing, the pack failed, or the artefact could not be read."""
 
 
 class PackError(Exception):
@@ -172,20 +186,19 @@ def same_pack(a: str, b: str) -> bool:
     return members_a == members_b and wrapper_without_payload(a) == wrapper_without_payload(b)
 
 
-def _say(stream: str, line: str) -> None:
-    target = sys.stdout if stream == "out" else sys.stderr
-    target.write(line + "\n")
+def _say(stream: TextIO, line: str) -> None:
+    stream.write(line + "\n")
 
 
-def _write(project: Path) -> int:
+def _write(project: Path) -> ExitCode:
     dest = project / ARTEFACT
     pack(project, dest)
     digest = hashlib.sha256(dest.read_bytes()).hexdigest()
-    _say("out", f"packed {ARTEFACT.as_posix()} sha256={digest}")
-    return 0
+    _say(sys.stdout, f"packed {ARTEFACT.as_posix()} sha256={digest}")
+    return ExitCode.OK
 
 
-def _check(project: Path) -> int:
+def _check(project: Path) -> ExitCode:
     with tempfile.TemporaryDirectory(prefix="pack-guest-") as workdir:
         fresh = Path(workdir) / ARTEFACT.name
         pack(project, fresh)
@@ -193,17 +206,17 @@ def _check(project: Path) -> int:
     try:
         committed = (project / ARTEFACT).read_bytes()
     except FileNotFoundError:
-        _say("err", f"{ARTEFACT.as_posix()} is stale: it does not exist")
-        return 1
+        _say(sys.stderr, f"{ARTEFACT.as_posix()} is stale: it does not exist")
+        return ExitCode.STALE
     try:
         fresh_pack = same_pack(committed.decode("utf-8"), fresh_text)
     except UnicodeDecodeError:
         fresh_pack = False
     if not fresh_pack:
-        _say("err", f"{ARTEFACT.as_posix()} is stale: it differs from a fresh pack of {ENTRY.as_posix()}")
-        return 1
-    _say("out", f"{ARTEFACT.as_posix()}: up to date")
-    return 0
+        _say(sys.stderr, f"{ARTEFACT.as_posix()} is stale: it differs from a fresh pack of {ENTRY.as_posix()}")
+        return ExitCode.STALE
+    _say(sys.stdout, f"{ARTEFACT.as_posix()}: up to date")
+    return ExitCode.OK
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -212,7 +225,7 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: Sequence[str] | None = None, *, project: Path = PROJECT) -> int:
+def main(argv: Sequence[str] | None = None, *, project: Path = PROJECT) -> ExitCode:
     """Pack the artefact, or with ``--check`` report whether it is fresh.
 
     Args:
@@ -220,15 +233,16 @@ def main(argv: Sequence[str] | None = None, *, project: Path = PROJECT) -> int:
         project: The project root (default: the checkout holding this script).
 
     Returns:
-        0 packed or up to date, 1 ``--check`` found a stale artefact, 2 error.
+        :attr:`ExitCode.OK` packed or up to date, :attr:`ExitCode.STALE` ``--check`` found a
+        stale artefact, :attr:`ExitCode.ERROR` error.
     """
     args = _parser().parse_args(argv)
     try:
         return _check(project) if args.check else _write(project)
     except (PackError, OSError) as exc:
         # One line, no traceback: a multi-line compiler message would read as several errors.
-        _say("err", " ".join(str(exc).split()))
-        return 2
+        _say(sys.stderr, " ".join(str(exc).split()))
+        return ExitCode.ERROR
 
 
 if __name__ == "__main__":

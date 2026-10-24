@@ -26,7 +26,7 @@ Contents:
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from enum import Enum, IntEnum
 from typing import TYPE_CHECKING, Protocol
 
 from pwshpy import (
@@ -35,13 +35,14 @@ from pwshpy import (
     PwshPyError,
     RegistryValue,
     RegistryValueType,
+    ServiceState,
     ps,
 )
 
-from pve_winrepair_guest.envelope import Command, Outcome
+from pve_winrepair_guest.envelope import Command, Outcome, Report
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Mapping, Sequence
+    from collections.abc import Callable, Iterable, Sequence
 
     from pwshpy import ServiceInfo, WindowsUpdate
 
@@ -50,25 +51,46 @@ __all__ = [
     "TARGETS",
     "PwshpyHost",
     "QuiesceReport",
+    "QuiesceVerdict",
     "RestoreReport",
+    "RestoreVerdict",
     "SearchProbe",
+    "SearchStatus",
     "ServiceRow",
+    "ServiceStart",
+    "StartMode",
     "StartWrite",
     "StopIssued",
     "StopWait",
+    "WmiServiceState",
+    "WriteResult",
     "WuHost",
     "commands",
     "quiesce_verdict",
+    "read_services",
     "restore_verdict",
     "search_probe",
     "wait_until_stopped",
 ]
 
+
+class ServiceStart(IntEnum):
+    """A service's registry ``Start`` value (the DWORD the service control manager reads)."""
+
+    AUTOMATIC = 2
+    MANUAL = 3
+    DISABLED = 4
+
+
 TARGETS = ("wuauserv", "UsoSvc", "BITS", "WaaSMedicSvc")
 # The modes measured on test guests BEFORE quiescing (wuauserv Manual, UsoSvc Auto, BITS Auto);
-# WaaSMedicSvc ships Manual. 2 = Automatic, 3 = Manual.
-RESTORE_START = (("wuauserv", 3), ("UsoSvc", 2), ("BITS", 2), ("WaaSMedicSvc", 3))
-DISABLED = 4
+# WaaSMedicSvc ships Manual.
+RESTORE_START = (
+    ("wuauserv", ServiceStart.MANUAL),
+    ("UsoSvc", ServiceStart.AUTOMATIC),
+    ("BITS", ServiceStart.AUTOMATIC),
+    ("WaaSMedicSvc", ServiceStart.MANUAL),
+)
 SERVICES_KEY = r"HKLM\SYSTEM\CurrentControlSet\Services"
 STOP_WAIT = 180.0
 STOP_POLL = 10.0
@@ -80,8 +102,16 @@ _WHERE = " OR ".join(f"Name='{name}'" for name in TARGETS)
 # --- port and adapter -----------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
-class SearchProbe:
+class SearchStatus(str, Enum):
+    """How the bounded Windows Update search ended."""
+
+    OK = "OK"
+    FAILED = "FAILED"
+    # Abandoned after its bound: says nothing about Windows Update either way.
+    TIMEOUT = "TIMEOUT"
+
+
+class SearchProbe(Report):
     """Can Windows Update search again (informational; never part of a verdict).
 
     Attributes:
@@ -93,7 +123,7 @@ class SearchProbe:
         timeout_s: The bound the search ran under.
     """
 
-    status: str
+    status: SearchStatus
     pending: int | None
     titles: tuple[str, ...]
     error: str | None
@@ -201,27 +231,61 @@ def search_probe(search: Callable[[], Iterable[WindowsUpdate]], *, timeout: floa
     try:
         updates = list(search())
     except OperationTimeoutError:  # a NativeCallError subclass, so it must be caught first
-        return SearchProbe(status="TIMEOUT", pending=None, titles=(), error=None, timeout_s=timeout)
+        return SearchProbe(status=SearchStatus.TIMEOUT, pending=None, titles=(), error=None, timeout_s=timeout)
     except PwshPyError as exc:
-        return SearchProbe(status="FAILED", pending=None, titles=(), error=str(exc), timeout_s=timeout)
+        return SearchProbe(status=SearchStatus.FAILED, pending=None, titles=(), error=str(exc), timeout_s=timeout)
     titles = tuple(update.title for update in updates)
-    return SearchProbe(status="OK", pending=len(updates), titles=titles, error=None, timeout_s=timeout)
+    return SearchProbe(status=SearchStatus.OK, pending=len(updates), titles=titles, error=None, timeout_s=timeout)
 
 
 # --- service state and verdicts -------------------------------------------------------------
 
 
-@dataclass(frozen=True)
-class ServiceRow:
-    """One target service as WMI reports it (StartMode and State are English in every locale)."""
+class StartMode(str, Enum):
+    """Win32_Service.StartMode, English in every locale."""
+
+    BOOT = "Boot"
+    SYSTEM = "System"
+    AUTO = "Auto"
+    MANUAL = "Manual"
+    DISABLED = "Disabled"
+    # WMI reported no StartMode; the envelope has always carried that as the text "None".
+    NOT_REPORTED = "None"
+
+
+class WmiServiceState(str, Enum):
+    """Win32_Service.State, English in every locale (spelt apart, unlike Get-Service's ServiceState)."""
+
+    STOPPED = "Stopped"
+    START_PENDING = "Start Pending"
+    STOP_PENDING = "Stop Pending"
+    RUNNING = "Running"
+    CONTINUE_PENDING = "Continue Pending"
+    PAUSE_PENDING = "Pause Pending"
+    PAUSED = "Paused"
+    UNKNOWN = "Unknown"
+    # WMI reported no State; the envelope has always carried that as the text "None".
+    NOT_REPORTED = "None"
+
+
+class ServiceRow(Report):
+    """One target service as WMI reports it."""
 
     name: str
-    start_mode: str
-    state: str
+    start_mode: StartMode
+    state: WmiServiceState
 
 
-@dataclass(frozen=True)
-class StartWrite:
+class WriteResult(str, Enum):
+    """How one registry Start write ended."""
+
+    WRITTEN = "WRITTEN"
+    # The service key could not be read (the service is not installed): nothing was written.
+    ABSENT = "ABSENT"
+    FAILED = "FAILED"
+
+
+class StartWrite(Report):
     """The registry Start write for one service.
 
     Attributes:
@@ -232,13 +296,12 @@ class StartWrite:
     """
 
     service: str
-    value: int
-    result: str
+    value: ServiceStart
+    result: WriteResult
     error: str | None
 
 
-@dataclass(frozen=True)
-class StopIssued:
+class StopIssued(Report):
     """One issued stop: the service's state right after it, or the error when it was refused.
 
     Attributes:
@@ -249,12 +312,11 @@ class StopIssued:
     """
 
     service: str
-    state: str | None
+    state: ServiceState | None
     error: str | None
 
 
-@dataclass(frozen=True)
-class StopWait:
+class StopWait(Report):
     """The bounded wait for the services to leave the Running state."""
 
     waited_s: float
@@ -262,43 +324,75 @@ class StopWait:
     still_running: tuple[str, ...]
 
 
+def _service_row(instance: CimInstance) -> ServiceRow:
+    """One Win32_Service instance as a row; a missing property reads as its NOT_REPORTED member.
+
+    Raises:
+        ValueError: StartMode or State holds a value Win32_Service does not document.
+    """
+    properties = instance.properties
+    # str() of an absent property is "None", the value of each enum's NOT_REPORTED member.
+    return ServiceRow(
+        name=str(properties.get("Name")),
+        start_mode=StartMode(str(properties.get("StartMode"))),
+        state=WmiServiceState(str(properties.get("State"))),
+    )
+
+
 def read_services(host: WuHost) -> tuple[ServiceRow, ...]:
-    """The target services WMI knows, in :data:`TARGETS` order; raises when WMI cannot be asked."""
-    rows = {
-        str(i.properties.get("Name")): ServiceRow(
-            name=str(i.properties.get("Name")),
-            start_mode=str(i.properties.get("StartMode")),
-            state=str(i.properties.get("State")),
-        )
-        for i in host.cim("Win32_Service", where=_WHERE)
-    }
+    """The target services WMI knows, in :data:`TARGETS` order.
+
+    Raises:
+        PwshPyError: WMI cannot be asked.
+        ValueError: A service reports a StartMode or State Win32_Service does not document.
+    """
+    rows = {row.name: row for row in map(_service_row, host.cim("Win32_Service", where=_WHERE))}
     return tuple(rows[name] for name in TARGETS if name in rows)
 
 
-def quiesce_verdict(rows: Sequence[ServiceRow]) -> tuple[str, tuple[str, ...], tuple[str, ...]]:
+class QuiesceVerdict(str, Enum):
+    """quiesce-wu's verdict."""
+
+    OK = "OK"
+    FAIL = "FAIL"
+    # No target service could be read: an empty reading is not a held state.
+    UNKNOWN = "UNKNOWN"
+
+
+class RestoreVerdict(str, Enum):
+    """restore-wu's verdict."""
+
+    RESTORED = "RESTORED"
+    STILL_DISABLED = "STILL_DISABLED"
+    # No target service could be read.
+    UNKNOWN = "UNKNOWN"
+
+
+def quiesce_verdict(rows: Sequence[ServiceRow]) -> tuple[QuiesceVerdict, tuple[str, ...], tuple[str, ...]]:
     """Judge the held state: (verdict, not_disabled, still_running).
 
     OK when every service read is Disabled and none is Running; Stop Pending counts as not
     running (it is shutting down and cannot take new work, which is what this step guarantees).
     UNKNOWN when no target service could be read at all: an empty reading is not a held state.
     """
-    not_disabled = tuple(r.name for r in rows if r.start_mode != "Disabled")
-    still_running = tuple(r.name for r in rows if r.state == "Running")
+    not_disabled = tuple(r.name for r in rows if r.start_mode is not StartMode.DISABLED)
+    still_running = tuple(r.name for r in rows if r.state is WmiServiceState.RUNNING)
     if not rows:
-        return "UNKNOWN", not_disabled, still_running
-    return ("FAIL" if not_disabled or still_running else "OK"), not_disabled, still_running
+        return QuiesceVerdict.UNKNOWN, not_disabled, still_running
+    verdict = QuiesceVerdict.FAIL if not_disabled or still_running else QuiesceVerdict.OK
+    return verdict, not_disabled, still_running
 
 
-def restore_verdict(rows: Sequence[ServiceRow]) -> tuple[str, tuple[str, ...]]:
+def restore_verdict(rows: Sequence[ServiceRow]) -> tuple[RestoreVerdict, tuple[str, ...]]:
     """Judge the restore: (verdict, still_disabled); none may still read Disabled.
 
     A start type left Disabled survives into the repaired OS and silently stops the machine
     ever patching again.
     """
-    still_disabled = tuple(r.name for r in rows if r.start_mode == "Disabled")
+    still_disabled = tuple(r.name for r in rows if r.start_mode is StartMode.DISABLED)
     if not rows:
-        return "UNKNOWN", still_disabled
-    return ("STILL_DISABLED" if still_disabled else "RESTORED"), still_disabled
+        return RestoreVerdict.UNKNOWN, still_disabled
+    return (RestoreVerdict.STILL_DISABLED if still_disabled else RestoreVerdict.RESTORED), still_disabled
 
 
 def wait_until_stopped(
@@ -329,8 +423,7 @@ def wait_until_stopped(
 # --- quiesce-wu -----------------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
-class QuiesceReport:
+class QuiesceReport(Report):
     """quiesce-wu's answer.
 
     Attributes:
@@ -344,31 +437,33 @@ class QuiesceReport:
         verdict: OK, FAIL, or UNKNOWN (no target service readable).
     """
 
-    previous_start_modes: Mapping[str, str]
+    # dict, not Mapping: ruff cannot see that Report is a pydantic model, so a runtime
+    # collections.abc import here would be moved under TYPE_CHECKING and break the model.
+    previous_start_modes: dict[str, StartMode]
     writes: tuple[StartWrite, ...]
     stops: tuple[StopIssued, ...]
     wait: StopWait
     services: tuple[ServiceRow, ...]
     not_disabled: tuple[str, ...]
     still_running: tuple[str, ...]
-    verdict: str
+    verdict: QuiesceVerdict
 
 
 def _service_key(service: str) -> str:
     return f"{SERVICES_KEY}\\{service}"
 
 
-def write_start(host: WuHost, service: str, value: int) -> StartWrite:
+def write_start(host: WuHost, service: str, value: ServiceStart) -> StartWrite:
     """Write one service's Start value; a missing key is ABSENT, a refused write FAILED."""
     try:
         list(host.registry(_service_key(service)))
     except PwshPyError as exc:  # no service key: the service is not installed, nothing to write
-        return StartWrite(service=service, value=value, result="ABSENT", error=str(exc))
+        return StartWrite(service=service, value=value, result=WriteResult.ABSENT, error=str(exc))
     try:
-        host.set_dword(_service_key(service), "Start", value)
+        host.set_dword(_service_key(service), "Start", value.value)
     except PwshPyError as exc:
-        return StartWrite(service=service, value=value, result="FAILED", error=str(exc))
-    return StartWrite(service=service, value=value, result="WRITTEN", error=None)
+        return StartWrite(service=service, value=value, result=WriteResult.FAILED, error=str(exc))
+    return StartWrite(service=service, value=value, result=WriteResult.WRITTEN, error=None)
 
 
 def issue_stop(host: WuHost, service: str) -> StopIssued:
@@ -377,17 +472,17 @@ def issue_stop(host: WuHost, service: str) -> StopIssued:
         info = host.stop_service(service)
     except PwshPyError as exc:
         return StopIssued(service=service, state=None, error=str(exc))
-    return StopIssued(service=service, state=info.status.value, error=None)
+    return StopIssued(service=service, state=info.status, error=None)
 
 
 def _running(host: WuHost) -> tuple[str, ...]:
-    return tuple(r.name for r in read_services(host) if r.state == "Running")
+    return tuple(r.name for r in read_services(host) if r.state is WmiServiceState.RUNNING)
 
 
 def run_quiesce(host: WuHost) -> Outcome:
     """Disable, stop, wait (bounded), then verify the state - not the fact that commands ran."""
     previous = {r.name: r.start_mode for r in read_services(host)}  # raises before any change
-    writes = tuple(write_start(host, name, DISABLED) for name in TARGETS)
+    writes = tuple(write_start(host, name, ServiceStart.DISABLED) for name in TARGETS)
     stops = tuple(issue_stop(host, name) for name in TARGETS)
     wait = wait_until_stopped(lambda: _running(host), clock=host.monotonic, sleep=host.sleep)
     rows = read_services(host)
@@ -402,14 +497,13 @@ def run_quiesce(host: WuHost) -> Outcome:
         still_running=still_running,
         verdict=verdict,
     )
-    return Outcome(ok=verdict == "OK", data=report)
+    return Outcome(ok=verdict is QuiesceVerdict.OK, data=report)
 
 
 # --- restore-wu -----------------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
-class RestoreReport:
+class RestoreReport(Report):
     """restore-wu's answer.
 
     Attributes:
@@ -423,7 +517,7 @@ class RestoreReport:
     writes: tuple[StartWrite, ...]
     services: tuple[ServiceRow, ...]
     still_disabled: tuple[str, ...]
-    verdict: str
+    verdict: RestoreVerdict
     search: SearchProbe
 
 
@@ -434,7 +528,7 @@ def run_restore(host: WuHost) -> Outcome:
     verdict, still_disabled = restore_verdict(rows)
     search = host.search_updates(SEARCH_TIMEOUT)
     report = RestoreReport(writes=writes, services=rows, still_disabled=still_disabled, verdict=verdict, search=search)
-    return Outcome(ok=verdict == "RESTORED", data=report)
+    return Outcome(ok=verdict is RestoreVerdict.RESTORED, data=report)
 
 
 # --- registration ---------------------------------------------------------------------------

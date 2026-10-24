@@ -3,16 +3,17 @@
 from __future__ import annotations
 
 from collections.abc import Iterator, Mapping
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
 import orjson
 from lib_layered_config import Config, NotSensitiveKeys
+from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
 
 from .loader import NOT_SENSITIVE
 
 if TYPE_CHECKING:
     from lib_layered_config.domain.config import SourceInfo
+    from pydantic_core import ErrorDetails
 
 CLI_LAYER = "cli"
 """Provenance layer recorded for a value that came from ``--set``.
@@ -25,13 +26,31 @@ CoercedValue = str | int | float | bool | None | list[object] | dict[str, object
 """Union of types that :func:`coerce_value` can produce."""
 
 
-@dataclass(frozen=True, slots=True)
-class ConfigOverride:
-    """A single parsed configuration override."""
+class ConfigOverride(BaseModel):
+    """A single parsed configuration override.
+
+    Validated from the raw ``SECTION.KEY[.SUBKEY...]=VALUE`` text of one ``--set`` (see
+    :func:`parse_override`), or built from its three fields by keyword.
+
+    Attributes:
+        section: The top-level configuration section.
+        key_path: The keys below the section, outermost first; never empty.
+        value: The value, coerced by :func:`coerce_value`.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     section: str
     key_path: tuple[str, ...]
     value: CoercedValue
+
+    @model_validator(mode="before")
+    @classmethod
+    def _split_raw_text(cls, data: object) -> object:
+        """Split one ``--set`` text into its fields; any other input is validated as given."""
+        if isinstance(data, str):
+            return _split_override(data)
+        return data
 
 
 def parse_override(raw: str) -> ConfigOverride:
@@ -49,7 +68,7 @@ def parse_override(raw: str) -> ConfigOverride:
 
     Raises:
         ValueError: If the string lacks ``=``, has no dot in the key, or has
-            empty section/key components.
+            empty section/key components; the message is the validator's own text.
 
     Examples:
         >>> override = parse_override("lib_log_rich.console_level=DEBUG")
@@ -65,6 +84,26 @@ def parse_override(raw: str) -> ConfigOverride:
         ('payload_limits', 'max_chars')
         >>> override.value
         8192
+
+        >>> parse_override("section.key")
+        Traceback (most recent call last):
+        ...
+        ValueError: Invalid override 'section.key': must contain '='
+    """
+    try:
+        return ConfigOverride.model_validate(raw)
+    except ValidationError as exc:
+        # A plain ValueError in the validator's own words: the command line reports it as a
+        # usage error, and pydantic's rendering would add its error tags and a docs URL.
+        raise ValueError(_refusal_text(raw, exc)) from exc
+
+
+def _split_override(raw: str) -> dict[str, object]:
+    """The fields of one ``SECTION.KEY[.SUBKEY...]=VALUE`` text, refused when it is malformed.
+
+    Raises:
+        ValueError: The text lacks ``=``, has no dot in the key, or has an empty section or
+            key component.
     """
     if "=" not in raw:
         raise ValueError(f"Invalid override {raw!r}: must contain '='")
@@ -83,11 +122,29 @@ def parse_override(raw: str) -> ConfigOverride:
     if not all(key_parts):
         raise ValueError(f"Invalid override {raw!r}: key path contains empty component")
 
-    return ConfigOverride(
-        section=section,
-        key_path=key_parts,
-        value=coerce_value(value_str),
-    )
+    return {"section": section, "key_path": key_parts, "value": coerce_value(value_str)}
+
+
+def _refusal_text(raw: str, error: ValidationError) -> str:
+    """The refusal of ``raw``: each validator's own message, ``<field>: <reason>`` for any other problem.
+
+    Example:
+        >>> try:
+        ...     ConfigOverride.model_validate({"section": "s", "key_path": "k", "value": 1})
+        ... except ValidationError as exc:
+        ...     print(_refusal_text("s.k=1", exc))
+        Invalid override 's.k=1': key_path: Input should be a valid tuple
+    """
+    return "; ".join(_problem_text(raw, item) for item in error.errors())
+
+
+def _problem_text(raw: str, item: ErrorDetails) -> str:
+    """The validator's message for a ``value_error``, ``Invalid override ...: <loc>: <msg>`` otherwise."""
+    reason = item.get("ctx", {}).get("error")
+    if item["type"] == "value_error" and isinstance(reason, ValueError):
+        return str(reason)
+    location = ".".join(str(part) for part in item["loc"])
+    return f"Invalid override {raw!r}: {location}: {item['msg']}"
 
 
 def coerce_value(raw: str) -> CoercedValue:

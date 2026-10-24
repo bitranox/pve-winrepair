@@ -5,6 +5,8 @@ business logic of the application.
 
 Contents:
     * :mod:`.enums` - Domain enumerations (OutputFormat, DeployTarget)
+    * :mod:`.envelope` - The guest tool's answer contract and how a call fails
+    * :mod:`.guest_answers` - The guest tool's answers as typed models, one per subcommand
     * :mod:`.errors` - Domain exception types
 """
 

@@ -13,19 +13,38 @@ apply reboot (:meth:`RepairReceipt.same_build`).
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import re
 from datetime import datetime
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated, NamedTuple
 
 from pydantic import BaseModel, ConfigDict, Field
 
-__all__ = ["GuestBuild", "ReceiptError", "RepairReceipt"]
+from pve_winrepair.domain.envelope import GuestProtocolError
+
+if TYPE_CHECKING:
+    from pve_winrepair.domain.guest_answers import BuildAnswer
+
+__all__ = ["BuildPair", "GuestBuild", "ReceiptError", "RepairReceipt"]
 
 _Count = Annotated[int, Field(ge=0)]
+# CurrentBuild is a registry string; the drivers compare it as a number. ASCII digits only, bounded
+# so int() never meets a huge or non-ASCII numeral.
+_BUILD_NUMBER = re.compile(r"[0-9]{1,9}")
 
 
-@dataclass(frozen=True)
-class GuestBuild:
+class BuildPair(NamedTuple):
+    """A build as CurrentBuild and UBR; serialised as the JSON array ``[build, ubr]``.
+
+    Example:
+        >>> BuildPair(build=26200, ubr=7462) == (26200, 7462)
+        True
+    """
+
+    build: int
+    ubr: int
+
+
+class GuestBuild(BaseModel):
     """The build a guest runs and when its Windows was installed, as the guest tool's ``build`` reports them.
 
     Attributes:
@@ -38,14 +57,33 @@ class GuestBuild:
         '26200.8973'
     """
 
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
+
     build: int
     ubr: int
     install_date: int
+
+    @classmethod
+    def from_answer(cls, answer: BuildAnswer) -> GuestBuild:
+        """The build ``answer`` reports, with CurrentBuild read as a number.
+
+        Raises:
+            GuestProtocolError: CurrentBuild is not a number.
+        """
+        current = answer.current_build
+        if not _BUILD_NUMBER.fullmatch(current):
+            raise GuestProtocolError(f"build: CurrentBuild {current!r} is not a number")
+        return cls(build=int(current), ubr=answer.ubr, install_date=answer.install_date)
 
     @property
     def text(self) -> str:
         """The build as ``<CurrentBuild>.<UBR>``."""
         return f"{self.build}.{self.ubr}"
+
+    @property
+    def pair(self) -> BuildPair:
+        """CurrentBuild and UBR, as a receipt's ``build_before`` holds them."""
+        return BuildPair(build=self.build, ubr=self.ubr)
 
 
 class ReceiptError(Exception):

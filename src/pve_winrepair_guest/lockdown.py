@@ -30,9 +30,10 @@ import os
 import re
 import stat
 import sys
-from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast
+
+from pydantic import BaseModel, ConfigDict
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -226,8 +227,7 @@ class Win32File(Protocol):
 # --- readings and checks --------------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
-class Ace:
+class Ace(BaseModel):
     """One ACE as read back.
 
     Attributes:
@@ -237,14 +237,15 @@ class Ace:
         mask: The access mask.
     """
 
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
     sid: str
     kind: int
     flags: int
     mask: int
 
 
-@dataclass(frozen=True)
-class AclReading:
+class AclReading(BaseModel):
     """An object's owner and DACL.
 
     Attributes:
@@ -254,14 +255,15 @@ class AclReading:
         aces: The ACEs in order, or None for a NULL DACL.
     """
 
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
     path: str
     owner: str
     protected: bool
     aces: tuple[Ace, ...] | None
 
 
-@dataclass(frozen=True)
-class LockTarget:
+class LockTarget(BaseModel):
     """A directory lock-dirs is about to lock (or launch to trust), read without following a reparse point.
 
     Attributes:
@@ -272,14 +274,15 @@ class LockTarget:
         owner: Its owner SID.
     """
 
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
     path: str
     reparse_points: tuple[str, ...]
     directory: bool
     owner: str
 
 
-@dataclass(frozen=True)
-class TreeEntry:
+class TreeEntry(BaseModel):
     """One file or directory below a locked directory, as listed without following a reparse point.
 
     Attributes:
@@ -288,6 +291,8 @@ class TreeEntry:
             not descend into it.
         directory: It is a directory.
     """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     path: str
     reparse: bool
@@ -604,10 +609,13 @@ def create_locked_dir(security: Win32Security, files: Win32File, path: str) -> b
 
 
 def _ace(security: Win32Security, entry: tuple[object, ...]) -> Ace:
-    header, mask, sid = entry[0], entry[1], entry[-1]
-    if not isinstance(header, tuple) or not isinstance(mask, int):
-        raise OSError(f"unexpected ACE shape from pywin32: {entry!r}")
-    kind, flags = cast("tuple[int, int]", header)
+    # Every part is checked here: the model would coerce a non-int (a "3" or a 3.0) rather than
+    # refuse it, and a shape pywin32 never documented must not read as a real ACE.
+    match entry:
+        case ((int() as kind, int() as flags), int() as mask, *_):
+            sid = entry[-1]
+        case _:
+            raise OSError(f"unexpected ACE shape from pywin32: {entry!r}")
     return Ace(sid=security.ConvertSidToStringSid(cast("Sid", sid)), kind=kind, flags=flags, mask=mask)
 
 

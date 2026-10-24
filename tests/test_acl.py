@@ -9,7 +9,15 @@ from __future__ import annotations
 
 import pytest
 
-from pve_winrepair.domain.acl import TRUSTED_WELL_KNOWN, SddlError, parse_sddl, trusted_writers, write_problems
+from pve_winrepair.domain.acl import (
+    TRUSTED_WELL_KNOWN,
+    AceFlag,
+    AceKind,
+    SddlError,
+    parse_sddl,
+    trusted_writers,
+    write_problems,
+)
 
 USER = "S-1-5-21-1-2-3-1001"
 TRUSTED = TRUSTED_WELL_KNOWN | {USER}
@@ -51,7 +59,16 @@ def test_a_missing_dacl_is_a_problem() -> None:
 
 
 def test_an_ace_kind_it_does_not_judge_fails_closed() -> None:
-    assert write_problems(parse_sddl(FLEET + "(XA;;FA;;;BU;(x))"), trusted=TRUSTED)
+    problems = write_problems(parse_sddl(FLEET + "(XA;;FA;;;BU;(x))"), trusted=TRUSTED)
+    assert problems == ("an ACE of kind XA for BU is not judged (only allow and deny are)",)
+
+
+def test_an_ace_is_parsed_once_into_its_kind_and_flags() -> None:
+    allow, deny, other = parse_sddl("O:SYD:(A;OICIIO;FA;;;BU)(D;;FA;;;WD)(XA;;FA;;;BU;(x))").aces
+    assert (allow.kind, allow.code, allow.flags_text) == (AceKind.ALLOW, "A", "OICIIO")
+    assert allow.flags == frozenset({AceFlag.OBJECT_INHERIT, AceFlag.CONTAINER_INHERIT, AceFlag.INHERIT_ONLY})
+    assert (deny.kind, deny.flags) == (AceKind.DENY, frozenset())
+    assert (other.kind, other.code) == (AceKind.OTHER, "XA")
 
 
 @pytest.mark.parametrize("text", ["", "O:", "D:P(A;;ZZ;;;BU)", "D:P(A;;FA;;)", "garbage"])

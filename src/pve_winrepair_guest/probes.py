@@ -20,13 +20,13 @@ from __future__ import annotations
 import argparse
 import codecs
 import itertools
-import json
 import os
 import re
 import socket
-from dataclasses import dataclass
+from collections.abc import Mapping
+from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, cast
+from typing import TYPE_CHECKING, Protocol
 
 from pwshpy import (
     CimInstance,
@@ -37,13 +37,16 @@ from pwshpy import (
     RegistryValue,
     ScheduledTaskInfo,
     ServiceInfo,
+    ServiceState,
+    TaskState,
     ps,
 )
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr, ValidationError
 
-from pve_winrepair_guest.envelope import Command, Outcome, Skip
+from pve_winrepair_guest.envelope import Command, Outcome, Report, Skip
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Mapping, Sequence
+    from collections.abc import Callable, Iterable, Sequence
     from datetime import datetime
 
 __all__ = [
@@ -52,19 +55,29 @@ __all__ = [
     "NEWOS_WINLOAD",
     "BuildInfo",
     "BuildReport",
+    "Container",
+    "CurrentVersion",
     "Drive",
+    "LpVerdict",
     "NicMacReport",
     "ProbeError",
     "ProbeHost",
     "PwshpyHost",
+    "RunnerVerdict",
     "StagedOs",
+    "StagedVerdict",
+    "StateArgs",
     "StateLog",
+    "StateVerdict",
+    "VerifyRunnersArgs",
     "build_info",
     "commands",
+    "current_version",
     "drive_from_cim",
     "fixed_drives",
     "install_date",
     "nic_macs",
+    "parse_containers",
     "read_state",
     "staged_os",
     "state_verdict",
@@ -85,8 +98,12 @@ SETUP_LOG_EVENTS = 600
 DOCKER_PS_TIMEOUT = 120.0
 SERVICING_PROCESSES = ("TiWorker", "TrustedInstaller")
 SETUP_PROCESSES = ("SetupHost",)
-STATE_MARKERS = ("STATE=DONE-OK", "STATE=DONE-FAIL")
 STATE_TAIL_LINES = 200
+# The CurrentVersion value names the probes read.
+_CURRENT_BUILD = "CurrentBuild"
+_UBR = "UBR"
+_DISPLAY_VERSION = "DisplayVersion"
+_INSTALL_DATE = "InstallDate"
 _HRESULT = re.compile(r"(0x[0-9a-f]{8})", re.IGNORECASE)
 # Six hex octets with ONE separator throughout: WMI writes colons, IP Helper and getmac dashes.
 _MAC = re.compile(r"[0-9A-Fa-f]{2}([:-])(?:[0-9A-Fa-f]{2}\1){4}[0-9A-Fa-f]{2}")
@@ -203,12 +220,70 @@ class PwshpyHost:
 # --- registry and build ---------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
-class BuildInfo:
+class CurrentVersion(BaseModel):
+    """The CurrentVersion values the probes read, parsed once from the registry.
+
+    A value of the wrong type reads as None here, so every consumer applies the same acceptance
+    rule; ``build`` refuses a None, ``detect-lp-defect`` reports it as unknown.
+
+    Attributes:
+        current_build: CurrentBuild when it is text (REG_SZ, e.g. "26200"), unstripped; else None.
+        ubr: UBR when it is a DWORD (an int, never a bool), else None.
+        display_version: DisplayVersion (e.g. "25H2") when it is text, else None.
+        install_date: InstallDate when it is a DWORD, else None.
+        rejected: Value name -> ``repr`` of a value that was present with the wrong type, so a
+            refusal names what the registry held rather than None.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    current_build: StrictStr | None
+    ubr: StrictInt | None
+    display_version: StrictStr | None
+    install_date: StrictInt | None
+    rejected: Mapping[str, str]
+
+    def shown(self, name: str, accepted: str | int | None) -> str:
+        """How a refusal names value ``name``: what the registry held when it was rejected, else repr."""
+        return self.rejected.get(name, repr(accepted))
+
+
+def _text(data: object) -> str | None:
+    return data if isinstance(data, str) else None
+
+
+def _dword(data: object) -> int | None:
+    # bool is an int to isinstance; a DWORD never is a bool.
+    return data if isinstance(data, int) and not isinstance(data, bool) else None
+
+
+def current_version(values: Iterable[RegistryValue]) -> CurrentVersion:
+    r"""Parse the values under ``HKLM\...\CurrentVersion`` (read eagerly, so a failed read raises here).
+
+    Example:
+        >>> from pwshpy import RegistryHive, RegistryValueType
+        >>> ubr = RegistryValue(hive=RegistryHive.HKLM, key="k", name="UBR", type=RegistryValueType.REG_SZ, data="x")
+        >>> version = current_version([ubr])
+        >>> (version.ubr, version.shown("UBR", version.ubr), version.shown("CurrentBuild", None))
+        (None, "'x'", 'None')
+    """
+    data = {value.name: value.data for value in values}
+    current, display = _text(data.get(_CURRENT_BUILD)), _text(data.get(_DISPLAY_VERSION))
+    ubr, installed = _dword(data.get(_UBR)), _dword(data.get(_INSTALL_DATE))
+    parsed = {_CURRENT_BUILD: current, _UBR: ubr, _DISPLAY_VERSION: display, _INSTALL_DATE: installed}
+    rejected = {
+        name: repr(data[name]) for name, value in parsed.items() if value is None and data.get(name) is not None
+    }
+    return CurrentVersion(
+        current_build=current, ubr=ubr, display_version=display, install_date=installed, rejected=rejected
+    )
+
+
+class BuildInfo(Report):
     """The guest's OS build.
 
     Attributes:
-        current_build: CurrentBuild (REG_SZ, e.g. "26200").
+        current_build: CurrentBuild (REG_SZ, e.g. "26200"), stripped.
         ubr: UBR as a decimal integer (``reg query`` prints it as hex, which a decimal comparison misreads).
         build: "<current_build>.<ubr>".
     """
@@ -218,70 +293,71 @@ class BuildInfo:
     build: str
 
 
-def _values(host: ProbeHost, key: str) -> dict[str, object]:
-    """All values under ``key`` as name -> data."""
-    return {value.name: value.data for value in host.registry(key)}
+def _running_build(version: CurrentVersion) -> tuple[str, int]:
+    """CurrentBuild (stripped) and UBR, or ProbeError naming the one missing or of the wrong type."""
+    current, ubr = version.current_build, version.ubr
+    if current is None or not current.strip():
+        raise ProbeError(f"CurrentBuild is missing or not text: {version.shown(_CURRENT_BUILD, current)}")
+    if ubr is None:
+        raise ProbeError(f"UBR is missing or not a DWORD: {version.shown(_UBR, ubr)}")
+    return current.strip(), ubr
 
 
-def build_info(values: Mapping[str, object]) -> BuildInfo:
-    """Extract CurrentBuild and UBR from the CurrentVersion values.
+def build_info(version: CurrentVersion) -> BuildInfo:
+    """The running build from the CurrentVersion values.
 
     Raises:
-        ProbeError: Either value is missing or has the wrong type.
+        ProbeError: CurrentBuild or UBR is missing or has the wrong type.
     """
-    current, ubr = values.get("CurrentBuild"), values.get("UBR")
-    if not isinstance(current, str) or not current.strip():
-        raise ProbeError(f"CurrentBuild is missing or not text: {current!r}")
-    if not isinstance(ubr, int) or isinstance(ubr, bool):
-        raise ProbeError(f"UBR is missing or not a DWORD: {ubr!r}")
-    return BuildInfo(current_build=current.strip(), ubr=ubr, build=f"{current.strip()}.{ubr}")
+    current, ubr = _running_build(version)
+    return BuildInfo(current_build=current, ubr=ubr, build=f"{current}.{ubr}")
 
 
-@dataclass(frozen=True)
-class BuildReport:
+class BuildReport(BuildInfo):
     """What ``build`` reports: the running build and when this Windows was installed.
 
+    A :class:`BuildInfo` plus one field, so the envelope's keys stay flat in this order.
+
     Attributes:
-        current_build: As :class:`BuildInfo`.
-        ubr: As :class:`BuildInfo`.
-        build: As :class:`BuildInfo`.
         install_date: InstallDate (REG_DWORD, Unix epoch seconds). An in-place upgrade writes it
             anew, so a change across the apply reboot shows the upgrade applied even when the
             media carried the build the guest already ran.
     """
 
-    current_build: str
-    ubr: int
-    build: str
     install_date: int
 
 
-def install_date(values: Mapping[str, object]) -> int:
-    """Extract InstallDate from the CurrentVersion values.
+def install_date(version: CurrentVersion) -> int:
+    """InstallDate from the CurrentVersion values.
 
     Raises:
         ProbeError: It is missing or not a DWORD; a missing one must never compare as unchanged.
     """
-    value = values.get("InstallDate")
-    if not isinstance(value, int) or isinstance(value, bool):
-        raise ProbeError(f"InstallDate is missing or not a DWORD: {value!r}")
-    return value
+    if version.install_date is None:
+        raise ProbeError(f"InstallDate is missing or not a DWORD: {version.shown(_INSTALL_DATE, None)}")
+    return version.install_date
 
 
 def _run_build(host: ProbeHost) -> Outcome:
-    values = _values(host, CURRENT_VERSION_KEY)
-    info = build_info(values)
-    report = BuildReport(
-        current_build=info.current_build, ubr=info.ubr, build=info.build, install_date=install_date(values)
-    )
+    version = current_version(host.registry(CURRENT_VERSION_KEY))
+    current, ubr = _running_build(version)
+    report = BuildReport(current_build=current, ubr=ubr, build=f"{current}.{ubr}", install_date=install_date(version))
     return Outcome(ok=True, data=report)
 
 
 # --- detect-lp-defect -----------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
-class LpDefectReport:
+class LpVerdict(str, Enum):
+    """detect-lp-defect's verdict."""
+
+    AFFECTED = "AFFECTED"
+    CLEAN = "CLEAN"
+    # The log was unreadable, empty, or held unrendered messages: no evidence either way.
+    UNKNOWN = "UNKNOWN"
+
+
+class LpDefectReport(Report):
     r"""The orphaned-language-pack verdict for one guest.
 
     Attributes:
@@ -312,19 +388,20 @@ class LpDefectReport:
     events_unrendered: int | None
     codes: tuple[str, ...]
     last: str | None
-    verdict: str
+    verdict: LpVerdict
     reason: str | None
 
 
-@dataclass(frozen=True)
-class SetupScan:
-    """What the newest Setup events showed.
+class SetupScan(BaseModel):
+    """What the newest Setup events showed (an intermediate of the scan, never serialised).
 
     Attributes:
         read: Events read.
         unrendered: Events whose message was None or blank (could not be rendered).
         hits: The language-pack-to-Absent events, newest first.
     """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     read: int
     unrendered: int
@@ -383,14 +460,14 @@ def _scan_setup_log(host: ProbeHost, skipped: list[Skip]) -> SetupScan | None:
 
 def _install_language(host: ProbeHost, skipped: list[Skip]) -> str | None:
     try:
-        language = _values(host, NLS_LANGUAGE_KEY).get("InstallLanguage")
+        values = list(host.registry(NLS_LANGUAGE_KEY))
     except PwshPyError as exc:
         skipped.append(Skip(item=NLS_LANGUAGE_KEY, reason=str(exc)))
         return None
-    return language if isinstance(language, str) else None
+    return next((_text(value.data) for value in values if value.name == "InstallLanguage"), None)
 
 
-def lp_verdict(scan: SetupScan | None) -> tuple[str, str | None]:
+def lp_verdict(scan: SetupScan | None) -> tuple[LpVerdict, str | None]:
     """Return the verdict and, for UNKNOWN, the reason.
 
     AFFECTED when any event matched, even if others were unrendered (a hit is a hit). CLEAN only
@@ -404,34 +481,34 @@ def lp_verdict(scan: SetupScan | None) -> tuple[str, str | None]:
     out is the adapter's job: pwshpy's ``get_win_event`` reports a message it cannot format as None.
     """
     if scan is None:
-        return "UNKNOWN", "the Setup event log could not be read"
+        return LpVerdict.UNKNOWN, "the Setup event log could not be read"
     if scan.hits:
-        return "AFFECTED", None
+        return LpVerdict.AFFECTED, None
     if scan.read == 0:
-        return "UNKNOWN", "the Setup log holds no events (fresh after an upgrade): no evidence either way"
+        return LpVerdict.UNKNOWN, "the Setup log holds no events (fresh after an upgrade): no evidence either way"
     if scan.unrendered:
-        return "UNKNOWN", f"{scan.unrendered} of {scan.read} Setup event messages could not be rendered"
-    return "CLEAN", None
+        return LpVerdict.UNKNOWN, f"{scan.unrendered} of {scan.read} Setup event messages could not be rendered"
+    return LpVerdict.CLEAN, None
 
 
 def _run_detect_lp_defect(host: ProbeHost) -> Outcome:
-    values = _values(host, CURRENT_VERSION_KEY)
+    version = current_version(host.registry(CURRENT_VERSION_KEY))
     skipped: list[Skip] = []
     language = _install_language(host, skipped)
     scan = _scan_setup_log(host, skipped)
     verdict, reason = lp_verdict(scan)
     hits = scan.hits if scan else ()
-    current, ubr, display = values.get("CurrentBuild"), values.get("UBR"), values.get("DisplayVersion")
-    current_build = current if isinstance(current, str) else None
-    ubr_value = ubr if isinstance(ubr, int) else None
+    # Lenient where build is strict: a missing or odd value is reported as None, never refused,
+    # because the verdict comes from the Setup log and the build is context for the reader.
+    current_build, ubr = version.current_build, version.ubr
     report = LpDefectReport(
         host=host.computer_name(),
         current_build=current_build,
-        ubr=ubr_value,
-        build=f"{current_build}.{ubr_value}" if current_build and ubr_value is not None else None,
-        display_version=display if isinstance(display, str) else None,
+        ubr=ubr,
+        build=f"{current_build}.{ubr}" if current_build and ubr is not None else None,
+        display_version=version.display_version,
         install_language=language,
-        lp_absent_events=None if verdict == "UNKNOWN" else len(hits),
+        lp_absent_events=None if verdict is LpVerdict.UNKNOWN else len(hits),
         events_read=scan.read if scan else None,
         events_unrendered=scan.unrendered if scan else None,
         codes=hresults(hits),
@@ -439,14 +516,13 @@ def _run_detect_lp_defect(host: ProbeHost) -> Outcome:
         verdict=verdict,
         reason=reason,
     )
-    return Outcome(ok=report.verdict != "UNKNOWN", data=report, skipped=tuple(skipped))
+    return Outcome(ok=report.verdict is not LpVerdict.UNKNOWN, data=report, skipped=tuple(skipped))
 
 
 # --- drives ---------------------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
-class Drive:
+class Drive(Report):
     """A fixed drive with a letter.
 
     Attributes:
@@ -504,8 +580,7 @@ def fixed_drives(disks: Iterable[CimInstance]) -> tuple[tuple[Drive, ...], tuple
     return tuple(sorted(drives, key=lambda d: d.letter)), tuple(skips)
 
 
-@dataclass(frozen=True)
-class DriveReport:
+class DriveReport(Report):
     """Every fixed drive, sorted by letter."""
 
     drives: tuple[Drive, ...]
@@ -522,8 +597,7 @@ def _run_drives(host: ProbeHost) -> Outcome:
 # --- nic-macs -------------------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
-class NicMacReport:
+class NicMacReport(Report):
     """The MAC address of every network adapter, ``AA:BB:CC:DD:EE:FF``, sorted and unique."""
 
     macs: tuple[str, ...]
@@ -564,8 +638,7 @@ def _run_nic_macs(host: ProbeHost) -> Outcome:
 # --- verify-runners -------------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
-class TaskReport:
+class TaskReport(Report):
     """One boot task the runners depend on (Get-ScheduledTask plus Get-ScheduledTaskInfo).
 
     Attributes:
@@ -582,22 +655,38 @@ class TaskReport:
     name: str
     present: bool
     task_path: str | None
-    state: str | None
+    state: TaskState | None
     enabled: bool | None
     last_run: str | None
     last_result: int | None
 
 
-@dataclass(frozen=True)
-class Container:
-    """One running container from ``docker ps``."""
+class Container(Report):
+    """One running container, parsed from a ``docker ps --format "{{json .}}"`` line.
 
-    name: str
-    status: str
+    Attributes:
+        name: ``Names`` from the line ("" when it carries none).
+        status: ``Status`` from the line ("" when it carries none).
+    """
+
+    # docker ps writes some fifteen keys per line and only these two are read, so unknown keys
+    # are ignored here rather than refused; validate_by_name keeps keyword construction working.
+    model_config = ConfigDict(frozen=True, extra="ignore", validate_by_name=True)
+
+    name: str = Field(default="", validation_alias="Names")
+    status: str = Field(default="", validation_alias="Status")
 
 
-@dataclass(frozen=True)
-class RunnerReport:
+class RunnerVerdict(str, Enum):
+    """verify-runners' verdict."""
+
+    OK = "OK"
+    SHORT = "SHORT"
+    # The containers could not be enumerated: a count that is not there is never 0.
+    UNKNOWN = "UNKNOWN"
+
+
+class RunnerReport(Report):
     """Did the runner containers and their boot tasks come back after a reboot.
 
     Attributes:
@@ -611,36 +700,39 @@ class RunnerReport:
     """
 
     tasks: tuple[TaskReport, ...]
-    docker_service: str | None
+    docker_service: ServiceState | None
     dockerd_processes: int
     containers: tuple[Container, ...] | None
     count: int | None
     expected: int
-    verdict: str
+    verdict: RunnerVerdict
 
 
-def runner_verdict(count: int | None, expected: int) -> str:
+def runner_verdict(count: int | None, expected: int) -> RunnerVerdict:
     """OK at or above ``expected``, SHORT below it, UNKNOWN when the count is unknown."""
     if count is None:
-        return "UNKNOWN"
-    return "OK" if count >= expected else "SHORT"
+        return RunnerVerdict.UNKNOWN
+    return RunnerVerdict.OK if count >= expected else RunnerVerdict.SHORT
+
+
+def _container(line: str) -> Container | None:
+    try:
+        return Container.model_validate_json(line)
+    except ValidationError:
+        return None
 
 
 def parse_containers(stdout: str) -> tuple[Container, ...]:
-    """Containers from ``docker ps --format "{{json .}}"``, one JSON object per line.
+    r"""Containers from ``docker ps --format "{{json .}}"``, one JSON object per line.
 
-    A line that is not a JSON object (a warning, a blank) is not a container.
+    A line that is not a JSON object (a warning, a blank), or whose ``Names`` or ``Status`` is
+    not text, is not a container.
+
+    Example:
+        >>> parse_containers('WARNING: x\n42\n{"Names": "a", "Status": "Up 3 minutes", "ID": "f00"}\n')
+        (Container(name='a', status='Up 3 minutes'),)
     """
-    containers: list[Container] = []
-    for line in stdout.splitlines():
-        try:
-            row: object = json.loads(line)
-        except ValueError:
-            continue
-        if isinstance(row, dict):
-            fields = cast("dict[str, object]", row)  # json.loads gives str keys
-            containers.append(Container(name=str(fields.get("Names", "")), status=str(fields.get("Status", ""))))
-    return tuple(containers)
+    return tuple(container for line in stdout.splitlines() if (container := _container(line)) is not None)
 
 
 def _containers(host: ProbeHost, skipped: list[Skip]) -> tuple[Container, ...] | None:
@@ -666,7 +758,7 @@ def _task_report(name: str, tasks: Sequence[ScheduledTaskInfo]) -> TaskReport:
         name=name,
         present=True,
         task_path=task.task_path,
-        state=str(task.state.value),
+        state=task.state,
         enabled=task.enabled,
         last_run=task_time(task.last_run_time),
         last_result=task.last_task_result,
@@ -684,26 +776,46 @@ def count_processes(processes: Iterable[ProcessInfo], names: Sequence[str]) -> d
     return counts
 
 
-def _docker_service(host: ProbeHost) -> str | None:
+def _docker_service(host: ProbeHost) -> ServiceState | None:
     service = next((s for s in host.services() if s.name.casefold() == "docker"), None)
-    return str(service.status.value) if service else None
+    return service.status if service else None
 
 
-def _run_verify_runners(host: ProbeHost, expected: int, names: Sequence[str]) -> Outcome:
+class VerifyRunnersArgs(BaseModel):
+    """verify-runners' arguments, read from argparse's namespace in one place.
+
+    Attributes:
+        tasks: The boot tasks to check, in command-line order (empty: no task check).
+        expected: The container count that means OK.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    tasks: tuple[str, ...]
+    expected: int
+
+    @classmethod
+    def from_namespace(cls, args: argparse.Namespace) -> VerifyRunnersArgs:
+        """The attributes ``_configure_verify_runners`` defines; argparse already checked each value."""
+        # An append option never given stays at its None default.
+        return cls(tasks=tuple(args.tasks or ()), expected=args.expected)
+
+
+def _run_verify_runners(host: ProbeHost, args: VerifyRunnersArgs) -> Outcome:
     skipped: list[Skip] = []
     tasks = list(host.scheduled_tasks())
     containers = _containers(host, skipped)
     count = None if containers is None else len(containers)
     report = RunnerReport(
-        tasks=tuple(_task_report(name, tasks) for name in names),
+        tasks=tuple(_task_report(name, tasks) for name in args.tasks),
         docker_service=_docker_service(host),
         dockerd_processes=count_processes(host.processes(), ("dockerd",))["dockerd"],
         containers=containers,
         count=count,
-        expected=expected,
-        verdict=runner_verdict(count, expected),
+        expected=args.expected,
+        verdict=runner_verdict(count, args.expected),
     )
-    return Outcome(ok=report.verdict == "OK", data=report, skipped=tuple(skipped))
+    return Outcome(ok=report.verdict is RunnerVerdict.OK, data=report, skipped=tuple(skipped))
 
 
 def _non_negative_int(text: str) -> int:
@@ -741,8 +853,7 @@ def _configure_verify_runners(parser: argparse.ArgumentParser) -> None:
 # --- servicing-active / setup-alive ---------------------------------------------------------
 
 
-@dataclass(frozen=True)
-class ServicingReport:
+class ServicingReport(Report):
     """Is a CBS transaction in flight (TiWorker / TrustedInstaller running)."""
 
     counts: Mapping[str, int]
@@ -750,8 +861,7 @@ class ServicingReport:
     active: bool
 
 
-@dataclass(frozen=True)
-class SetupReport:
+class SetupReport(Report):
     """Is the down-level setup still running (SetupHost)."""
 
     count: int
@@ -772,13 +882,21 @@ def _run_setup_alive(host: ProbeHost) -> Outcome:
 # --- staged-os ------------------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
-class StagedOs:
+class StagedVerdict(str, Enum):
+    """staged-os' verdict: what a failed apply leaves to do."""
+
+    # A rollback deleted the staged NewOS: setup must run again.
+    RERUN = "RERUN"
+    # The staged NewOS is still there: the apply can be re-armed.
+    REARMABLE = "REARMABLE"
+
+
+class StagedOs(Report):
     """Is the staged NewOS still there (REARMABLE) or did a rollback delete it (RERUN)."""
 
     path: str
     present: bool
-    verdict: str
+    verdict: StagedVerdict
 
 
 def staged_os(path: str | os.PathLike[str]) -> StagedOs:
@@ -790,15 +908,31 @@ def staged_os(path: str | os.PathLike[str]) -> StagedOs:
     try:
         Path(path).stat()
     except (FileNotFoundError, NotADirectoryError):
-        return StagedOs(path=os.fspath(path), present=False, verdict="RERUN")
-    return StagedOs(path=os.fspath(path), present=True, verdict="REARMABLE")
+        return StagedOs(path=os.fspath(path), present=False, verdict=StagedVerdict.RERUN)
+    return StagedOs(path=os.fspath(path), present=True, verdict=StagedVerdict.REARMABLE)
 
 
 # --- state ----------------------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
-class StateLog:
+class StateVerdict(str, Enum):
+    """The completion verdict the upgrade run writes into its state log."""
+
+    DONE_OK = "DONE-OK"
+    DONE_FAIL = "DONE-FAIL"
+
+    @property
+    def marker(self) -> str:
+        """The marker text in the log, ``STATE=<value>``.
+
+        Example:
+            >>> StateVerdict.DONE_FAIL.marker
+            'STATE=DONE-FAIL'
+        """
+        return f"STATE={self.value}"
+
+
+class StateLog(Report):
     """The upgrade run's state log and the completion marker it carries.
 
     Attributes:
@@ -812,7 +946,7 @@ class StateLog:
 
     path: str
     present: bool
-    verdict: str | None
+    verdict: StateVerdict | None
     marker: str | None
     line_count: int
     tail: tuple[str, ...]
@@ -829,12 +963,12 @@ def decode_state(raw: bytes) -> str:
     return raw.decode("utf-8-sig", errors="replace").replace("\x00", "")
 
 
-def state_verdict(lines: Sequence[str]) -> tuple[str | None, str | None]:
+def state_verdict(lines: Sequence[str]) -> tuple[StateVerdict | None, str | None]:
     """Return the verdict and line of the LAST marker; (None, None) while still running."""
     for line in reversed(lines):
-        for marker in STATE_MARKERS:
-            if marker in line:
-                return marker.removeprefix("STATE="), line
+        for verdict in StateVerdict:
+            if verdict.marker in line:
+                return verdict, line
     return None, None
 
 
@@ -864,6 +998,23 @@ def _configure_state(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--log", default=DEFAULT_STATE_LOG, help=f"the state log to read (default {DEFAULT_STATE_LOG})")
 
 
+class StateArgs(BaseModel):
+    """state's arguments, read from argparse's namespace in one place.
+
+    Attributes:
+        log: The state log to read.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    log: str
+
+    @classmethod
+    def from_namespace(cls, args: argparse.Namespace) -> StateArgs:
+        """The attribute ``_configure_state`` defines."""
+        return cls(log=args.log)
+
+
 # --- registration ---------------------------------------------------------------------------
 
 
@@ -889,7 +1040,7 @@ def commands(
         Command(
             name="verify-runners",
             help="did the runner containers and their boot tasks come back after a reboot",
-            run=lambda a: _run_verify_runners(host_factory(), a.expected, tuple(a.tasks or ())),
+            run=lambda a: _run_verify_runners(host_factory(), VerifyRunnersArgs.from_namespace(a)),
             configure=_configure_verify_runners,
         ),
         Command(name="build", help="CurrentBuild, UBR and InstallDate", run=lambda _a: _run_build(host_factory())),
@@ -907,7 +1058,7 @@ def commands(
         Command(
             name="state",
             help="the upgrade state log and its completion marker",
-            run=lambda a: Outcome(ok=True, data=read_state(a.log)),
+            run=lambda a: Outcome(ok=True, data=read_state(StateArgs.from_namespace(a).log)),
             configure=_configure_state,
         ),
         Command(

@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 @pytest.mark.os_agnostic
 def test_snapshot_traceback_state_returns_disabled_by_default(managed_traceback_state: None) -> None:
     """snapshot_traceback_state returns both flags disabled initially."""
-    assert cli_mod.snapshot_traceback_state() == (False, False)
+    assert cli_mod.snapshot_traceback_state() == cli_mod.TracebackState(enabled=False, force_color=False)
 
 
 @pytest.mark.os_agnostic
@@ -42,6 +42,16 @@ def test_restore_traceback_state_resets_flags_to_previous(managed_traceback_stat
     cli_mod.restore_traceback_state(previous)
 
     assert lib_cli_exit_tools.config.traceback is False
+    assert lib_cli_exit_tools.config.traceback_force_color is False
+
+
+@pytest.mark.os_agnostic
+def test_restore_traceback_state_sets_each_flag_from_its_own_field(managed_traceback_state: None) -> None:
+    """A state whose two flags differ is restored flag by flag, never swapped."""
+    cli_mod.restore_traceback_state(cli_mod.TracebackState(enabled=True, force_color=False))
+
+    assert cli_mod.snapshot_traceback_state() == cli_mod.TracebackState(enabled=True, force_color=False)
+    assert lib_cli_exit_tools.config.traceback is True
     assert lib_cli_exit_tools.config.traceback_force_color is False
 
 

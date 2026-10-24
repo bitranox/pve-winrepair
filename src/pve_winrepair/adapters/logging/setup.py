@@ -25,12 +25,12 @@ import os
 from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Annotated, cast
 
 import lib_log_rich.runtime
 from dotenv import dotenv_values
-from lib_layered_config import Config
-from pydantic import BaseModel, ConfigDict, ValidationError
+from lib_layered_config import Config, Layer
+from pydantic import Field, ValidationError, field_validator, model_validator
 
 from pve_winrepair import __init__conf__
 from pve_winrepair.domain.errors import ConfigurationError
@@ -41,31 +41,53 @@ if TYPE_CHECKING:
     from pydantic_core import ErrorDetails
 
 
-class LoggingConfigModel(BaseModel):
-    """Pydantic model for [lib_log_rich] config section validation.
+#: The service name logging reports when the ``[lib_log_rich]`` section names none.
+_DEFAULT_SERVICE = __init__conf__.name
 
-    Used at the boundary to parse configuration dictionaries into typed fields.
-    Extra fields are allowed to pass through to lib_log_rich.RuntimeConfig.
+
+class LoggingConfigModel(lib_log_rich.runtime.RuntimeConfig):
+    """lib_log_rich's own ``RuntimeConfig``, validated straight from the ``[lib_log_rich]`` section.
+
+    The section is the runtime configuration as written, so it is validated once, into the
+    library's model, with three differences from that model: ``service`` defaults to the
+    package name (also when it is empty), ``environment`` defaults to ``prod``, and a setting
+    written as null keeps lib_log_rich's default. A key the library does not know is ignored,
+    as the library ignores it.
 
     Example:
-        >>> model = LoggingConfigModel(service="myapp", environment="staging")
-        >>> model.service
-        'myapp'
-        >>> model.environment
-        'staging'
+        >>> model = LoggingConfigModel.model_validate({"service": "myapp", "environment": "staging"})
+        >>> model.service, model.environment
+        ('myapp', 'staging')
 
-        >>> default = LoggingConfigModel()
-        >>> default.environment
-        'prod'
+        >>> default = LoggingConfigModel.model_validate({"service": "", "console_theme": None})
+        >>> default.service == __init__conf__.name, default.environment, default.console_theme
+        (True, 'prod', 'dark')
     """
-
-    service: str | None = None
-    environment: str = "prod"
 
     # lib_layered_config reads an unquoted all-digit .env value as an int; the conversion is
     # lossless, so turning it back into text keeps a digit-only service or environment name valid
-    # instead of failing startup.
-    model_config = ConfigDict(extra="allow", coerce_numbers_to_str=True)
+    # instead of failing startup. Only these two: every other text setting is lib_log_rich's own.
+    service: Annotated[str, Field(coerce_numbers_to_str=True)] = _DEFAULT_SERVICE
+    environment: Annotated[str, Field(coerce_numbers_to_str=True)] = "prod"
+
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_null_settings(cls, data: object) -> object:
+        """Leave out every setting written as null, so it keeps its default as an absent one does.
+
+        ``environment`` is the exception: it has no null default to fall back to, and a null
+        there is refused as not being text.
+        """
+        if not isinstance(data, Mapping):
+            return data
+        section = cast("Mapping[object, object]", data)
+        return {key: value for key, value in section.items() if value is not None or key == "environment"}
+
+    @field_validator("service", mode="before")
+    @classmethod
+    def _empty_service_is_unset(cls, value: object) -> object:
+        """An empty ``service`` names the package, as an absent one does."""
+        return _DEFAULT_SERVICE if value == "" else value
 
 
 def _build_runtime_config(config: Config) -> lib_log_rich.runtime.RuntimeConfig:
@@ -80,27 +102,18 @@ def _build_runtime_config(config: Config) -> lib_log_rich.runtime.RuntimeConfig:
     Returns:
         Fully configured runtime settings ready for lib_log_rich.init().
 
+    Raises:
+        ValidationError: The section holds a value of the wrong type.
+
     Note:
         Configuration is read from the [lib_log_rich] section. All parameters
         documented in defaultconfig.toml can be specified. Unspecified values
         use lib_log_rich's built-in defaults. The service and environment
         parameters default to package metadata when not configured.
     """
-    log_raw: object = config.get("lib_log_rich", default={})
-    parsed = LoggingConfigModel.model_validate(cast("dict[str, object]", log_raw) if log_raw else {})
-
-    # Apply defaults for required fields
-    service = parsed.service or __init__conf__.name
-    environment = parsed.environment
-
-    # Get extra fields passed through by Pydantic
-    extra_config = parsed.model_dump(exclude={"service", "environment"}, exclude_none=True)
-
-    return lib_log_rich.runtime.RuntimeConfig(
-        service=service,
-        environment=environment,
-        **extra_config,
-    )
+    section: object = config.get("lib_log_rich", default={})
+    # An empty value (a section written as "" or []) configures nothing, like a missing one.
+    return LoggingConfigModel.model_validate(section or {})
 
 
 class InvalidLoggingConfigError(ConfigurationError):
@@ -132,8 +145,6 @@ class InvalidLoggingConfigError(ConfigurationError):
 
 #: The variables lib_log_rich reads itself; the only lines of a ``.env`` logging takes.
 _LOG_VARIABLE_PREFIX = "LOG_"
-#: The provenance layer name lib_layered_config gives the values it read from a ``.env``.
-_DOTENV_LAYER = "dotenv"
 
 
 def _problems(error: BaseException, section: object) -> list[str]:
@@ -239,7 +250,7 @@ def _configured_dotenv(config: Config) -> Path | None:
     """
     for key in config:
         source = config.origin(key)
-        if source is not None and source["layer"] == _DOTENV_LAYER and source["path"] is not None:
+        if source is not None and source["layer"] == Layer.DOTENV.value and source["path"] is not None:
             return Path(source["path"])
     return None
 

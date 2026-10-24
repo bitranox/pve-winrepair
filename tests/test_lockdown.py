@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,7 @@ from win32_fakes import (
     FILE_ATTRIBUTE_DIRECTORY,
     FILE_ATTRIBUTE_REPARSE_POINT,
     SE_DACL_PROTECTED,
+    Acl,
     Descriptor,
     FakeFiles,
     FakeSecurity,
@@ -289,6 +291,23 @@ def test_read_acl_reads_a_null_dacl_as_none() -> None:
     security = FakeSecurity()
     security.objects["x"] = descriptor(Sid(USERS), None, 0)
     assert lockdown.read_acl(security, "x") == AclReading(path="x", owner=USERS, protected=False, aces=None)
+
+
+@dataclass
+class _TextFlagsAcl(Acl):
+    """A PyACL whose one ACE carries its flags as text, a shape pywin32 never hands back."""
+
+    def GetAce(self, index: int, /) -> tuple[object, ...]:  # noqa: N802 - mirrors the pywin32 / COM member name
+        assert index == 0
+        return ((0, "3"), FULL, Sid(SYSTEM))
+
+
+def test_read_acl_refuses_an_ace_whose_parts_are_not_integers_rather_than_coercing_them() -> None:
+    security = FakeSecurity()
+    security.objects["x"] = descriptor(Sid(ADMINS), _TextFlagsAcl(aces=[((0, 3), FULL, Sid(SYSTEM))]), 0)
+
+    with pytest.raises(OSError, match="unexpected ACE shape"):
+        lockdown.read_acl(security, "x")
 
 
 # --- the lock, exactly, and the tree below it ----------------------------------------

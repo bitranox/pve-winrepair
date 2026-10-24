@@ -51,9 +51,9 @@ from pve_winrepair.application.apply import ApplyError, ApplyRequest, run_apply
 from pve_winrepair.domain.envelope import WU_HELD_HINT, GuestProtocolError
 from pve_winrepair.domain.receipt import GuestBuild, RepairReceipt
 from pve_winrepair.domain.report import Report, RunExit, RunResult, Step
-from pve_winrepair_guest.probes import BuildReport, NicMacReport, StagedOs
+from pve_winrepair_guest.probes import BuildReport, NicMacReport, StagedOs, StagedVerdict
 from pve_winrepair_guest.upgrade import DirectoryLock, LockDirsReport
-from pve_winrepair_guest.wu import SearchProbe
+from pve_winrepair_guest.wu import SearchProbe, SearchStatus
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -104,14 +104,18 @@ def test_read_build_with_a_renamed_field_is_a_protocol_error() -> None:
 
 
 def test_gate_staged_present_is_rearmable() -> None:
-    runner = FakeRunner().on("staged-os", answer("staged-os", StagedOs(path=NEWOS, present=True, verdict="REARMABLE")))
+    runner = FakeRunner().on(
+        "staged-os", answer("staged-os", StagedOs(path=NEWOS, present=True, verdict=StagedVerdict.REARMABLE))
+    )
     rep = Report(vmid=1)
     apply.gate_staged(make_guest(runner), rep)
     assert rep.steps == [{"step": "gate_staged", "ok": True, "verdict": "REARMABLE"}]
 
 
 def test_gate_staged_absent_refuses_to_reboot() -> None:
-    runner = FakeRunner().on("staged-os", answer("staged-os", StagedOs(path=NEWOS, present=False, verdict="RERUN")))
+    runner = FakeRunner().on(
+        "staged-os", answer("staged-os", StagedOs(path=NEWOS, present=False, verdict=StagedVerdict.RERUN))
+    )
     rep = Report(vmid=1)
     with pytest.raises(ApplyError, match="NewOS is absent"):
         apply.gate_staged(make_guest(runner), rep)
@@ -126,7 +130,9 @@ def test_gate_staged_unreadable_refuses_to_reboot_on_an_unknown_state(reply: Rep
 
 
 def test_gate_staged_present_flag_contradicting_the_verdict_is_a_protocol_error() -> None:
-    runner = FakeRunner().on("staged-os", answer("staged-os", StagedOs(path=NEWOS, present=False, verdict="REARMABLE")))
+    runner = FakeRunner().on(
+        "staged-os", answer("staged-os", StagedOs(path=NEWOS, present=False, verdict=StagedVerdict.REARMABLE))
+    )
     with pytest.raises(GuestProtocolError):
         apply.gate_staged(make_guest(runner), Report(vmid=1))
 
@@ -155,7 +161,7 @@ def test_restore_wu_search_timeout_is_explained_as_no_verdict() -> None:
 
 
 def test_restore_wu_search_ok_records_the_pending_count() -> None:
-    found = SearchProbe(status="OK", pending=2, titles=("KB1", "KB2"), error=None, timeout_s=180.0)
+    found = SearchProbe(status=SearchStatus.OK, pending=2, titles=("KB1", "KB2"), error=None, timeout_s=180.0)
     runner = FakeRunner().on("restore-wu", answer("restore-wu", restore_report("RESTORED", search=found)))
     rep = Report(vmid=1)
     apply.restore_windows_update(make_guest(runner), rep)
@@ -164,7 +170,9 @@ def test_restore_wu_search_ok_records_the_pending_count() -> None:
 
 
 def test_restore_wu_search_failure_is_recorded_and_still_ok() -> None:
-    failed = SearchProbe(status="FAILED", pending=None, titles=(), error="com_error: 0x8024401c", timeout_s=180.0)
+    failed = SearchProbe(
+        status=SearchStatus.FAILED, pending=None, titles=(), error="com_error: 0x8024401c", timeout_s=180.0
+    )
     runner = FakeRunner().on("restore-wu", answer("restore-wu", restore_report("RESTORED", search=failed)))
     rep = Report(vmid=1)
     apply.restore_windows_update(make_guest(runner), rep)

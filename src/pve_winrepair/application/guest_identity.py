@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 
 from pve_winrepair.domain.addresses import normalise_mac, vm_macs
 from pve_winrepair.domain.envelope import PROBE_TIMEOUT, READ_FAILURES, GuestProtocolError, snippet
+from pve_winrepair.domain.guest_answers import GuestCommand, NicMacsAnswer
 
 if TYPE_CHECKING:
     from pve_winrepair.application.ports import GuestPort, NodePort
@@ -46,7 +47,7 @@ def _configured_macs(node: NodePort, vmid: int, ip: str) -> frozenset[str]:
 
 def _guest_macs(guest: GuestPort) -> frozenset[str]:
     try:
-        reported = guest.probe("nic-macs", timeout=PROBE_TIMEOUT).texts("macs")
+        reported = guest.ask(GuestCommand.NIC_MACS, NicMacsAnswer, timeout=PROBE_TIMEOUT).data.macs
     except READ_FAILURES as exc:
         raise GuestMismatchError(f"cannot read the NIC MACs of the guest at {guest.ip}: {exc}") from exc
     macs: set[str] = set()

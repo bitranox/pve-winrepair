@@ -12,9 +12,12 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 import pytest
+from pydantic import BaseModel, ConfigDict
 
 from pve_winrepair.adapters.receipts import FileReceiptStore, ReceiptError
-from pve_winrepair.domain.receipt import RepairReceipt
+from pve_winrepair.domain.envelope import GuestProtocolError
+from pve_winrepair.domain.guest_answers import BuildAnswer
+from pve_winrepair.domain.receipt import BuildPair, GuestBuild, RepairReceipt
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -207,3 +210,50 @@ def test_a_write_that_cannot_replace_the_file_leaves_no_temporary_file(tmp_path:
         store.write(_receipt())
     assert str(caught.value).startswith(f"cannot write the repair receipt {store.path(1)}: ")
     assert [p.name for p in tmp_path.iterdir()] == ["receipt-1.json"]
+
+
+#: A receipt exactly as pve-winrepair 1.0.0 writes it; receipts in this form exist on nodes.
+RECEIPT_1_0_0 = (
+    '{\n  "vmid": 1,\n  "image_build": 26200,\n  "image_spbuild": 8973,\n  "build_before": [\n    26200,\n'
+    '    7462\n  ],\n  "install_date_before": 1761206400,\n  "written_at": "2026-01-02T03:04:05Z"\n}\n'
+)
+
+
+def test_a_receipt_written_by_1_0_0_loads_and_is_rewritten_byte_identical(tmp_path: Path) -> None:
+    store = FileReceiptStore(tmp_path)
+    store.path(1).write_text(RECEIPT_1_0_0, encoding="utf-8")
+    receipt = store.read(1)
+    assert receipt == _receipt()
+    assert receipt is not None
+    store.write(receipt)
+    assert store.path(1).read_text(encoding="utf-8") == RECEIPT_1_0_0
+
+
+class _PairHolder(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
+
+    build_before: BuildPair
+
+
+def test_a_build_pair_field_keeps_the_receipt_s_json_array() -> None:
+    holder = _PairHolder(build_before=BuildPair(build=26200, ubr=7462))
+    assert holder.model_dump_json() == '{"build_before":[26200,7462]}'
+    assert _PairHolder.model_validate_json('{"build_before":[26200,7462]}').build_before.ubr == 7462
+
+
+def _build_answer(current: str) -> BuildAnswer:
+    return BuildAnswer(current_build=current, ubr=7462, build=f"{current}.7462", install_date=1761206400)
+
+
+def test_the_guest_build_is_read_from_the_build_answer() -> None:
+    build = GuestBuild.from_answer(_build_answer("26200"))
+    assert build == GuestBuild(build=26200, ubr=7462, install_date=1761206400)
+    assert (build.text, build.pair) == ("26200.7462", BuildPair(build=26200, ubr=7462))
+
+
+@pytest.mark.parametrize(
+    "current", ["", "26200a", "1" * 10, "2" + chr(0x0662)], ids=["empty", "suffix", "huge", "arabic"]
+)
+def test_a_current_build_that_is_no_ascii_number_is_a_protocol_error(current: str) -> None:
+    with pytest.raises(GuestProtocolError, match="is not a number"):
+        GuestBuild.from_answer(_build_answer(current))

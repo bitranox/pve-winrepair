@@ -18,6 +18,7 @@ from unittest.mock import ANY
 import guest_fakes
 import pytest
 from guest_fakes import (
+    BUILD_BEFORE,
     GUEST_IP,
     PROFILE_ACL,
     PROFILE_PATH,
@@ -33,6 +34,7 @@ from guest_fakes import (
     expected_guest_path,
     hashes_to,
     locked,
+    prepare_report,
     profile_reply,
     state_log,
 )
@@ -51,9 +53,16 @@ from pve_winrepair.domain.envelope import (
     GuestPushError,
     guest_stderr,
 )
+from pve_winrepair.domain.guest_answers import (
+    BuildAnswer,
+    GuestCommand,
+    PrepareAnswer,
+    SetupAliveAnswer,
+    StateVerdict,
+)
 from pve_winrepair.domain.settings import SshSettings
 from pve_winrepair_guest import lockdown
-from pve_winrepair_guest.probes import BuildInfo, SetupReport
+from pve_winrepair_guest.probes import SetupReport
 from pve_winrepair_guest.upgrade import LockDirsReport
 
 if TYPE_CHECKING:
@@ -61,7 +70,6 @@ if TYPE_CHECKING:
 
 KEY = "/keys/test.key"
 SSH = SshSettings(key=KEY, user=USER)
-BUILD = BuildInfo(current_build="26200", ubr=8973, build="26200.8973")
 
 
 def _guest(runner: FakeRunner, tool_dir: Path | None = None) -> Guest:
@@ -72,8 +80,8 @@ def _guest(runner: FakeRunner, tool_dir: Path | None = None) -> Guest:
 
 
 def test_tool_call_runs_the_packed_tool_with_json_over_ssh() -> None:
-    runner = FakeRunner().on("prepare", answer("prepare", {"gate": "PASS"}))
-    _guest(runner).tool("prepare", "--stage-root", "D:\\upgrade", timeout=900)
+    runner = FakeRunner().on("prepare", answer("prepare", prepare_report("PASS")))
+    _guest(runner).ask(GuestCommand.PREPARE, PrepareAnswer, "--stage-root", "D:\\upgrade", timeout=900)
     assert runner.calls == [
         [
             "ssh",
@@ -214,10 +222,11 @@ def test_a_changed_tool_gets_a_new_guest_path(tmp_path: Path) -> None:
 
 def test_tool_calls_run_the_pushed_content_address(tmp_path: Path) -> None:
     source = _packed(tmp_path)
-    runner = _pushing(source, present=True).on("setup-alive", answer("setup-alive", {"alive": False}))
+    reply = answer("setup-alive", SetupReport(count=0, alive=False))
+    runner = _pushing(source, present=True).on("setup-alive", reply)
     guest = _guest(runner, tmp_path)
     guest.push_tool()
-    guest.tool("setup-alive", timeout=300)
+    guest.ask(GuestCommand.SETUP_ALIVE, SetupAliveAnswer, timeout=300)
     assert runner.calls[-1][runner.calls[-1].index("-File") + 1] == expected_guest_path(source)
 
 
@@ -376,9 +385,9 @@ def test_a_failed_push_names_a_profile_copy_it_could_not_delete_and_keeps_its_ca
 def test_stage_tool_runs_later_calls_from_the_verified_profile_copy(tmp_path: Path) -> None:
     source = _packed(tmp_path)
     dest = expected_guest_path(source)
-    runner = _pushing(source).on("build", answer("build", BUILD))
+    runner = _pushing(source).on("build", answer("build", BUILD_BEFORE))
     staged = _guest(runner, tmp_path).stage_tool()
-    staged.tool("build", timeout=300)
+    staged.ask(GuestCommand.BUILD, BuildAnswer, timeout=300)
     assert runner.calls[2] == _hash_call(_staged(dest))
     assert runner.calls[-1][runner.calls[-1].index("-File") + 1] == _staged(dest)
     # Nothing is copied into C:\winrepair and nothing is deleted yet: the caller still runs it.
@@ -603,13 +612,18 @@ def test_run_state_reads_live_and_marker(alive: bool, log: object, live: bool, m
     state = read_run_state(_guest(runner), timeout=300)
     assert (state.live, state.marker, state.alive) == (live, marker, alive)
     assert state.log_path == r"C:\upgrade-state.log"
+    assert state.verdict is (None if marker is None else StateVerdict(marker.removeprefix("STATE=")))
 
 
-def test_run_state_with_an_unknown_marker_is_a_protocol_error() -> None:
+def test_run_state_with_an_unknown_marker_is_a_protocol_error_that_does_not_echo_it() -> None:
+    log = state_log(*DONE_OK_LINES).model_dump(mode="json") | {"verdict": "DONE-MAYBE"}
     runner = FakeRunner().on("setup-alive", answer("setup-alive", SetupReport(count=0, alive=False)))
-    runner.on("state", answer("state", {"path": "C:\\x.log", "present": True, "verdict": "DONE-MAYBE"}))
-    with pytest.raises(GuestProtocolError, match="DONE-MAYBE"):
+    runner.on("state", answer("state", log))
+    with pytest.raises(
+        GuestProtocolError, match=re.escape("data.verdict: Input should be 'DONE-OK' or 'DONE-FAIL'")
+    ) as caught:
         read_run_state(_guest(runner), timeout=300)
+    assert "DONE-MAYBE" not in str(caught.value)
 
 
 @pytest.mark.parametrize("reply", [Reply(255, "", "reset"), crashed("setup-alive", OSError("wmi"))])

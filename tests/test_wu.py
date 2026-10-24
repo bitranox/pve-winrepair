@@ -39,7 +39,7 @@ SERVICES = r"HKLM\SYSTEM\CurrentControlSet\Services"
 MODES = {2: "Auto", 3: "Manual", 4: "Disabled"}
 FLEET_START = {"wuauserv": 3, "UsoSvc": 2, "BITS": 2, "WaaSMedicSvc": 3}
 FLEET_STATE = {"wuauserv": "Running", "UsoSvc": "Running", "BITS": "Running", "WaaSMedicSvc": "Stopped"}
-SEARCH_OK = wu.SearchProbe(status="OK", pending=1, titles=("KB5127690",), error=None, timeout_s=180.0)
+SEARCH_OK = wu.SearchProbe(status=wu.SearchStatus.OK, pending=1, titles=("KB5127690",), error=None, timeout_s=180.0)
 
 
 @dataclass
@@ -53,6 +53,9 @@ class FakeWuHost:
     write_fails: set[str] = field(default_factory=set[str])
     stop_fails: set[str] = field(default_factory=set[str])
     cim_fails: bool = False
+    # Services whose StartMode and State WMI leaves out, and a StartMode to report for every one.
+    missing: set[str] = field(default_factory=set[str])
+    odd_mode: str | None = None
     search: wu.SearchProbe = SEARCH_OK
     now: float = 0.0
     calls: list[str] = field(default_factory=list[str])
@@ -72,12 +75,14 @@ class FakeWuHost:
             raise NativeCallError("WMI unavailable")
         self.calls.append("cim")
         return [
-            CimInstance(
-                class_name="Win32_Service",
-                properties={"Name": name, "StartMode": MODES[start], "State": self._state(name)},
-            )
+            CimInstance(class_name="Win32_Service", properties=self._properties(name, start))
             for name, start in self.start.items()
         ]
+
+    def _properties(self, name: str, start: int) -> dict[str, object]:
+        if name in self.missing:
+            return {"Name": name}
+        return {"Name": name, "StartMode": self.odd_mode or MODES[start], "State": self._state(name)}
 
     def registry(self, key: str) -> Iterable[RegistryValue]:
         name = key.removeprefix(SERVICES + "\\")
@@ -262,6 +267,31 @@ def test_quiesce_with_no_target_service_readable_is_unknown_not_ok() -> None:
     assert _data(envelope)["verdict"] == "UNKNOWN"
 
 
+def test_quiesce_reports_a_property_wmi_left_out_as_none() -> None:
+    host = FakeWuHost()
+    host.missing = {"WaaSMedicSvc"}
+
+    code, envelope = _run(host, "quiesce-wu")
+
+    assert code == 1
+    data = _data(envelope)
+    assert obj(data["previous_start_modes"])["WaaSMedicSvc"] == "None"
+    medic = [s for s in items(data, "services") if at(s, "name") == "WaaSMedicSvc"]
+    assert medic == [{"name": "WaaSMedicSvc", "start_mode": "None", "state": "None"}]
+    assert (data["verdict"], data["not_disabled"]) == ("FAIL", ["WaaSMedicSvc"])
+
+
+def test_quiesce_refuses_a_start_mode_win32_service_does_not_document_before_any_change() -> None:
+    host = FakeWuHost()
+    host.odd_mode = "Sometimes"
+
+    code, envelope = _run(host, "quiesce-wu")
+
+    assert code == 2
+    assert "'Sometimes' is not a valid StartMode" in str(at(envelope, "data", "error"))
+    assert host.calls == ["cim"]
+
+
 def test_quiesce_changes_nothing_when_the_previous_modes_cannot_be_read() -> None:
     host = FakeWuHost(cim_fails=True)
 
@@ -318,7 +348,7 @@ def test_restore_reports_a_service_still_disabled() -> None:
 
 
 def test_restore_search_timeout_is_not_a_verdict() -> None:
-    timeout = wu.SearchProbe(status="TIMEOUT", pending=None, titles=(), error=None, timeout_s=180.0)
+    timeout = wu.SearchProbe(status=wu.SearchStatus.TIMEOUT, pending=None, titles=(), error=None, timeout_s=180.0)
     host = disabled_host(search=timeout)
 
     code, envelope = _run(host, "restore-wu")
@@ -356,7 +386,7 @@ def _raising(error: Exception) -> Callable[[], Iterable[WindowsUpdate]]:
 def test_search_probe_maps_a_finished_search() -> None:
     probe = wu.search_probe(_updates("A", "B"), timeout=180.0)
 
-    assert probe == wu.SearchProbe(status="OK", pending=2, titles=("A", "B"), error=None, timeout_s=180.0)
+    assert probe == wu.SearchProbe(status=wu.SearchStatus.OK, pending=2, titles=("A", "B"), error=None, timeout_s=180.0)
 
 
 def test_search_probe_keeps_a_timeout_apart_from_a_failure() -> None:
@@ -366,14 +396,14 @@ def test_search_probe_keeps_a_timeout_apart_from_a_failure() -> None:
     failed = wu.search_probe(_raising(NativeCallError("HRESULT 0x8024402C")), timeout=5.0)
     died = wu.search_probe(_raising(NativeCallError("worker exited without a result (exit code 7)")), timeout=5.0)
 
-    assert (timed_out.status, timed_out.pending, timed_out.error) == ("TIMEOUT", None, None)
-    assert (failed.status, failed.pending, failed.error) == ("FAILED", None, "HRESULT 0x8024402C")
-    assert (died.status, died.error) == ("FAILED", "worker exited without a result (exit code 7)")
+    assert (timed_out.status, timed_out.pending, timed_out.error) == (wu.SearchStatus.TIMEOUT, None, None)
+    assert (failed.status, failed.pending, failed.error) == (wu.SearchStatus.FAILED, None, "HRESULT 0x8024402C")
+    assert (died.status, died.error) == (wu.SearchStatus.FAILED, "worker exited without a result (exit code 7)")
 
 
 @pytest.mark.os_posix  # on Windows this would run a real Windows Update search for up to 180 s
 def test_the_real_search_reaches_pwshpy_and_reports_its_refusal_as_failed() -> None:
     probe = wu.PwshpyHost().search_updates(wu.SEARCH_TIMEOUT)
 
-    assert (probe.status, probe.pending, probe.timeout_s) == ("FAILED", None, 180.0)
+    assert (probe.status, probe.pending, probe.timeout_s) == (wu.SearchStatus.FAILED, None, 180.0)
     assert probe.error == "Windows Update search is Windows-only."

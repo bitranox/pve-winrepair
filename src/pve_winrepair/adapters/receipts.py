@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 
 from pydantic import ValidationError
 
+from pve_winrepair.domain.envelope import describe_validation_error
 from pve_winrepair.domain.receipt import ReceiptError, RepairReceipt
 
 if TYPE_CHECKING:
@@ -23,13 +24,6 @@ if TYPE_CHECKING:
 __all__ = ["FileReceiptStore", "ReceiptError"]
 
 _DIR_MODE = 0o700
-
-
-def _reasons(error: ValidationError) -> str:
-    """One ``<field>: <reason>`` per problem, never the rejected value or the library's own rendering."""
-    return "; ".join(
-        f"{'.'.join(str(part) for part in detail['loc']) or '<document>'}: {detail['msg']}" for detail in error.errors()
-    )
 
 
 def _cause(error: OSError | UnicodeDecodeError) -> str:
@@ -82,7 +76,8 @@ class FileReceiptStore:
             # rejected by fromisoformat before Python 3.11.
             receipt = RepairReceipt.model_validate_json(text)
         except ValidationError as exc:
-            raise ReceiptError(f"the repair receipt {path} is not valid: {_reasons(exc)}") from None
+            problems = describe_validation_error(exc, root="<document>")
+            raise ReceiptError(f"the repair receipt {path} is not valid: {problems}") from exc
         if receipt.vmid != vmid:
             # A file copied or renamed from another VM's receipt: its build is not this VM's.
             raise ReceiptError(f"the repair receipt {path} is for VM {receipt.vmid}, not VM {vmid}")
