@@ -83,7 +83,9 @@ dev = [
   "wheel>=0.48.0",               # CVE-2025-24049
   "pynacl>=1.6.2",               # CVE-2025-69277
   "urllib3>=2.8.0",              # CVE-2025-66471, CVE-2025-66418
-  "virtualenv>=21.14.9",         # CVE-2025-22702, CVE-2026-113722
+  "virtualenv>=21.14.10",        # CVE-2025-22702, CVE-2026-113722, CVE-2026-113713
+  # No fixed filelock supports 3.10 (4.2.x needs >=3.11), so the 3.10 lane keeps 4.1.0.
+  "filelock>=4.2.1; python_version >= '3.11'",  # CVE-2026-112906
   "certifi>=2026.10.19",         # PYSEC-2026-4320
 ]
 
@@ -310,7 +312,7 @@ ignores = ["E003"]
 
 [tool.uv]
 exclude-newer = "7 days"
-exclude-newer-package = {lib-cli-exit-tools = false, lib-layered-config = false, lib-log-rich = false, virtualenv = "2026-10-17T16:09:43Z", certifi = "2026-10-20T02:24:17Z", pwshpy = false, lib-registry = false, fake-winreg = false}
+exclude-newer-package = {lib-cli-exit-tools = false, lib-layered-config = false, lib-log-rich = false, virtualenv = "2026-10-17T17:31:56Z", certifi = "2026-10-20T02:24:17Z", pwshpy = false, lib-registry = false, fake-winreg = false, filelock = "2026-10-17T16:48:15Z"}
 
 [tool.bmk.pipelines.pack]
 add = [{name = "pack_guest", order = 10, argv = ["uv", "run", "--script", "scripts/pack_guest.py"]}]
