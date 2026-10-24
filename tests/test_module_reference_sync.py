@@ -30,7 +30,9 @@ _SECTION_MODELS: dict[str, type[BaseModel]] = {
 
 
 def _toml_literal(value: object) -> str:
-    """The default as the shipped TOML spells it: a tuple is an array, a path a string."""
+    """The default as the shipped TOML spells it: a tuple is an array, a path a string, None "" (TOML has no null)."""
+    if value is None:
+        return '""'
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, Path):

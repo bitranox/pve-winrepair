@@ -15,8 +15,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from pve_winrepair.domain.addresses import normalise_mac, vm_macs
-from pve_winrepair.domain.envelope import PROBE_TIMEOUT, READ_FAILURES, GuestProtocolError, snippet
+from pve_winrepair.domain.envelope import PROBE_TIMEOUT, READ_FAILURES, snippet
 from pve_winrepair.domain.guest_answers import GuestCommand, NicMacsAnswer
 from pve_winrepair.domain.report import StepName
 
@@ -32,13 +31,13 @@ class GuestMismatchError(RuntimeError):
 
 
 def _configured_macs(node: NodePort, vmid: int, ip: str) -> frozenset[str]:
-    proc = node.qm("config", str(vmid), timeout=60)
-    if proc.returncode != 0:
+    read = node.vm_config(vmid)
+    if read.returncode != 0:
         raise GuestMismatchError(
             f"cannot read qm config {vmid} to bind the guest at {ip} to it: "
-            f"rc={proc.returncode}: {snippet(proc.stderr or proc.stdout)}"
+            f"rc={read.returncode}: {snippet(read.output)}"
         )
-    macs = vm_macs(proc.stdout)
+    macs = read.config.macs
     if not macs:
         raise GuestMismatchError(
             f"VM {vmid} has no network device with a MAC in qm config, so the guest at {ip} cannot be bound to it"
@@ -47,17 +46,11 @@ def _configured_macs(node: NodePort, vmid: int, ip: str) -> frozenset[str]:
 
 
 def _guest_macs(guest: GuestPort) -> frozenset[str]:
+    """The guest's adapter MACs, normalised by the answer model (a value that is no MAC breaks its contract)."""
     try:
-        reported = guest.ask(GuestCommand.NIC_MACS, NicMacsAnswer, timeout=PROBE_TIMEOUT).data.macs
+        return frozenset(guest.ask(GuestCommand.NIC_MACS, NicMacsAnswer, timeout=PROBE_TIMEOUT).data.macs)
     except READ_FAILURES as exc:
         raise GuestMismatchError(f"cannot read the NIC MACs of the guest at {guest.ip}: {exc}") from exc
-    macs: set[str] = set()
-    for text in reported:
-        mac = normalise_mac(text)
-        if mac is None:
-            raise GuestProtocolError(f"nic-macs: {text!r} is not a MAC address")
-        macs.add(mac)
-    return frozenset(macs)
 
 
 def check_guest_is_vm(node: NodePort, guest: GuestPort, vmid: int, rep: Report) -> None:

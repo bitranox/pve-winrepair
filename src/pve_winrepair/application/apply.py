@@ -43,6 +43,8 @@ import ntpath
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from pydantic import BaseModel, ConfigDict
+
 from pve_winrepair.application.guest_identity import GuestMismatchError, check_guest_is_vm
 from pve_winrepair.application.guest_state import read_guest_build, read_run_state
 from pve_winrepair.application.vm import VmStatus, VmStatusError, wait_status
@@ -278,24 +280,47 @@ def gate_staged(guest: GuestPort, rep: Report) -> None:
         )
 
 
-def _search_detail(search: UpdateSearch) -> dict[str, StepValue]:
-    """The bounded Windows Update search as step fields: informational, never part of the verdict.
+class _SearchStep(BaseModel):
+    """The bounded Windows Update search as the ``restore_wu`` step records it: informational, never the verdict.
 
-    A TIMEOUT is normal on the first boot after the apply, while servicing still runs; bare, it
-    reads like a failure, so it carries the sentence that says what it is.
+    Only the field its status calls for is set, and only set fields are recorded
+    (:meth:`fields`): an OK search records its pending count, a TIMEOUT the sentence that says what
+    it is (bare, it reads like a failure; it is normal on the first boot after the apply, while
+    servicing still runs), any other status the guest's error, None included.
+
+    Attributes:
+        search: The search's status.
+        search_pending: How many updates are pending (an OK search).
+        search_note: What a TIMEOUT means.
+        search_error: Why the search failed.
     """
-    detail: dict[str, StepValue] = {"search": search.status.value}
-    if search.status is SearchStatus.OK:
-        detail["search_pending"] = search.pending
-    elif search.status is SearchStatus.TIMEOUT:
-        detail["search_note"] = (
-            f"Windows Update search abandoned after {search.timeout_s:g} s - informational, "
-            f"NOT a verdict; normal on the first boot after the apply while servicing runs; "
-            f"re-run restore-wu later to list pending updates"
-        )
-    else:
-        detail["search_error"] = search.error
-    return detail
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    search: SearchStatus
+    search_pending: int | None = None
+    search_note: str | None = None
+    search_error: str | None = None
+
+    @classmethod
+    def of(cls, search: UpdateSearch) -> _SearchStep:
+        """The step's view of ``search``."""
+        if search.status is SearchStatus.OK:
+            return cls(search=search.status, search_pending=search.pending)
+        if search.status is SearchStatus.TIMEOUT:
+            return cls(
+                search=search.status,
+                search_note=f"Windows Update search abandoned after {search.timeout_s:g} s - informational, "
+                f"NOT a verdict; normal on the first boot after the apply while servicing runs; "
+                f"re-run restore-wu later to list pending updates",
+            )
+        return cls(search=search.status, search_error=search.error)
+
+    def fields(self) -> dict[str, StepValue]:
+        """The step fields: the status and the one field it calls for, enums as their plain values."""
+        # exclude_unset, not exclude_none: a failed search with no error message still records
+        # search_error as null.
+        return self.model_dump(mode="json", exclude_unset=True)
 
 
 def restore_windows_update(guest: GuestPort, rep: Report) -> None:
@@ -311,7 +336,7 @@ def restore_windows_update(guest: GuestPort, rep: Report) -> None:
         rep.add(StepName.RESTORE_WU, ok=False, note="no answer")
         raise ApplyError(f"could not run the Windows Update restore: {exc}") from exc
     verdict, still = restored.verdict, restored.still_disabled
-    search = _search_detail(restored.search)
+    search = _SearchStep.of(restored.search).fields()
     if verdict is RestoreVerdict.RESTORED:
         rep.add(StepName.RESTORE_WU, ok=True, note="all restored", **search)
         return
@@ -420,7 +445,7 @@ def apply_sequence(request: ApplyRequest, node: NodePort, rep: Report, *, receip
 
     ``receipt`` holds the build the guest must reach.
     """
-    guest = node.guest(str(request.ip))
+    guest = node.guest(request.ip)
     push_tool(guest, rep)
     # Before the apply reboot stops the VM: the guest at --ip must be the VM --vmid names.
     check_guest_is_vm(node, guest, request.vmid, rep)

@@ -11,7 +11,7 @@ moves or removes a module, a CLI option or a public name.
 
 ### Domain Layer
 - `src/pve_winrepair/domain/acl.py`  -  Who may write a directory, read from its SDDL security descriptor (`parse_sddl` into `SddlAce` with its `AceKind` and `AceFlag` set, `write_problems`, `trusted_writers`, `TRUSTED_WELL_KNOWN`; the alias `LA` counts as the ssh user only when its SID ends in -500); the node's check of the ssh user's profile before a copy of the tool goes there
-- `src/pve_winrepair/domain/addresses.py`  -  `lan_address` picks the guest's LAN address out of what its agent reports (the first one in `[guest] subnet`; without a subnet the only candidate, several refused with `AmbiguousAddressError`); `vm_macs` reads the MACs of the `netN` lines of `qm config`, `normalise_mac` puts a MAC in `AA:BB:CC:DD:EE:FF` form
+- `src/pve_winrepair/domain/addresses.py`  -  `lan_address` picks the guest's LAN address out of what its agent reports (the first one in `[guest] subnet`; without a subnet the only candidate, several refused with `AmbiguousAddressError`); `normalise_mac` puts a MAC in `AA:BB:CC:DD:EE:FF` form, and `MacAddress` is that form as a boundary model's field type (a value that is no MAC is refused)
 - `src/pve_winrepair/domain/enums.py`  -  Type-safe enums (`OutputFormat`, `DeployTarget`, `DriveLetter`)
 - `src/pve_winrepair/domain/envelope.py`  -  The guest tool's answer contract: `parse_answer` validates the one envelope line once, in strict JSON mode, into a `GuestAnswer[T]` (with `SkippedItem`s; exit 2 as `InternalErrorAnswer`) and checks `ok` against the payload's verdict; `describe_validation_error`; the error types (`GuestNoAnswerError`, `GuestInternalError`, `GuestProtocolError`, `GuestPushError`, `UnsafeArgumentError`), `check_argument`, `RunState`, `READ_FAILURES` and `WU_HELD_HINT`; starts no process
 - `src/pve_winrepair/domain/guest_answers.py`  -  One frozen model, closed to unknown fields, per guest subcommand's payload (`BuildAnswer`, `PrepareAnswer`, `LaunchAnswer`, ...), their verdict and status enums (`StateVerdict`, `LaunchVerdict`, `PrepareGate`, ...) and `GuestCommand`, the subcommand names
@@ -20,9 +20,10 @@ moves or removes a module, a CLI option or a public name.
 - `src/pve_winrepair/domain/receipt.py`  -  `RepairReceipt`, the image build a repair's prepare step measured with the guest's `build_before` and `install_date_before` (all required; `same_build`), `GuestBuild` (CurrentBuild, UBR, InstallDate; `from_answer`), `BuildPair` (`build_before`, stored as the array `[build, ubr]`), and `ReceiptError`
 - `src/pve_winrepair/domain/report.py`  -  `Report` collects a run's steps and hands each to `on_step`; `RunExit`, `RunResult`, `RunVerdict`, the `Step` model with its `StepName`; flags a run that leaves Windows Update held
 - `src/pve_winrepair/domain/settings.py`  -  Node CLI settings models (`SshSettings`, `GuestSettings`, `RepairSettings`, `NodeSettings`, `Settings`) and the `SnapshotName` type; see Settings below
+- `src/pve_winrepair/domain/vm_config.py`  -  `parse_vm_config` reads `qm config` once into a `VmConfig` (its `VmDisk`s with storage and `DiskMedia`, a `tpmstate0`, a launcher `--tpm`, the `netN` MACs); `VmConfigRead` is one such call with its exit code; `parse_snapshot_names` reads `qm listsnapshot`
 
 ### Application Layer
-- `src/pve_winrepair/application/ports.py`  -  Protocol definitions the adapters satisfy: the configuration and logging callables, `LoadSettings`, `GuestPort` (`ask` runs one subcommand and returns its typed answer), `NodePort`, `ReceiptStore`, `MakeNode`, `MakeReceipts`
+- `src/pve_winrepair/application/ports.py`  -  Protocol definitions the adapters satisfy: the configuration and logging callables, `LoadSettings`, `GuestPort` (`ask` runs one subcommand and returns its typed answer), `NodePort` (`vm_config` and `snapshots` return the parsed `qm config` and `qm listsnapshot`), `ReceiptStore`, `MakeNode`, `MakeReceipts`
 - `src/pve_winrepair/application/guest_state.py`  -  `read_run_state`, the live-run gate both use cases read before they stop, relaunch or restage a guest; `read_guest_build`, the guest's build and InstallDate
 - `src/pve_winrepair/application/guest_identity.py`  -  `check_guest_is_vm`: with `--ip`, a MAC of the VM's `qm config` must be among the guest's `nic-macs` (membership, both sides normalised); `GuestMismatchError`
 - `src/pve_winrepair/application/repair.py`  -  `run_repair`: live-run check (with `--ip`: the MAC check first), Windows Update hold, vTPM, snapshot, push, MAC check again with `--ip`, stage root, locked staging, media copy, WIM gate, build before, receipt, launch, poll (a `--stage-only` run ends on a `staged` step flagged `wu_held`); `RepairRequest`, `RepairError`
@@ -37,7 +38,7 @@ moves or removes a module, a CLI option or a public name.
 - `src/pve_winrepair/adapters/config/settings.py`  -  `load_settings` validates the `[ssh] [guest] [repair] [node]` sections into `Settings`; `SettingsError` carries one `<section>.<field>: <reason>` line per problem
 - `src/pve_winrepair/adapters/guest_ssh.py`  -  The guest tool over ssh: `Guest` checks the ssh user's profile, pushes the packed tool to its content address (`push_tool`) or stages a verified profile copy (`stage_tool`), runs one subcommand (`ask`) and hands the answer to `parse_answer`; `ssh_options` turns `SshSettings` into ssh's `-o` options; `TOOL_DIR` is the packed tool shipped in `adapters/guest_tool/`
 - `src/pve_winrepair/adapters/guest_tool/winrepair_guest.ps1`  -  The packed guest tool, a committed artefact (`make custom pack` writes it)
-- `src/pve_winrepair/adapters/node.py`  -  `Node`, the PVE node a run uses: one runner for `qm` and every guest, the clock and sleep; `run` is the production runner
+- `src/pve_winrepair/adapters/node.py`  -  `Node`, the PVE node a run uses: one runner for `qm` and every guest, the clock and sleep, `qm config` and `qm listsnapshot` parsed where they answer; `run` is the production runner
 - `src/pve_winrepair/adapters/receipts.py`  -  `FileReceiptStore`: one receipt per VM at `<state_dir>/receipt-<vmid>.json`, replaced atomically, 0600 in a 0700 directory
 - `src/pve_winrepair/adapters/logging/setup.py`  -  lib_log_rich initialization; takes only the `LOG_*` lines of a `.env`, and raises `InvalidLoggingConfigError` for a refused `[lib_log_rich]` value or `LOG_*` variable, after starting logging with its defaults (and without the `LOG_*` variables only when one of them is refused); `check_logging_config` refuses another configuration's logging settings through lib_log_rich's `validate_config`, without touching the running runtime
 - `src/pve_winrepair/adapters/cli/`  -  CLI adapter package:
@@ -116,7 +117,7 @@ Helpers and fixtures:
 
 Node CLI and its layers:
 - `tests/test_acl.py`  -  Which SDDL descriptors let someone else write the ssh user's profile
-- `tests/test_addresses.py`  -  Picking the guest's LAN address out of what its agent reports, and the VM's MACs out of `qm config`
+- `tests/test_addresses.py`  -  Picking the guest's LAN address out of what its agent reports, and a MAC's normal form
 - `tests/test_apply.py`  -  The apply use case's gates and its whole run, through the ssh runner seam
 - `tests/test_envelope.py`  -  The envelope contract: the arguments it refuses, how an answer is read, its typed fields
 - `tests/test_guest_ssh.py`  -  The ssh adapter: the argv it builds from `SshSettings`, the profile check, the push and its hashes, the profile copy
@@ -125,6 +126,7 @@ Node CLI and its layers:
 - `tests/test_repair.py`  -  The repair use case's steps and its whole run, through the ssh runner seam
 - `tests/test_settings.py`  -  Settings models and `load_settings`: shipped defaults, refusals by field, the env override end to end
 - `tests/test_settings_dotenv_numbers.py`  -  Digit-only `.env` values reach every text setting as the text the operator wrote
+- `tests/test_vm_config.py`  -  Reading `qm config` and `qm listsnapshot` output, against the line shapes PVE prints
 
 CLI:
 - `tests/test_cli_apply.py`  -  `apply` through `main()`: the receipt from `[node] state_dir`, refusals before any call, output and exit codes
@@ -406,7 +408,7 @@ loads and means "not configured". Override one key per run with
 
 | Field              | Type              | Default | Rule                                                                                                                       |
 |--------------------|-------------------|---------|----------------------------------------------------------------------------------------------------------------------------|
-| `subnet`           | `str`             | `""`    | IPv4 network in CIDR or netmask form, no host bits, or empty; `network()` returns it as `IPv4Network`, or `None`           |
+| `subnet`           | `IPv4Network`     | `""`    | IPv4 network in CIDR or netmask form, no host bits, or empty; held as an `IPv4Network`, empty as `None`                    |
 | `runner_tasks`     | `tuple[str, ...]` | `[]`    | each `[A-Za-z0-9_.-]{1,64}`; no node command reads it: the values for guest `verify-runners --task NAME`                   |
 | `expected_runners` | `int`             | `0`     | 0 to 999999, never true/false; no node command reads it: the value for guest `verify-runners --expected N` (0 = any count) |
 

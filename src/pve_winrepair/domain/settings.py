@@ -16,7 +16,7 @@ from ipaddress import IPv4Network
 from pathlib import Path, PurePath, PurePosixPath
 from typing import Annotated, Final
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
 
 #: A Windows account name as the guest's sshd takes it: no domain part, no spaces.
 _USER_PATTERN: Final[str] = r"^[A-Za-z0-9_.-]{1,64}$"
@@ -28,6 +28,9 @@ _TASK_PATTERN: Final[str] = r"^[A-Za-z0-9_.-]{1,64}$"
 _MAX_EXPECTED_RUNNERS: Final[int] = 999_999
 
 _SECTION_CONFIG: Final[ConfigDict] = ConfigDict(frozen=True, extra="forbid", coerce_numbers_to_str=True)
+#: A section's text field as the section reads it: a number is coerced to its digits, anything else
+#: that is no string is refused. ``subnet`` is read through it before it becomes a network.
+_SECTION_TEXT: Final[TypeAdapter[str]] = TypeAdapter(str, config=ConfigDict(coerce_numbers_to_str=True))
 
 TaskName = Annotated[str, Field(pattern=_TASK_PATTERN)]
 #: ``[repair] snapshot_name``'s rule, which ``repair --snapshot-name`` is held to as well.
@@ -69,47 +72,56 @@ class SshSettings(BaseModel):
     known_hosts_file: str = "~/.ssh/known_hosts"
 
 
+def _subnet(value: object) -> IPv4Network | None:
+    """The ``subnet`` setting as a network, or None for "" (not configured); a network is kept as it is.
+
+    The setting is text, as every other text field of a section is (:data:`_SECTION_TEXT`): a number
+    is read as its digits, which never name a network.
+
+    Raises:
+        pydantic.ValidationError: ``value`` is neither text nor a number.
+        ValueError: The text is no IPv4 network in CIDR or netmask form with no host bits set.
+
+    Example:
+        >>> _subnet("192.0.2.0/255.255.255.0"), _subnet("")
+        (IPv4Network('192.0.2.0/24'), None)
+    """
+    if isinstance(value, IPv4Network):
+        return value
+    text = _SECTION_TEXT.validate_python(value)
+    if text == "":
+        return None
+    # A bare address would parse as a /32; the setting names a LAN, so the prefix is required.
+    if "/" not in text:
+        raise ValueError("must be an IPv4 network in CIDR or netmask form (a.b.c.d/n or a.b.c.d/m.m.m.m), or empty")
+    try:
+        return IPv4Network(text, strict=True)
+    except ValueError:
+        # Neither the input nor ipaddress's message (which repeats it) goes into the reason.
+        raise ValueError("must be an IPv4 network in CIDR or netmask form with no host bits set, or empty") from None
+
+
 class GuestSettings(BaseModel):
     """What the node expects of a guest.
 
     ``subnet`` takes an IPv4 network in CIDR or netmask form (``192.0.2.0/24`` or
-    ``192.0.2.0/255.255.255.0``) with no host bits set, or "" for "not configured".
+    ``192.0.2.0/255.255.255.0``) with no host bits set, or "" for "not configured" (None here).
 
     Example:
-        >>> GuestSettings(subnet="192.0.2.0/24").network()
+        >>> GuestSettings.model_validate({"subnet": "192.0.2.0/24"}).subnet
         IPv4Network('192.0.2.0/24')
-        >>> GuestSettings().network() is None
+        >>> GuestSettings().subnet is None
         True
     """
 
     model_config = _SECTION_CONFIG
 
-    subnet: str = ""
+    subnet: IPv4Network | None = None
     runner_tasks: tuple[TaskName, ...] = ()
     expected_runners: int = Field(default=0, ge=0, le=_MAX_EXPECTED_RUNNERS)
 
     _expected_runners_is_not_a_boolean = field_validator("expected_runners", mode="before")(_refuse_a_boolean)
-
-    @field_validator("subnet")
-    @classmethod
-    def _subnet_is_a_strict_ipv4_cidr(cls, value: str) -> str:
-        if value == "":
-            return value
-        # A bare address would parse as a /32; the setting names a LAN, so the prefix is required.
-        if "/" not in value:
-            raise ValueError("must be an IPv4 network in CIDR or netmask form (a.b.c.d/n or a.b.c.d/m.m.m.m), or empty")
-        try:
-            IPv4Network(value, strict=True)
-        except ValueError:
-            # Neither the input nor ipaddress's message (which repeats it) goes into the reason.
-            raise ValueError(
-                "must be an IPv4 network in CIDR or netmask form with no host bits set, or empty"
-            ) from None
-        return value
-
-    def network(self) -> IPv4Network | None:
-        """The subnet as a network for membership checks, or None when it is not configured."""
-        return IPv4Network(self.subnet) if self.subnet else None
+    _subnet_is_a_strict_ipv4_network = field_validator("subnet", mode="before")(_subnet)
 
 
 class RepairSettings(BaseModel):

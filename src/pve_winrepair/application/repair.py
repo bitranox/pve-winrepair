@@ -33,15 +33,15 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
+from ipaddress import IPv4Address, IPv6Address, ip_address
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Annotated
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, TypeAdapter
 
 from pve_winrepair.application.guest_identity import GuestMismatchError, check_guest_is_vm
 from pve_winrepair.application.guest_state import read_guest_build, read_run_state
@@ -70,13 +70,15 @@ from pve_winrepair.domain.guest_answers import (
 )
 from pve_winrepair.domain.receipt import GuestBuild, ReceiptError, RepairReceipt
 from pve_winrepair.domain.report import Report, RunExit, RunResult, RunVerdict, Step, StepName
+from pve_winrepair.domain.vm_config import DiskMedia
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from ipaddress import IPv4Address, IPv4Network
+    from ipaddress import IPv4Network
 
     from pve_winrepair.application.ports import GuestPort, NodePort, ReceiptStore
     from pve_winrepair.domain.settings import GuestSettings, RepairSettings
+    from pve_winrepair.domain.vm_config import VmConfig
 
 # Progress between steps (still waiting, a read that failed and is retried) is for the operator
 # only; the steps themselves go to ``on_step``.
@@ -130,16 +132,41 @@ class _AgentAddressType(str, Enum):
     IPV6 = "ipv6"
 
 
+# The agent's address field is text first: a value that is no string is refused as pydantic refuses
+# any non-string, before it is read as an address.
+_ADDRESS_TEXT = TypeAdapter(str)
+
+
+def _address_or_none(value: object) -> IPv4Address | IPv6Address | None:
+    """The address ``value`` names, or None when it is text that names none.
+
+    An address the agent reports that does not parse (a leading zero, garbage) is no candidate, so it
+    is kept as None and skipped, never refused; a value that is not text at all is no interface list.
+
+    Raises:
+        pydantic.ValidationError: ``value`` is not a string.
+    """
+    # Outside the try: pydantic's ValidationError is a ValueError, and a non-string is a refusal.
+    text = _ADDRESS_TEXT.validate_python(value)
+    try:
+        return ip_address(text)
+    except ValueError:
+        return None
+
+
 class _AgentAddress(BaseModel):
     """One address of ``qm guest cmd <vmid> network-get-interfaces``; other keys are ignored.
 
-    An address without a type is kept as None and never taken for IPv4.
+    An address without a type is kept as None and never taken for IPv4; an address that is missing
+    or does not parse is None.
     """
 
     model_config = ConfigDict(frozen=True, extra="ignore")
 
     ip_address_type: _AgentAddressType | None = Field(default=None, alias="ip-address-type")
-    ip_address: str = Field(default="", alias="ip-address")
+    ip_address: Annotated[IPv4Address | IPv6Address | None, BeforeValidator(_address_or_none)] = Field(
+        default=None, alias="ip-address"
+    )
 
 
 class _AgentInterface(BaseModel):
@@ -153,17 +180,24 @@ class _AgentInterface(BaseModel):
 _AGENT_INTERFACES = TypeAdapter(tuple[_AgentInterface, ...])
 
 
-def _agent_ipv4(stdout: str) -> list[str]:
+def _agent_ipv4(stdout: str) -> list[IPv4Address]:
     """Every IPv4 address in ``network-get-interfaces`` output, in order.
+
+    An address typed ``ipv4`` whose text is no IPv4 address is skipped.
 
     Raises:
         pydantic.ValidationError: The output is not the agent's interface list (a driver/agent mismatch).
     """
     interfaces = _AGENT_INTERFACES.validate_json(stdout)
-    return [a.ip_address for i in interfaces for a in i.ip_addresses if a.ip_address_type is _AgentAddressType.IPV4]
+    return [
+        a.ip_address
+        for i in interfaces
+        for a in i.ip_addresses
+        if a.ip_address_type is _AgentAddressType.IPV4 and isinstance(a.ip_address, IPv4Address)
+    ]
 
 
-def guest_ip(node: NodePort, vmid: int, network: IPv4Network | None, tries: int = 30) -> str:
+def guest_ip(node: NodePort, vmid: int, network: IPv4Network | None, tries: int = 30) -> IPv4Address:
     """Resolve the guest's LAN address from the agent (see :func:`lan_address`).
 
     Never the first address: docker guests also carry a Hyper-V/NAT switch address (172.x) that is
@@ -177,7 +211,7 @@ def guest_ip(node: NodePort, vmid: int, network: IPv4Network | None, tries: int 
             except AmbiguousAddressError as exc:
                 raise RepairError(
                     f"the guest agent on {vmid} reports several candidate LAN addresses "
-                    f"({', '.join(exc.candidates)}): set [guest] subnet to the LAN the node reaches"
+                    f"({', '.join(map(str, exc.candidates))}): set [guest] subnet to the LAN the node reaches"
                 ) from exc
             if ip is not None:
                 return ip
@@ -197,21 +231,17 @@ def ensure_stopped(node: NodePort, vmid: int, rep: Report) -> None:
     rep.add(StepName.SHUTDOWN, ok=True, note="clean via qm shutdown (ACPI; agent-assisted only when the guest has one)")
 
 
-def vm_storage(node: NodePort, vmid: int) -> str:
-    """The storage the guest's own disks live on.
+def vm_storage(config: VmConfig, vmid: int) -> str:
+    """The storage the guest's own disks live on: that of its first disk entry that is no optical medium.
 
     Never one node's pool by name: another node can have that pool DISABLED, so `qm set` fails
     with a storage error that reads like a permissions problem. Reading the guest's existing disk
     keeps the vTPM on whatever storage the VM is already using, on any node.
     """
-    cfg = node.qm("config", str(vmid), timeout=60).stdout
-    # Match a real disk entry only. `description:` can quote other volumes, and matching that
-    # would put the vTPM on a pool this node cannot see.
-    for line in cfg.splitlines():
-        match = re.match(r"^(?:scsi|virtio|sata|ide)\d+:\s*([^:,]+):", line)
-        if match and "media=cdrom" not in line:
-            return match.group(1).strip()
-    raise RepairError(f"cannot determine storage for vm {vmid} - no disk entry in qm config")
+    disk = next((d for d in config.disks if d.media is DiskMedia.DISK), None)
+    if disk is None:
+        raise RepairError(f"cannot determine storage for vm {vmid} - no disk entry in qm config")
+    return disk.storage
 
 
 def ensure_vtpm(node: NodePort, vmid: int, rep: Report, storage: str | None = None) -> bool:
@@ -220,17 +250,18 @@ def ensure_vtpm(node: NodePort, vmid: int, rep: Report, storage: str | None = No
     The MoSetup waiver covers an UNSUPPORTED TPM, not an ABSENT one, so a guest without
     tpmstate0 needs real vTPM hardware before the upgrade can start.
     """
-    cfg = node.qm("config", str(vmid), timeout=60).stdout
-    if re.search(r"^tpmstate0:", cfg, re.M):
+    # The exit code is not consulted: a failed read parses as a config with no TPM and no disk.
+    config = node.vm_config(vmid).config
+    if config.tpmstate:
         rep.add(StepName.VTPM, ok=True, note="already present")
         return False
     # An openvmm guest gets its TPM from the launcher (`args: ... --tpm`), not from a PVE
     # tpmstate0 volume. Looking only for tpmstate0 would bolt redundant hardware onto a guest
     # that already has a working TPM.
-    if re.search(r"^args:.*--tpm\b", cfg, re.M):
+    if config.launcher_tpm:
         rep.add(StepName.VTPM, ok=True, note="provided by openvmm --tpm")
         return False
-    target = storage or vm_storage(node, vmid)
+    target = storage or vm_storage(config, vmid)
     ensure_stopped(node, vmid, rep)
     proc = node.qm("set", str(vmid), "-tpmstate0", f"{target}:1,version=v2.0", timeout=300)
     if proc.returncode != 0:
@@ -239,7 +270,7 @@ def ensure_vtpm(node: NodePort, vmid: int, rep: Report, storage: str | None = No
     return True
 
 
-def ensure_running(node: NodePort, vmid: int, rep: Report, network: IPv4Network | None) -> str:
+def ensure_running(node: NodePort, vmid: int, rep: Report, network: IPv4Network | None) -> IPv4Address:
     """Start the guest if needed, wait for its agent, and return its LAN address."""
     if vm_status(node, vmid) is not VmStatus.RUNNING:
         proc = node.qm("start", str(vmid), timeout=300)
@@ -251,24 +282,8 @@ def ensure_running(node: NodePort, vmid: int, rep: Report, network: IPv4Network 
             break
         node.sleep(5)
     ip = guest_ip(node, vmid, network)
-    rep.add(StepName.RUNNING, ok=True, ip=ip)
+    rep.add(StepName.RUNNING, ok=True, ip=str(ip))
     return ip
-
-
-def existing_snapshots(node: NodePort, vmid: int) -> set[str]:
-    """Names currently present in ``qm listsnapshot``.
-
-    Each line looks like ``` `-> name   <date>   <description> ```, so take the token after the
-    arrow. ``current`` is PVE's you-are-here marker, not a snapshot.
-    """
-    out = node.qm("listsnapshot", str(vmid), timeout=60).stdout
-    names: set[str] = set()
-    for line in out.splitlines():
-        match = re.match(r"^[\s`|+\\>-]*->\s*(\S+)", line)
-        if match:
-            names.add(match.group(1))
-    names.discard("current")
-    return names
 
 
 def wait_ssh(guest: GuestPort, tries: int = 60, *, sleep: Callable[[float], None]) -> None:
@@ -328,7 +343,7 @@ def snapshot_offline(node: NodePort, vmid: int, name: str, rep: Report) -> None:
     powered-off guest has no dirty state at all, so this is strictly the safer of the two - it
     just costs a shutdown and a boot.
     """
-    if name in existing_snapshots(node, vmid):
+    if name in node.snapshots(vmid):
         rep.add(StepName.SNAPSHOT, ok=True, name=name, note="exists")
         return
     if vm_status(node, vmid) is not VmStatus.STOPPED:
@@ -361,7 +376,7 @@ def snapshot(node: NodePort, vmid: int, name: str, rep: Report) -> None:
     # Ask the snapshot LIST whether the name is taken, never a phrase in stderr: PVE says
     # "snapshot name 'X' already used", a text free to change and to be localised, and a re-run
     # must continue past an existing snapshot rather than abort on it.
-    if name in existing_snapshots(node, vmid):
+    if name in node.snapshots(vmid):
         rep.add(StepName.SNAPSHOT, ok=True, name=name, note="exists")
         return
     proc = node.qm(
@@ -833,7 +848,7 @@ def _clear_live_run(node: NodePort, request: RepairRequest, rep: Report, network
     stopped guest cannot be asked; the guard then runs again before staging and launch.
     """
     if request.ip is not None:
-        guest = node.guest(str(request.ip))
+        guest = node.guest(request.ip)
         wait_ssh(guest, sleep=node.sleep)
     else:
         guest = node.guest(ensure_running(node, request.vmid, rep, network))
@@ -861,7 +876,7 @@ def _agentless_running(node: NodePort, request: RepairRequest, ip: IPv4Address, 
     Powered off is more consistent than the agent path, not less; ssh is the only readiness
     signal such a guest has.
     """
-    guest = node.guest(str(ip))
+    guest = node.guest(ip)
     ensure_stopped(node, request.vmid, rep)
     snapshot_offline(node, request.vmid, request.snapshot_name, rep)
     if vm_status(node, request.vmid) is not VmStatus.RUNNING:
@@ -905,7 +920,7 @@ def repair_sequence(
     written once prepare has measured the image, before setup is launched.
     """
     media = _media_dir(repair)
-    network = guest.network()
+    network = guest.subnet
     if vm_status(node, request.vmid) is VmStatus.RUNNING:
         live = _clear_live_run(node, request, rep, network)
         if request.ip is None:

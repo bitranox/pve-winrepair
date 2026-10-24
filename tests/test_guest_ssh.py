@@ -12,6 +12,7 @@ import hashlib
 import ntpath
 import re
 import subprocess
+from ipaddress import IPv4Address
 from typing import TYPE_CHECKING
 from unittest.mock import ANY
 
@@ -583,7 +584,7 @@ def test_the_key_override_variable_reaches_the_ssh_argv(isolated_layers: Path, m
     monkeypatch.setenv("PVE_WINREPAIR___SSH__USER", USER)
     runner = FakeRunner().on("hostname", Reply(0))
     node = Node(ssh=load_settings(get_config()).ssh, runner=runner)
-    node.guest(GUEST_IP).ssh("hostname", timeout=5.0)
+    node.guest(IPv4Address(GUEST_IP)).ssh("hostname", timeout=5.0)
     assert runner.calls[0][:3] == ["ssh", "-i", "/env/guest.key"]
     assert f"{USER}@{GUEST_IP}" in runner.calls[0]
 

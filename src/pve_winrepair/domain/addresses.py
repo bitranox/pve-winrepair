@@ -1,4 +1,4 @@
-"""The guest's addresses: its LAN address among those its agent reports, and the VM's NIC MACs.
+"""The guest's addresses: its LAN address among those its agent reports, and MACs in one normal form.
 
 A guest can carry several IPv4 addresses: docker hosts add a Hyper-V/NAT switch (172.x) the node
 cannot reach, and every guest has loopback and possibly link-local ones. With the LAN configured
@@ -6,28 +6,25 @@ cannot reach, and every guest has loopback and possibly link-local ones. With th
 taken and several are refused rather than guessed.
 
 A guest reached by an address the operator typed (``--ip``) is bound to its VM by MAC: the VM's
-``netN`` devices in ``qm config`` (:func:`vm_macs`) against the MACs the guest's own adapters report.
+``netN`` devices in ``qm config`` against the MACs the guest's own adapters report (:data:`MacAddress`).
 Both sides are compared in one normal form (:func:`normalise_mac`).
 """
 
 from __future__ import annotations
 
 import re
-from ipaddress import IPv4Address
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Annotated
+
+from pydantic import AfterValidator
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
-    from ipaddress import IPv4Network
+    from ipaddress import IPv4Address, IPv4Network
 
-__all__ = ["AmbiguousAddressError", "lan_address", "normalise_mac", "vm_macs"]
+__all__ = ["AmbiguousAddressError", "MacAddress", "lan_address", "normalise_mac"]
 
 # Six hex octets with ONE separator throughout (a colon or a dash); ASCII ranges, never \d or \w.
 _MAC = re.compile(r"[0-9A-Fa-f]{2}([:-])[0-9A-Fa-f]{2}(?:\1[0-9A-Fa-f]{2}){4}")
-# A network device line of ``qm config``: ``net0: virtio=BC:24:11:AA:BB:CC,bridge=vmbr0,...``. The
-# model key (virtio, e1000, vmxnet3, rtl8139, ...) varies; the MAC is the value of that key, or of
-# ``macaddr`` in the long form.
-_NET_LINE = re.compile(r"net[0-9]+:[ \t]*(\S+)")
 
 
 class AmbiguousAddressError(ValueError):
@@ -37,30 +34,26 @@ class AmbiguousAddressError(ValueError):
         candidates: Every candidate, in the order the agent reported them.
     """
 
-    def __init__(self, candidates: tuple[str, ...]) -> None:
+    def __init__(self, candidates: tuple[IPv4Address, ...]) -> None:
         """Name the ``candidates``."""
-        super().__init__(f"several candidate LAN addresses: {', '.join(candidates)}")
+        super().__init__(f"several candidate LAN addresses: {', '.join(map(str, candidates))}")
         self.candidates = candidates
 
 
-def _candidates(addresses: Iterable[str]) -> list[IPv4Address]:
-    """The parseable IPv4 addresses that are neither loopback nor link-local, deduplicated, in order."""
+def _candidates(addresses: Iterable[IPv4Address]) -> list[IPv4Address]:
+    """The addresses that are neither loopback nor link-local, deduplicated, in order."""
     found: dict[IPv4Address, None] = {}
-    for text in addresses:
-        try:
-            address = IPv4Address(text)
-        except ValueError:  # not dotted-quad IPv4: an IPv6 address, a leading zero, garbage
-            continue
+    for address in addresses:
         if not (address.is_loopback or address.is_link_local):
             found.setdefault(address, None)
     return list(found)
 
 
-def lan_address(addresses: Iterable[str], network: IPv4Network | None) -> str | None:
+def lan_address(addresses: Iterable[IPv4Address], network: IPv4Network | None) -> IPv4Address | None:
     """The guest's LAN address among ``addresses``, or None when there is none.
 
     Args:
-        addresses: The IPv4 addresses the agent reported, as text; anything unparseable is skipped.
+        addresses: The IPv4 addresses the agent reported.
         network: The LAN (``[guest] subnet``), or None when it is not configured.
 
     Returns:
@@ -70,18 +63,18 @@ def lan_address(addresses: Iterable[str], network: IPv4Network | None) -> str | 
         AmbiguousAddressError: No network is configured and there is more than one candidate.
 
     Example:
-        >>> from ipaddress import IPv4Network
-        >>> lan_address(["172.17.0.1", "192.0.2.9"], IPv4Network("192.0.2.0/24"))
-        '192.0.2.9'
-        >>> lan_address(["127.0.0.1", "192.0.2.9"], None)
-        '192.0.2.9'
+        >>> from ipaddress import IPv4Address as A, IPv4Network
+        >>> lan_address([A("172.17.0.1"), A("192.0.2.9")], IPv4Network("192.0.2.0/24"))
+        IPv4Address('192.0.2.9')
+        >>> lan_address([A("127.0.0.1"), A("192.0.2.9")], None)
+        IPv4Address('192.0.2.9')
     """
     candidates = _candidates(addresses)
     if network is not None:
-        return next((str(address) for address in candidates if address in network), None)
+        return next((address for address in candidates if address in network), None)
     if len(candidates) > 1:
-        raise AmbiguousAddressError(tuple(str(address) for address in candidates))
-    return str(candidates[0]) if candidates else None
+        raise AmbiguousAddressError(tuple(candidates))
+    return candidates[0] if candidates else None
 
 
 def normalise_mac(text: str) -> str | None:
@@ -96,23 +89,18 @@ def normalise_mac(text: str) -> str | None:
     return text.upper().replace("-", ":")
 
 
-def vm_macs(qm_config: str) -> frozenset[str]:
-    """The MAC of every ``netN`` device in ``qm config`` output, normalised.
+def _mac(text: str) -> str:
+    """``text`` normalised (:func:`normalise_mac`); a value that is no MAC is refused.
 
-    Only lines that start with ``net<N>:`` count: a ``description:`` quoting a device line is no
-    device. Within the device's property string, any ``key=<MAC>`` value is its MAC.
-
-    Example:
-        >>> sorted(vm_macs("net0: virtio=bc:24:11:aa:bb:cc,bridge=vmbr0\\nscsi0: local:vm-1-disk-0\\n"))
-        ['BC:24:11:AA:BB:CC']
+    Raises:
+        ValueError: ``text`` is not six hex octets with one separator. The value is not repeated:
+            it came from outside.
     """
-    found: set[str] = set()
-    for line in qm_config.splitlines():
-        device = _NET_LINE.fullmatch(line.rstrip())
-        if device is None:
-            continue
-        for item in device.group(1).split(","):
-            mac = normalise_mac(item.partition("=")[2])
-            if mac is not None:
-                found.add(mac)
-    return frozenset(found)
+    mac = normalise_mac(text)
+    if mac is None:
+        raise ValueError("not a MAC address (six hex octets, one separator)")
+    return mac
+
+
+#: A MAC address as a boundary model holds it: validated and normalised to ``AA:BB:CC:DD:EE:FF``.
+MacAddress = Annotated[str, AfterValidator(_mac)]

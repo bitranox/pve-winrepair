@@ -544,15 +544,15 @@ def _byte_count(value: object) -> int | None:
     return int(text) if re.fullmatch(r"[0-9]{1,20}", text) else None
 
 
-def drive_from_cim(disk: CimInstance) -> Drive | None:
-    """One Win32_LogicalDisk as a Drive, or None without a letter or a numeric free-space figure.
+def drive_from_cim(disk: CimInstance) -> Drive | Skip:
+    """One Win32_LogicalDisk as a Drive, or the Skip naming it when it has no letter or no numeric free space.
 
     A size that is not a number reads as 0: it is informational, the free bytes are the gate.
     """
     device, free, size = (disk.properties.get(name) for name in ("DeviceID", "FreeSpace", "Size"))
     free_bytes = _byte_count(free)
     if not isinstance(device, str) or free_bytes is None:
-        return None
+        return Skip(item=str(device), reason="no letter or no numeric free-space figure")
     return Drive(
         letter=device.rstrip(":").upper(),
         free_bytes=free_bytes,
@@ -570,13 +570,11 @@ def fixed_drives(disks: Iterable[CimInstance]) -> tuple[tuple[Drive, ...], tuple
     drives: list[Drive] = []
     skips: list[Skip] = []
     for disk in disks:
-        drive = drive_from_cim(disk)
-        if drive is None:
-            skips.append(
-                Skip(item=str(disk.properties.get("DeviceID")), reason="no letter or no numeric free-space figure")
-            )
+        parsed = drive_from_cim(disk)
+        if isinstance(parsed, Skip):
+            skips.append(parsed)
         else:
-            drives.append(drive)
+            drives.append(parsed)
     return tuple(sorted(drives, key=lambda d: d.letter)), tuple(skips)
 
 

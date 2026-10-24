@@ -37,6 +37,7 @@ from pwshpy import (
 from pydantic import ValidationError
 
 from pve_winrepair_guest import probes, winrepair_guest
+from pve_winrepair_guest.envelope import Skip
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator, Sequence
@@ -434,6 +435,12 @@ def test_fixed_drives_parses_each_disk_once_and_sorts_by_letter() -> None:
 
     assert [(d.letter, d.free_bytes) for d in drives] == [("C", 7), ("D", 5)]
     assert [s.item for s in skips] == ["E:"]
+
+
+def test_a_disk_that_is_no_drive_comes_back_as_the_skip_naming_it() -> None:
+    parsed = probes.drive_from_cim(_disk("E:", None))
+
+    assert parsed == Skip(item="E:", reason="no letter or no numeric free-space figure")
 
 
 def test_drives_without_free_space_is_skipped_and_none_left_is_an_error() -> None:

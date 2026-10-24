@@ -1,12 +1,14 @@
-"""Tests for picking the guest's LAN address out of what its agent reports."""
+"""Tests for picking the guest's LAN address out of what its agent reports, and for MACs in one form."""
 
 from __future__ import annotations
 
 import ipaddress
+from ipaddress import IPv4Address
 
 import pytest
+from pydantic import TypeAdapter, ValidationError
 
-from pve_winrepair.domain.addresses import AmbiguousAddressError, lan_address, normalise_mac, vm_macs
+from pve_winrepair.domain.addresses import AmbiguousAddressError, MacAddress, lan_address, normalise_mac
 
 OLD_PREFIX = "192.0.2."
 NET = ipaddress.IPv4Network("192.0.2.0/24")
@@ -16,28 +18,30 @@ SAME = ["192.0.2.0", "192.0.2.1", "192.0.2.50", "192.0.2.255", "192.0.3.1", "192
 
 @pytest.mark.parametrize("ip", SAME)
 def test_the_network_keeps_exactly_what_the_old_prefix_kept(ip: str) -> None:
-    assert (lan_address([ip], NET) == ip) is ip.startswith(OLD_PREFIX)
-
-
-def test_the_one_divergence_is_a_leading_zero_the_agent_never_sends() -> None:
-    # The old prefix kept "192.0.2.050"; ipaddress refuses leading zeros (Python >= 3.9.5).
-    assert "192.0.2.050".startswith(OLD_PREFIX)
-    assert lan_address(["192.0.2.050"], NET) is None
+    assert (lan_address([IPv4Address(ip)], NET) == IPv4Address(ip)) is ip.startswith(OLD_PREFIX)
 
 
 def test_without_a_subnet_the_only_candidate_is_taken() -> None:
-    assert lan_address(["127.0.0.1", "169.254.1.1", "192.0.2.9"], None) == "192.0.2.9"
+    addresses = [IPv4Address("127.0.0.1"), IPv4Address("169.254.1.1"), IPv4Address("192.0.2.9")]
+    assert lan_address(addresses, None) == IPv4Address("192.0.2.9")
+
+
+def test_a_repeated_address_is_one_candidate() -> None:
+    assert lan_address([IPv4Address("192.0.2.9"), IPv4Address("192.0.2.9")], None) == IPv4Address("192.0.2.9")
 
 
 def test_without_a_subnet_several_candidates_are_refused_by_name() -> None:
     # Docker guests also carry a 172.x switch address; picking the first one lands on an address
     # the node cannot reach.
     with pytest.raises(AmbiguousAddressError) as caught:
-        lan_address(["172.17.0.1", "192.0.2.9"], None)
-    assert caught.value.candidates == ("172.17.0.1", "192.0.2.9")
+        lan_address([IPv4Address("172.17.0.1"), IPv4Address("192.0.2.9")], None)
+    assert caught.value.candidates == (IPv4Address("172.17.0.1"), IPv4Address("192.0.2.9"))
+    assert str(caught.value) == "several candidate LAN addresses: 172.17.0.1, 192.0.2.9"
 
 
-# --- the VM's NIC MACs, as qm config lists them ---------------------------------------------
+# --- MACs ------------------------------------------------------------------------------------
+
+_MAC: TypeAdapter[str] = TypeAdapter(MacAddress)
 
 
 @pytest.mark.parametrize(
@@ -58,31 +62,11 @@ def test_without_a_subnet_several_candidates_are_refused_by_name() -> None:
 )
 def test_a_mac_is_normalised_to_upper_case_colons_or_refused(text: str, normalised: str | None) -> None:
     assert normalise_mac(text) == normalised
-
-
-def test_vm_macs_reads_every_net_line_whatever_the_model() -> None:
-    config = (
-        "boot: order=scsi0;net0\n"
-        "net0: virtio=BC:24:11:AA:BB:CC,bridge=vmbr0,firewall=1\n"
-        "net1: e1000=bc:24:11:00:00:01,bridge=vmbr1,tag=40\n"
-        "net2: vmxnet3=BC:24:11:00:00:02,bridge=vmbr0\n"
-        "net13: rtl8139=BC:24:11:00:00:03,bridge=vmbr0,link_down=1\n"
-        "scsi0: local-zfs:vm-1-disk-0,size=64G\n"
-    )
-    assert vm_macs(config) == frozenset(
-        {"BC:24:11:AA:BB:CC", "BC:24:11:00:00:01", "BC:24:11:00:00:02", "BC:24:11:00:00:03"}
-    )
-
-
-def test_vm_macs_ignores_what_is_not_a_net_device_line() -> None:
-    config = (
-        "description: moved from net0: virtio=BC:24:11:99:99:99\n"
-        "#net0: virtio=BC:24:11:99:99:98,bridge=vmbr0\n"
-        "netx: virtio=BC:24:11:99:99:97\n"
-        "scsi0: local-zfs:vm-1-disk-0,size=64G\n"
-    )
-    assert vm_macs(config) == frozenset()
-
-
-def test_vm_macs_takes_the_macaddr_key_too() -> None:
-    assert vm_macs("net0: model=virtio,macaddr=BC:24:11:AA:BB:CC,bridge=vmbr0\n") == {"BC:24:11:AA:BB:CC"}
+    if normalised is not None:
+        assert _MAC.validate_python(text) == normalised
+        return
+    with pytest.raises(ValidationError) as caught:
+        _MAC.validate_python(text)
+    assert [error["msg"] for error in caught.value.errors()] == [
+        "Value error, not a MAC address (six hex octets, one separator)"
+    ]

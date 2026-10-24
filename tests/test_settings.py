@@ -63,7 +63,7 @@ def test_the_model_defaults_are_the_documented_ones() -> None:
     assert settings.ssh == SshSettings(
         key="", user="Administrator", strict_host_key_checking=True, known_hosts_file="~/.ssh/known_hosts"
     )
-    assert settings.guest.subnet == ""
+    assert settings.guest.subnet is None
     assert settings.guest.runner_tasks == ()
     assert settings.guest.expected_runners == 0
     assert settings.repair == RepairSettings(
@@ -199,7 +199,7 @@ def test_a_fleet_shaped_file_validates_and_keeps_every_value(
     assert settings.ssh.strict_host_key_checking is False
     # The literal "~" is kept: ssh expands it itself.
     assert settings.ssh.known_hosts_file == "~/.ssh/known_hosts_guests"
-    assert settings.guest.subnet == "192.0.2.0/24"
+    assert settings.guest.subnet == IPv4Network("192.0.2.0/24")
     assert settings.guest.runner_tasks == ("runner-a", "runner-b", "runner-c")
     assert settings.guest.expected_runners == 18
     assert settings.repair.media_dir == "/srv/media"
@@ -224,7 +224,7 @@ def test_strict_host_key_checking_reads_the_env_layer_text(
 
 @pytest.mark.os_agnostic
 def test_a_subnet_is_an_ipv4_network_with_membership(config_factory: Callable[[dict[str, Any]], Config]) -> None:
-    network = load_settings(config_factory({"guest": {"subnet": "192.0.2.0/24"}})).guest.network()
+    network = load_settings(config_factory({"guest": {"subnet": "192.0.2.0/24"}})).guest.subnet
 
     assert network == IPv4Network("192.0.2.0/24")
     assert network is not None
@@ -233,28 +233,56 @@ def test_a_subnet_is_an_ipv4_network_with_membership(config_factory: Callable[[d
 
 
 @pytest.mark.os_agnostic
-def test_an_empty_subnet_is_no_network() -> None:
-    assert GuestSettings().network() is None
+def test_an_empty_subnet_is_no_network(config_factory: Callable[[dict[str, Any]], Config]) -> None:
+    assert load_settings(config_factory({"guest": {"subnet": ""}})).guest.subnet is None
+    assert GuestSettings().subnet is None
+
+
+_NO_PREFIX = "must be an IPv4 network in CIDR or netmask form (a.b.c.d/n or a.b.c.d/m.m.m.m), or empty"
+_NOT_A_NETWORK = "must be an IPv4 network in CIDR or netmask form with no host bits set, or empty"
 
 
 @pytest.mark.os_agnostic
 @pytest.mark.parametrize(
-    "subnet",
-    ["192.0.2.1/24", "garbage", "2001:db8::/32", "192.0.2.0", "192.0.2.0/33", " 192.0.2.0/24"],
-    ids=["host-bits", "garbage", "ipv6", "no-prefix", "prefix-too-long", "leading-space"],
+    ("subnet", "reason"),
+    [
+        ("192.0.2.1/24", _NOT_A_NETWORK),
+        ("garbage/24", _NOT_A_NETWORK),
+        ("2001:db8::/32", _NOT_A_NETWORK),
+        ("192.0.2.0/33", _NOT_A_NETWORK),
+        (" 192.0.2.0/24", _NOT_A_NETWORK),
+        ("192.0.2.0", _NO_PREFIX),
+        ("garbage", _NO_PREFIX),
+        (24, _NO_PREFIX),
+        (1.5, _NO_PREFIX),
+        (True, "Input should be a valid string"),
+        (["192.0.2.0/24"], "Input should be a valid string"),
+        ({"net": "192.0.2.0/24"}, "Input should be a valid string"),
+    ],
+    ids=[
+        "host-bits",
+        "garbage-with-prefix",
+        "ipv6",
+        "prefix-too-long",
+        "leading-space",
+        "no-prefix",
+        "garbage",
+        "an-int",
+        "a-float",
+        "a-boolean",
+        "a-list",
+        "a-table",
+    ],
 )
-def test_a_subnet_that_is_not_a_strict_ipv4_cidr_is_refused(
-    config_factory: Callable[[dict[str, Any]], Config], subnet: str
+def test_a_refused_subnet_names_the_rule_never_the_value(
+    config_factory: Callable[[dict[str, Any]], Config], subnet: object, reason: str
 ) -> None:
-    text = _refusal(config_factory({"guest": {"subnet": subnet}}))
-
-    assert text.startswith("guest.subnet: ")
-    assert "IPv4" in text
+    assert _refusal(config_factory({"guest": {"subnet": subnet}})) == f"guest.subnet: {reason}"
 
 
 @pytest.mark.os_agnostic
 def test_a_subnet_in_netmask_form_is_accepted(config_factory: Callable[[dict[str, Any]], Config]) -> None:
-    network = load_settings(config_factory({"guest": {"subnet": "192.0.2.0/255.255.255.0"}})).guest.network()
+    network = load_settings(config_factory({"guest": {"subnet": "192.0.2.0/255.255.255.0"}})).guest.subnet
 
     assert network == IPv4Network("192.0.2.0/24")
 

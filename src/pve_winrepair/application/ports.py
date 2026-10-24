@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
+    from ipaddress import IPv4Address
     from pathlib import Path
 
     # The finished process is only a type here; nothing in this module runs one.
@@ -31,6 +32,7 @@ if TYPE_CHECKING:
     from ..domain.guest_tool import PackedTool, Pushed
     from ..domain.receipt import RepairReceipt
     from ..domain.settings import Settings, SshSettings
+    from ..domain.vm_config import VmConfigRead
 
 
 class GetConfig(Protocol):
@@ -159,7 +161,7 @@ class GuestPort(Protocol):
 
 
 class NodePort(Protocol):
-    """The PVE node a driver runs on: how it runs ``qm``, waits, and reaches a guest."""
+    """The PVE node a driver runs on: how it runs ``qm``, reads a VM's configuration, waits, and reaches a guest."""
 
     @property
     def clock(self) -> Callable[[], float]:
@@ -175,7 +177,15 @@ class NodePort(Protocol):
         """Run ``qm`` on this node."""
         ...
 
-    def guest(self, ip: str) -> GuestPort:
+    def vm_config(self, vmid: int) -> VmConfigRead:
+        """``qm config <vmid>``, parsed; the exit code says whether the call succeeded."""
+        ...
+
+    def snapshots(self, vmid: int) -> frozenset[str]:
+        """The snapshot names of ``vmid`` (``qm listsnapshot``), without PVE's ``current`` marker."""
+        ...
+
+    def guest(self, ip: IPv4Address) -> GuestPort:
         """The guest at ``ip``."""
         ...
 

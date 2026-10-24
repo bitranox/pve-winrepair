@@ -1781,7 +1781,7 @@ def _build(host: UpgradeHost) -> str:
 def _free_c_gb(host: UpgradeHost) -> float:
     disks = list(host.cim("Win32_LogicalDisk", where="DeviceID='C:'"))
     drive = drive_from_cim(disks[0]) if disks else None
-    if drive is None:
+    if not isinstance(drive, Drive):
         raise ValueError("no C: drive")
     return drive.free_gb
 

@@ -20,6 +20,7 @@ from guest_fakes import (
     TOOL_DIR,
     TOOL_PATH,
     USER,
+    VM_MAC,
     FakeRunner,
     Reply,
     answer,
@@ -56,6 +57,7 @@ from pve_winrepair_guest.probes import (
     Container,
     LpDefectReport,
     LpVerdict,
+    NicMacReport,
     RunnerReport,
     RunnerVerdict,
     SetupReport,
@@ -396,7 +398,7 @@ UPGRADE_RUN = UpgradeRunReport(
 )
 
 #: One real reply per subcommand, built from the guest's own models, and the host model it validates into.
-CONTRACT: dict[GuestCommand, tuple[Report | None, type[ProbePayload | GatedPayload]]] = {
+CONTRACT: dict[GuestCommand, tuple[Report, type[ProbePayload | GatedPayload]]] = {
     GuestCommand.DETECT_LP_DEFECT: (_lp_report(LpVerdict.AFFECTED), answers.DetectLpDefectAnswer),
     GuestCommand.DRIVES: (drive_report(C=60.0, D=200.0), answers.DrivesAnswer),
     GuestCommand.VERIFY_RUNNERS: (RUNNERS, answers.VerifyRunnersAnswer),
@@ -405,7 +407,7 @@ CONTRACT: dict[GuestCommand, tuple[Report | None, type[ProbePayload | GatedPaylo
     GuestCommand.SERVICING_ACTIVE: (servicing_report(2), answers.ServicingActiveAnswer),
     GuestCommand.SETUP_ALIVE: (SetupReport(count=1, alive=True), answers.SetupAliveAnswer),
     GuestCommand.STATE: (state_log("launching: setup.exe", "STATE=DONE-OK setup exit=0x0"), answers.StateAnswer),
-    GuestCommand.NIC_MACS: (None, answers.NicMacsAnswer),
+    GuestCommand.NIC_MACS: (NicMacReport(macs=("00:15:5D:01:02:03", VM_MAC)), answers.NicMacsAnswer),
     GuestCommand.QUIESCE_WU: (quiesce_report("OK"), answers.QuiesceWuAnswer),
     GuestCommand.RESTORE_WU: (restore_report("RESTORED"), answers.RestoreWuAnswer),
     GuestCommand.PREPARE: (prepare_report("PASS"), answers.PrepareAnswer),
@@ -423,13 +425,19 @@ def test_the_host_knows_exactly_the_guest_s_subcommands() -> None:
 @pytest.mark.parametrize("command", list(GuestCommand), ids=lambda command: command.value)
 def test_every_guest_reply_validates_into_its_host_model_unchanged(command: GuestCommand) -> None:
     data, payload = CONTRACT[command]
-    reply = NIC_MACS if data is None else answer(command.value, data)
+    reply = answer(command.value, data)
     runner = FakeRunner().on(command.value, reply)
     got = _guest(runner).ask(command, payload, timeout=60)
     # Every field the guest sent is declared and re-serialises to the same JSON: nothing was read
     # into a looser type, renamed or dropped on the way in.
     sent = json.loads(reply.stdout)["data"]
     assert got.data.model_dump(mode="json") == sent
+
+
+def test_the_host_holds_each_guest_mac_in_its_normal_form() -> None:
+    # NIC_MACS carries the VM's MAC in lower case; the answer model normalises it on the way in.
+    got = _guest(FakeRunner().on("nic-macs", NIC_MACS)).ask(GuestCommand.NIC_MACS, answers.NicMacsAnswer, timeout=60)
+    assert got.data.macs == ("00:15:5D:01:02:03", VM_MAC)
 
 
 def test_a_new_field_on_the_guest_side_fails_the_contract() -> None:

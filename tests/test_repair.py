@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import subprocess
 from datetime import datetime, timezone
-from ipaddress import IPv4Address
+from ipaddress import IPv4Address, IPv4Network
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -81,7 +81,7 @@ def _repair_settings(media: Path) -> RepairSettings:
 
 # The free-space floors the stage-root tests gate on (media_dir is not read there).
 REPAIR = RepairSettings(snapshot_name="pre_kb_test", stage_free_gb=15.0, system_free_gb=25.0)
-GUEST = GuestSettings(subnet="192.0.2.0/24")
+GUEST = GuestSettings(subnet=IPv4Network("192.0.2.0/24"))
 
 
 def _wire(steps: Sequence[Step]) -> list[dict[str, object]]:
@@ -725,7 +725,29 @@ def _interfaces(*addresses: str) -> Reply:
 
 def test_guest_ip_takes_the_address_inside_the_subnet() -> None:
     runner = FakeRunner().on("qm", _interfaces("172.17.0.1", LAN_IP))
-    assert repair.guest_ip(make_node(runner, FakeClock()), 1, GUEST.network()) == LAN_IP
+    assert repair.guest_ip(make_node(runner, FakeClock()), 1, GUEST.subnet) == IPv4Address(LAN_IP)
+
+
+@pytest.mark.parametrize(
+    "skipped",
+    ["192.0.2.050", "not-an-address", "", "2001:db8::50", "fe80::1%12"],
+    ids=["leading-zero", "garbage", "empty", "ipv6-text", "scoped-ipv6-text"],
+)
+def test_guest_ip_skips_an_ipv4_typed_address_that_is_no_ipv4_address(skipped: str) -> None:
+    # ipaddress refuses a leading zero (Python >= 3.9.5), so 192.0.2.050 is no candidate, not a refusal.
+    runner = FakeRunner().on("qm", _interfaces(skipped, LAN_IP))
+    assert repair.guest_ip(make_node(runner, FakeClock()), 1, None) == IPv4Address(LAN_IP)
+
+
+def test_guest_ip_never_takes_an_ipv6_address_and_skips_one_that_does_not_parse() -> None:
+    entries = [
+        {"ip-address-type": "ipv6", "ip-address": "2001:db8::50"},
+        {"ip-address-type": "ipv6", "ip-address": "garbage"},
+        {"ip-address-type": "ipv4", "ip-address": LAN_IP},
+        {"ip-address-type": "ipv4"},
+    ]
+    runner = FakeRunner().on("qm", Reply(0, json.dumps([{"name": "Ethernet", "ip-addresses": entries}])))
+    assert repair.guest_ip(make_node(runner, FakeClock()), 1, None) == IPv4Address(LAN_IP)
 
 
 def test_guest_ip_without_a_subnet_refuses_several_candidates_naming_them_and_the_setting() -> None:
@@ -744,9 +766,10 @@ def test_guest_ip_without_a_subnet_refuses_several_candidates_naming_them_and_th
         '{"ip-addresses": []}',
         '[{"ip-addresses": "192.0.2.50"}]',
         '[{"ip-addresses": [{"ip-address": 7}]}]',
+        '[{"ip-addresses": [{"ip-address-type": "ipv4", "ip-address": null}]}]',
         '[{"ip-addresses": [{"ip-address-type": "ipv5", "ip-address": "192.0.2.50"}]}]',
     ],
-    ids=["not-a-list", "addresses-not-a-list", "address-not-text", "address-type-unknown"],
+    ids=["not-a-list", "addresses-not-a-list", "address-not-text", "address-null", "address-type-unknown"],
 )
 def test_an_agent_answer_that_is_not_the_interface_list_is_an_internal_error(tmp_path: Path, stdout: str) -> None:
     pve = FakePve()
@@ -763,13 +786,13 @@ def test_guest_ip_never_takes_an_address_without_a_type_for_ipv4() -> None:
     untyped = Reply(0, json.dumps([{"name": "Ethernet", "ip-addresses": [{"ip-address": LAN_IP}]}]))
     runner, clock = FakeRunner().on("qm", untyped), FakeClock()
     with pytest.raises(RepairError, match="no LAN address from the guest agent on 1 after 1 tries"):
-        repair.guest_ip(make_node(runner, clock), 1, GUEST.network(), tries=1)
+        repair.guest_ip(make_node(runner, clock), 1, GUEST.subnet, tries=1)
 
 
 def test_guest_ip_with_no_address_in_the_subnet_retries_then_refuses() -> None:
     runner, clock = FakeRunner().on("qm", _interfaces("172.17.0.1", "198.51.100.7")), FakeClock()
     with pytest.raises(RepairError, match="no LAN address from the guest agent on 1 after 2 tries"):
-        repair.guest_ip(make_node(runner, clock), 1, GUEST.network(), tries=2)
+        repair.guest_ip(make_node(runner, clock), 1, GUEST.subnet, tries=2)
     assert clock.slept == [10, 10]
 
 
@@ -1364,5 +1387,10 @@ def test_a_qm_config_that_cannot_be_read_is_refused(tmp_path: Path) -> None:
 
 def test_a_mac_the_guest_reports_that_is_not_a_mac_is_a_protocol_error(tmp_path: Path) -> None:
     bad = answer("nic-macs", NicMacReport(macs=("not-a-mac",)))
-    result, _steps = _run(_agentless(FakePve(), **{"nic-macs": bad}), _media(tmp_path), ip=GUEST_IP)
+    result, steps = _run(_agentless(FakePve(), **{"nic-macs": bad}), _media(tmp_path), ip=GUEST_IP)
     assert (result.exit, result.verdict) == (RunExit.INTERNAL, "INTERNAL")
+    assert (
+        "guest tool nic-macs: the answer breaks the contract: data.macs.0: "
+        "not a MAC address (six hex octets, one separator)"
+    ) in str(steps[-1]["message"])
+    assert "not-a-mac" not in str(steps[-1]["message"])

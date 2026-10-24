@@ -28,6 +28,7 @@ from typing import NamedTuple
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
+from pve_winrepair.domain.addresses import MacAddress
 from pve_winrepair.domain.enums import DriveLetter
 
 __all__ = [
@@ -361,9 +362,13 @@ class DrivesAnswer(ProbePayload):
 
 
 class NicMacsAnswer(ProbePayload):
-    """nic-macs: the MAC address of every network adapter, as the guest normalised it."""
+    """nic-macs: the MAC address of every network adapter, each in the host's normal form.
 
-    macs: tuple[str, ...]
+    The guest normalises them too; a value that is no MAC breaks the contract here, like any other
+    malformed field, rather than after the answer was accepted.
+    """
+
+    macs: tuple[MacAddress, ...]
 
 
 class ScheduledTaskState(GuestPayload):

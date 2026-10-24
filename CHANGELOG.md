@@ -11,9 +11,10 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 - Every guest tool answer is validated once, strictly, into a typed model per subcommand, closed
   to unknown fields. A malformed answer still ends the run as an internal error (exit 2), but its
   message now reads `guest tool <cmd>: the answer breaks the contract: <field>: <reason>` and no
-  longer quotes the guest's value. An envelope with extra top-level keys, an exit-2 envelope
-  without its `error`/`error_type`, a `prepare` that passes with no image, and a Windows Update
-  search whose `pending` count contradicts its status are now refused the same way.
+  longer quotes the guest's value; a `nic-macs` value that is not a MAC address now reads that way
+  too, instead of `nic-macs: '<value>' is not a MAC address`. An envelope with extra top-level keys,
+  an exit-2 envelope without its `error`/`error_type`, a `prepare` that passes with no image, and a
+  Windows Update search whose `pending` count contradicts its status are now refused the same way.
 - The guest tool builds its answers from pydantic models and pins `pydantic==2.14.1` in its own
   dependency header; the JSON it prints is byte-identical.
 - A malformed `--stage-root` (empty, `1:`, `CD`, `C:\upgrade`, a non-ASCII letter) is a usage
