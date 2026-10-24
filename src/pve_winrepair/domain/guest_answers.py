@@ -77,6 +77,7 @@ __all__ = [
     "StopWait",
     "TaskCleanup",
     "TaskCleanupAction",
+    "TreeWait",
     "UpdateSearch",
     "UpgradeRunAnswer",
     "VerifyRunnersAnswer",
@@ -220,6 +221,12 @@ class PrepareGate(str, Enum):
 
     PASSED = "PASS"
     FAILED = "FAIL"
+
+
+class TreeWait(str, Enum):
+    """upgrade-run: how it waited for setup.exe's whole process tree to end."""
+
+    JOB = "job"
 
 
 class LaunchWaitStatus(str, Enum):
@@ -656,7 +663,7 @@ class UpgradeRunAnswer(GatedPayload):
     exit_code: int | None
     exit_hex: str | None
     seconds: float | None
-    tree_wait: str | None
+    tree_wait: TreeWait | None
     newos_staged: bool | None
     verdict: StateVerdict
     reason: str | None
