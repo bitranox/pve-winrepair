@@ -363,12 +363,12 @@ def write_start(host: WuHost, service: str, value: int) -> StartWrite:
     try:
         list(host.registry(_service_key(service)))
     except PwshPyError as exc:  # no service key: the service is not installed, nothing to write
-        return StartWrite(service, value, "ABSENT", str(exc))
+        return StartWrite(service=service, value=value, result="ABSENT", error=str(exc))
     try:
         host.set_dword(_service_key(service), "Start", value)
     except PwshPyError as exc:
-        return StartWrite(service, value, "FAILED", str(exc))
-    return StartWrite(service, value, "WRITTEN", None)
+        return StartWrite(service=service, value=value, result="FAILED", error=str(exc))
+    return StartWrite(service=service, value=value, result="WRITTEN", error=None)
 
 
 def issue_stop(host: WuHost, service: str) -> StopIssued:
@@ -376,8 +376,8 @@ def issue_stop(host: WuHost, service: str) -> StopIssued:
     try:
         info = host.stop_service(service)
     except PwshPyError as exc:
-        return StopIssued(service, None, str(exc))
-    return StopIssued(service, info.status.value, None)
+        return StopIssued(service=service, state=None, error=str(exc))
+    return StopIssued(service=service, state=info.status.value, error=None)
 
 
 def _running(host: WuHost) -> tuple[str, ...]:
@@ -392,7 +392,16 @@ def run_quiesce(host: WuHost) -> Outcome:
     wait = wait_until_stopped(lambda: _running(host), clock=host.monotonic, sleep=host.sleep)
     rows = read_services(host)
     verdict, not_disabled, still_running = quiesce_verdict(rows)
-    report = QuiesceReport(previous, writes, stops, wait, rows, not_disabled, still_running, verdict)
+    report = QuiesceReport(
+        previous_start_modes=previous,
+        writes=writes,
+        stops=stops,
+        wait=wait,
+        services=rows,
+        not_disabled=not_disabled,
+        still_running=still_running,
+        verdict=verdict,
+    )
     return Outcome(ok=verdict == "OK", data=report)
 
 
@@ -424,7 +433,7 @@ def run_restore(host: WuHost) -> Outcome:
     rows = read_services(host)
     verdict, still_disabled = restore_verdict(rows)
     search = host.search_updates(SEARCH_TIMEOUT)
-    report = RestoreReport(writes, rows, still_disabled, verdict, search)
+    report = RestoreReport(writes=writes, services=rows, still_disabled=still_disabled, verdict=verdict, search=search)
     return Outcome(ok=verdict == "RESTORED", data=report)
 
 
@@ -442,13 +451,13 @@ def commands(host_factory: Callable[[], WuHost] = PwshpyHost) -> tuple[Command, 
     """
     return (
         Command(
-            "quiesce-wu",
-            "hold Windows Update (Start=4, issue stops, bounded wait) and verify",
-            lambda _a: run_quiesce(host_factory()),
+            name="quiesce-wu",
+            help="hold Windows Update (Start=4, issue stops, bounded wait) and verify",
+            run=lambda _a: run_quiesce(host_factory()),
         ),
         Command(
-            "restore-wu",
-            "restore the Windows Update start modes and probe a bounded search",
-            lambda _a: run_restore(host_factory()),
+            name="restore-wu",
+            help="restore the Windows Update start modes and probe a bounded search",
+            run=lambda _a: run_restore(host_factory()),
         ),
     )

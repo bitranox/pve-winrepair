@@ -213,7 +213,7 @@ def test_servicing_still_active_at_the_deadline_is_reported() -> None:
 
 
 def test_live_run_check_passes_a_guest_with_no_run() -> None:
-    runner = FakeRunner().on("setup-alive", answer("setup-alive", SetupReport(0, False)))
+    runner = FakeRunner().on("setup-alive", answer("setup-alive", SetupReport(count=0, alive=False)))
     runner.on("state", answer("state", state_log(present=False)))
     rep = Report(vmid=1)
     repair.refuse_live_run(make_guest(runner), rep)
@@ -221,7 +221,7 @@ def test_live_run_check_passes_a_guest_with_no_run() -> None:
 
 
 def test_live_run_check_passes_a_finished_run() -> None:
-    runner = FakeRunner().on("setup-alive", answer("setup-alive", SetupReport(0, False)))
+    runner = FakeRunner().on("setup-alive", answer("setup-alive", SetupReport(count=0, alive=False)))
     runner.on("state", answer("state", state_log("launching: setup.exe", "STATE=DONE-FAIL setup exit=0xC1900200")))
     rep = Report(vmid=1)
     repair.refuse_live_run(make_guest(runner), rep)
@@ -229,14 +229,14 @@ def test_live_run_check_passes_a_finished_run() -> None:
 
 
 def test_live_run_check_refuses_while_setuphost_runs() -> None:
-    runner = FakeRunner().on("setup-alive", answer("setup-alive", SetupReport(2, True)))
+    runner = FakeRunner().on("setup-alive", answer("setup-alive", SetupReport(count=2, alive=True)))
     runner.on("state", answer("state", state_log(present=False)))
     with pytest.raises(RepairError, match="SetupHost is running"):
         repair.refuse_live_run(make_guest(runner), Report(vmid=1))
 
 
 def test_live_run_check_refuses_a_started_run_without_a_marker() -> None:
-    runner = FakeRunner().on("setup-alive", answer("setup-alive", SetupReport(0, False)))
+    runner = FakeRunner().on("setup-alive", answer("setup-alive", SetupReport(count=0, alive=False)))
     runner.on("state", answer("state", state_log("=== start", "launching: setup.exe")))
     with pytest.raises(RepairError, match="no DONE marker"):
         repair.refuse_live_run(make_guest(runner), Report(vmid=1))
@@ -283,7 +283,7 @@ def test_prepare_reports_an_absent_tpm_without_refusing() -> None:
 
 # --- launch ---------------------------------------------------------------------------------
 
-REMOVED = TaskCleanup("REMOVE", True, False, True, None)
+REMOVED = TaskCleanup(action="REMOVE", ended=True, disabled=False, deleted=True, error=None)
 
 
 def test_launch_points_the_system_task_at_the_pushed_tool() -> None:
@@ -340,7 +340,7 @@ def test_launch_without_a_running_setup_refuses(report: LaunchReport, fragment: 
 
 
 def test_launch_task_left_after_disarm_keeps_polling() -> None:
-    left = TaskCleanup("DISARM", None, True, False, "delete: access denied")
+    left = TaskCleanup(action="DISARM", ended=None, disabled=True, deleted=False, error="delete: access denied")
     report = launch_report("TASK_LEFT", "OK; the task \\OVMRepairUpgrade could not be disarmed: x", cleanup=left)
     runner = FakeRunner().on("launch", answer("launch", report, ok=False))
     rep = Report(vmid=1)
@@ -352,7 +352,7 @@ def test_launch_task_left_after_disarm_keeps_polling() -> None:
 
 def test_launch_task_left_after_disarm_does_not_claim_setup_is_running() -> None:
     # _settle can find SetupHost gone (SUSPECT) after a DISARM, which _louder turns into TASK_LEFT.
-    left = TaskCleanup("DISARM", None, True, False, "delete: access denied")
+    left = TaskCleanup(action="DISARM", ended=None, disabled=True, deleted=False, error="delete: access denied")
     reason = "SUSPECT: setup already gone, read the state verdict; the task could not be disarmed: x"
     report = launch_report("TASK_LEFT", reason, setuphost=0, cleanup=left)
     runner = FakeRunner().on("launch", answer("launch", report, ok=False))
@@ -364,7 +364,13 @@ def test_launch_task_left_after_disarm_does_not_claim_setup_is_running() -> None
 
 
 def test_launch_task_left_after_remove_refuses_with_the_manual_cleanup() -> None:
-    left = TaskCleanup("REMOVE", False, True, False, "end: still running 30 s after the end request")
+    left = TaskCleanup(
+        action="REMOVE",
+        ended=False,
+        disabled=True,
+        deleted=False,
+        error="end: still running 30 s after the end request",
+    )
     report = launch_report("TASK_LEFT", "NO_START: no 'launching' line", wait="TIMEOUT", setuphost=None, cleanup=left)
     runner = FakeRunner().on("launch", answer("launch", report, ok=False))
     with pytest.raises(RepairError, match=r"TASK_LEFT.*schtasks /End"):
@@ -838,7 +844,9 @@ def test_lock_dirs_step_locks_the_stage_root_with_the_pushed_tool() -> None:
 
 def test_lock_dirs_refusal_stops_the_run_naming_the_guest_reason() -> None:
     reason = "D:\\upgrade held files before it was locked: remove it (rd /s /q D:\\upgrade) and rerun"
-    refused = LockDirsReport(TOOL_PATH, True, None, (), "FAILED", reason)
+    refused = LockDirsReport(
+        tool=TOOL_PATH, tool_present=True, tool_sha256=None, directories=(), verdict="FAILED", reason=reason
+    )
     runner = FakeRunner().on("lock-dirs", answer("lock-dirs", refused, ok=False))
     with pytest.raises(RepairError, match=r"not staging.*rd /s /q D:\\upgrade"):
         repair.lock_dirs(make_guest(runner), Report(vmid=1), "D:\\upgrade")
@@ -874,7 +882,14 @@ def test_main_locks_each_directory_before_anything_is_copied_into_it(tmp_path: P
 
 
 def test_main_lock_dirs_refusal_copies_no_media_and_says_wu_is_held(tmp_path: Path) -> None:
-    refused = LockDirsReport(TOOL_PATH, True, None, (), "FAILED", "D:\\upgrade is owned by S-1-5-21-9")
+    refused = LockDirsReport(
+        tool=TOOL_PATH,
+        tool_present=True,
+        tool_sha256=None,
+        directories=(),
+        verdict="FAILED",
+        reason="D:\\upgrade is owned by S-1-5-21-9",
+    )
 
     def lock_dirs(cmd: list[str]) -> Reply:
         return answer("lock-dirs", refused, ok=False) if "--stage-root" in cmd else lock_dirs_reply(cmd)

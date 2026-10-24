@@ -377,7 +377,7 @@ def _scan_setup_log(host: ProbeHost, skipped: list[Skip]) -> SetupScan | None:
         return scan_setup_events(host.win_events("Setup"))
     except PwshPyError as exc:
         # An unreadable log is never "0 events": that would report it as clean.
-        skipped.append(Skip("Setup event log", str(exc)))
+        skipped.append(Skip(item="Setup event log", reason=str(exc)))
         return None
 
 
@@ -385,7 +385,7 @@ def _install_language(host: ProbeHost, skipped: list[Skip]) -> str | None:
     try:
         language = _values(host, NLS_LANGUAGE_KEY).get("InstallLanguage")
     except PwshPyError as exc:
-        skipped.append(Skip(NLS_LANGUAGE_KEY, str(exc)))
+        skipped.append(Skip(item=NLS_LANGUAGE_KEY, reason=str(exc)))
         return None
     return language if isinstance(language, str) else None
 
@@ -496,7 +496,9 @@ def fixed_drives(disks: Iterable[CimInstance]) -> tuple[tuple[Drive, ...], tuple
     for disk in disks:
         drive = drive_from_cim(disk)
         if drive is None:
-            skips.append(Skip(str(disk.properties.get("DeviceID")), "no letter or no numeric free-space figure"))
+            skips.append(
+                Skip(item=str(disk.properties.get("DeviceID")), reason="no letter or no numeric free-space figure")
+            )
         else:
             drives.append(drive)
     return tuple(sorted(drives, key=lambda d: d.letter)), tuple(skips)
@@ -543,11 +545,11 @@ def nic_macs(adapters: Iterable[CimInstance]) -> tuple[tuple[str, ...], tuple[Sk
     for adapter in adapters:
         raw = adapter.properties.get("MACAddress")
         if raw is None or raw == "":
-            skips.append(Skip(_adapter_name(adapter), "no MAC address"))
+            skips.append(Skip(item=_adapter_name(adapter), reason="no MAC address"))
         elif isinstance(raw, str) and _MAC.fullmatch(raw):
             macs.add(raw.upper().replace("-", ":"))
         else:
-            skips.append(Skip(_adapter_name(adapter), f"not a MAC address: {raw!r}"))
+            skips.append(Skip(item=_adapter_name(adapter), reason=f"not a MAC address: {raw!r}"))
     return tuple(sorted(macs)), tuple(skips)
 
 
@@ -646,10 +648,10 @@ def _containers(host: ProbeHost, skipped: list[Skip]) -> tuple[Container, ...] |
     try:
         result = host.exec(["docker", "ps", "--format", "{{json .}}"], timeout=DOCKER_PS_TIMEOUT)
     except PwshPyError as exc:  # timeout or no docker CLI: cannot count, which is not zero
-        skipped.append(Skip("docker ps", str(exc)))
+        skipped.append(Skip(item="docker ps", reason=str(exc)))
         return None
     if result.exit_code != 0:
-        skipped.append(Skip("docker ps", f"exit {result.exit_code}: {result.stderr.strip()[:300]}"))
+        skipped.append(Skip(item="docker ps", reason=f"exit {result.exit_code}: {result.stderr.strip()[:300]}"))
         return None
     return parse_containers(result.stdout)
 
@@ -879,34 +881,38 @@ def commands(
     """
     return (
         Command(
-            "detect-lp-defect",
-            "is this guest affected by the orphaned language pack",
-            lambda _a: _run_detect_lp_defect(host_factory()),
+            name="detect-lp-defect",
+            help="is this guest affected by the orphaned language pack",
+            run=lambda _a: _run_detect_lp_defect(host_factory()),
         ),
-        Command("drives", "free space per fixed drive", lambda _a: _run_drives(host_factory())),
+        Command(name="drives", help="free space per fixed drive", run=lambda _a: _run_drives(host_factory())),
         Command(
-            "verify-runners",
-            "did the runner containers and their boot tasks come back after a reboot",
-            lambda a: _run_verify_runners(host_factory(), a.expected, tuple(a.tasks or ())),
-            _configure_verify_runners,
+            name="verify-runners",
+            help="did the runner containers and their boot tasks come back after a reboot",
+            run=lambda a: _run_verify_runners(host_factory(), a.expected, tuple(a.tasks or ())),
+            configure=_configure_verify_runners,
         ),
-        Command("build", "CurrentBuild, UBR and InstallDate", lambda _a: _run_build(host_factory())),
+        Command(name="build", help="CurrentBuild, UBR and InstallDate", run=lambda _a: _run_build(host_factory())),
         Command(
-            "staged-os",
-            "is the staged NewOS still present",
-            lambda _a: Outcome(ok=True, data=staged_os(staged_os_path)),
+            name="staged-os",
+            help="is the staged NewOS still present",
+            run=lambda _a: Outcome(ok=True, data=staged_os(staged_os_path)),
         ),
         Command(
-            "servicing-active",
-            "is TiWorker / TrustedInstaller running",
-            lambda _a: _run_servicing_active(host_factory()),
+            name="servicing-active",
+            help="is TiWorker / TrustedInstaller running",
+            run=lambda _a: _run_servicing_active(host_factory()),
         ),
-        Command("setup-alive", "is SetupHost running", lambda _a: _run_setup_alive(host_factory())),
+        Command(name="setup-alive", help="is SetupHost running", run=lambda _a: _run_setup_alive(host_factory())),
         Command(
-            "state",
-            "the upgrade state log and its completion marker",
-            lambda a: Outcome(ok=True, data=read_state(a.log)),
-            _configure_state,
+            name="state",
+            help="the upgrade state log and its completion marker",
+            run=lambda a: Outcome(ok=True, data=read_state(a.log)),
+            configure=_configure_state,
         ),
-        Command("nic-macs", "the MAC address of every network adapter", lambda _a: _run_nic_macs(host_factory())),
+        Command(
+            name="nic-macs",
+            help="the MAC address of every network adapter",
+            run=lambda _a: _run_nic_macs(host_factory()),
+        ),
     )

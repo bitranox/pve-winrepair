@@ -323,7 +323,9 @@ def test_push_tool_deletes_the_profile_copy_when_lock_dirs_refuses_and_writes_no
 ) -> None:
     source = _packed(tmp_path)
     reason = r"C:\winrepair held files before it was locked: remove it (rd /s /q C:\winrepair) and rerun"
-    refused = LockDirsReport(TOOL_PATH, False, None, (), "FAILED", reason)
+    refused = LockDirsReport(
+        tool=TOOL_PATH, tool_present=False, tool_sha256=None, directories=(), verdict="FAILED", reason=reason
+    )
     runner = _pushing(source)
     runner.replies["lock-dirs"] = [answer("lock-dirs", refused, ok=False)]
     with pytest.raises(GuestPushError, match=r"rd /s /q C:\\winrepair"):
@@ -596,7 +598,7 @@ DONE_FAIL_LINES = ("launching: setup.exe", "STATE=DONE-FAIL setup exit=0xC190020
     ids=["no-log", "done-ok", "done-fail", "no-marker", "alive-over-done-ok", "alive-no-log"],
 )
 def test_run_state_reads_live_and_marker(alive: bool, log: object, live: bool, marker: str | None) -> None:
-    runner = FakeRunner().on("setup-alive", answer("setup-alive", SetupReport(int(alive), alive)))
+    runner = FakeRunner().on("setup-alive", answer("setup-alive", SetupReport(count=int(alive), alive=alive)))
     runner.on("state", answer("state", log))
     state = read_run_state(_guest(runner), timeout=300)
     assert (state.live, state.marker, state.alive) == (live, marker, alive)
@@ -604,7 +606,7 @@ def test_run_state_reads_live_and_marker(alive: bool, log: object, live: bool, m
 
 
 def test_run_state_with_an_unknown_marker_is_a_protocol_error() -> None:
-    runner = FakeRunner().on("setup-alive", answer("setup-alive", SetupReport(0, False)))
+    runner = FakeRunner().on("setup-alive", answer("setup-alive", SetupReport(count=0, alive=False)))
     runner.on("state", answer("state", {"path": "C:\\x.log", "present": True, "verdict": "DONE-MAYBE"}))
     with pytest.raises(GuestProtocolError, match="DONE-MAYBE"):
         read_run_state(_guest(runner), timeout=300)

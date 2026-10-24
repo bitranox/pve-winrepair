@@ -27,13 +27,17 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, cast
 
+from pydantic import BaseModel, ConfigDict
+
 if TYPE_CHECKING:
     import argparse
 
 __all__ = [
     "Command",
     "ExitCode",
+    "InternalError",
     "Outcome",
+    "Report",
     "Skip",
     "build",
     "exit_code",
@@ -41,6 +45,17 @@ __all__ = [
     "jsonable",
     "render",
 ]
+
+
+class Report(BaseModel):
+    """Base of everything a command puts into its envelope: frozen, and closed to unknown fields.
+
+    ``extra="forbid"`` makes a misspelt field a construction error on the guest instead of a key
+    the host driver never reads; the host's own answer models forbid unknown fields too, so a field
+    added on one side only fails the contract tests rather than travelling unread.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
 
 class ExitCode(enum.IntEnum):
@@ -51,8 +66,7 @@ class ExitCode(enum.IntEnum):
     INTERNAL = 2
 
 
-@dataclass(frozen=True)
-class Skip:
+class Skip(Report):
     """Something a command did not check, and why - so a gap is visible rather than silent.
 
     Attributes:
@@ -62,6 +76,18 @@ class Skip:
 
     item: str
     reason: str
+
+
+class InternalError(Report):
+    """The payload of an exit-2 envelope: the tool crashed, or did not know the command.
+
+    Attributes:
+        error: The exception's message, or its type name when the message is empty.
+        error_type: The exception's type name.
+    """
+
+    error: str
+    error_type: str
 
 
 @dataclass(frozen=True)
@@ -102,12 +128,14 @@ class Command:
 
 
 def jsonable(value: object) -> object:
-    """Convert dataclasses, enums, tuples and mappings into plain JSON types.
+    """Convert reports, dataclasses, enums, tuples and mappings into plain JSON types.
 
     Example:
-        >>> jsonable({"a": (1, Skip("x", "y"))})
+        >>> jsonable({"a": (1, Skip(item="x", reason="y"))})
         {'a': [1, {'item': 'x', 'reason': 'y'}]}
     """
+    if isinstance(value, BaseModel):
+        return value.model_dump(mode="json")
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
         return {f.name: jsonable(getattr(value, f.name)) for f in dataclasses.fields(value)}
     if isinstance(value, enum.Enum):
@@ -143,8 +171,8 @@ def internal_error(command: str, error: BaseException) -> dict[str, object]:
         >>> internal_error("build", OSError("denied"))["data"]
         {'error': 'denied', 'error_type': 'OSError'}
     """
-    data = {"error": str(error) or type(error).__name__, "error_type": type(error).__name__}
-    return {"ok": False, "command": command, "data": data, "skipped": []}
+    data = InternalError(error=str(error) or type(error).__name__, error_type=type(error).__name__)
+    return build(command, Outcome(ok=False, data=data))
 
 
 def render(envelope: Mapping[str, object]) -> str:

@@ -592,7 +592,9 @@ def clear_read_only(root: str) -> tuple[int, list[Skip]]:
     """
     failed: list[Skip] = []
     cleared = 0
-    for folder, _dirs, files in os.walk(root, onerror=lambda e: failed.append(Skip(str(e.filename), str(e)))):
+    for folder, _dirs, files in os.walk(
+        root, onerror=lambda e: failed.append(Skip(item=str(e.filename), reason=str(e)))
+    ):
         for name in files:
             path = Path(folder, name)
             try:
@@ -601,7 +603,7 @@ def clear_read_only(root: str) -> tuple[int, list[Skip]]:
                     path.chmod(mode | stat.S_IWRITE)
                     cleared += 1
             except OSError as exc:
-                failed.append(Skip(os.fspath(path), str(exc)))
+                failed.append(Skip(item=os.fspath(path), reason=str(exc)))
     return cleared, failed
 
 
@@ -693,11 +695,11 @@ def _write_waiver(host: UpgradeHost, skipped: list[Skip]) -> int | None:
         host.create_key(MOSETUP_KEY)
         host.set_dword(MOSETUP_KEY, WAIVER, 1)
     except PwshPyError as exc:
-        skipped.append(Skip(item, str(exc)))
+        skipped.append(Skip(item=item, reason=str(exc)))
     try:
         value = _values(host, MOSETUP_KEY).get(WAIVER)
     except PwshPyError as exc:
-        skipped.append(Skip(f"{item} readback", str(exc)))
+        skipped.append(Skip(item=f"{item} readback", reason=str(exc)))
         return None
     return value if isinstance(value, int) else None
 
@@ -707,7 +709,7 @@ def _tpm_present(host: UpgradeHost, skipped: list[Skip]) -> bool | None:
     try:
         return bool(list(host.cim("Win32_Tpm", namespace=TPM_NAMESPACE)))
     except PwshPyError as exc:
-        skipped.append(Skip("Win32_Tpm", str(exc)))
+        skipped.append(Skip(item="Win32_Tpm", reason=str(exc)))
         return None
 
 
@@ -715,7 +717,7 @@ def _drives(host: UpgradeHost, skipped: list[Skip]) -> tuple[Drive, ...]:
     try:
         disks = list(host.cim("Win32_LogicalDisk", where="DriveType=3"))
     except PwshPyError as exc:
-        skipped.append(Skip("Win32_LogicalDisk", str(exc)))
+        skipped.append(Skip(item="Win32_LogicalDisk", reason=str(exc)))
         return ()
     drives, skips = fixed_drives(disks)
     skipped.extend(skips)
@@ -732,13 +734,37 @@ def run_prepare(host: UpgradeHost, stage_root: str) -> Outcome:
     gate, image = "FAIL", None
     if images is not None:
         gate, reason, image = wim_gate(images, running)
-    report = PrepareReport(stage_root, cleared, failed, wim_path, gate, reason, image, running, None, None, ())
+    report = PrepareReport(
+        stage_root=stage_root,
+        readonly_cleared=cleared,
+        readonly_failed=failed,
+        wim=wim_path,
+        gate=gate,
+        reason=reason,
+        image=image,
+        running=running,
+        waiver_readback=None,
+        tpm_present=None,
+        drives=(),
+    )
     if gate != "PASS":
         return Outcome(ok=False, data=report, skipped=tuple(skipped))
     waiver = _write_waiver(host, skipped)
     tpm = _tpm_present(host, skipped)
     drives = _drives(host, skipped)
-    report = PrepareReport(stage_root, cleared, failed, wim_path, gate, reason, image, running, waiver, tpm, drives)
+    report = PrepareReport(
+        stage_root=stage_root,
+        readonly_cleared=cleared,
+        readonly_failed=failed,
+        wim=wim_path,
+        gate=gate,
+        reason=reason,
+        image=image,
+        running=running,
+        waiver_readback=waiver,
+        tpm_present=tpm,
+        drives=drives,
+    )
     return Outcome(ok=True, data=report, skipped=tuple(skipped))
 
 
@@ -781,11 +807,11 @@ def wait_for_launch(
         except OSError as exc:
             lines, last_error = (), str(exc)
         if any(_LAUNCHING.search(line) for line in lines):
-            return LaunchWait("LAUNCHED", clock() - started, last_error)
+            return LaunchWait(status="LAUNCHED", waited_s=clock() - started, last_error=last_error)
         if state_verdict(lines)[0] is not None:
-            return LaunchWait("ENDED", clock() - started, last_error)
+            return LaunchWait(status="ENDED", waited_s=clock() - started, last_error=last_error)
         if clock() - started >= limit:
-            return LaunchWait("TIMEOUT", clock() - started, last_error)
+            return LaunchWait(status="TIMEOUT", waited_s=clock() - started, last_error=last_error)
         sleep(interval)
 
 
@@ -1097,13 +1123,13 @@ def _named_and_hashed(host: UpgradeHost, tool: str, stage_root: str, program: st
     setup = ntpath.join(stage_root, "setup.exe")
     problem = lock_scope_problem(tool, stage_root) or _missing((tool, setup, program))
     if problem is not None:
-        return Preflight((), None, problem)
+        return Preflight(locked=(), tool_sha256=None, problem=problem)
     try:
         digest, mismatch = content_address(tool)
     except OSError as exc:
-        return Preflight((), None, f"cannot read the tool: {exc}")
+        return Preflight(locked=(), tool_sha256=None, problem=f"cannot read the tool: {exc}")
     problem = mismatch or _unsafe_lock_targets(host, (ntpath.dirname(tool), stage_root))
-    return None if problem is None else Preflight((), digest, problem)
+    return None if problem is None else Preflight(locked=(), tool_sha256=digest, problem=problem)
 
 
 def _locks_held(host: UpgradeHost, directories: Sequence[str]) -> str | None:
@@ -1175,9 +1201,13 @@ def preflight(host: UpgradeHost, tool: str, stage_root: str, program: str) -> Pr
         )
         digest, mismatch = content_address(tool)
     except (OSError, PwshPyError) as exc:
-        return Preflight((), None, f"cannot verify the lock-down: {exc}")
+        return Preflight(locked=(), tool_sha256=None, problem=f"cannot verify the lock-down: {exc}")
     problem = problem or mismatch
-    return Preflight((), digest, problem) if problem else Preflight(directories, digest, None)
+    return (
+        Preflight(locked=(), tool_sha256=digest, problem=problem)
+        if problem
+        else Preflight(locked=directories, tool_sha256=digest, problem=None)
+    )
 
 
 def _refused(spec: TaskSpec, check: Preflight) -> Outcome:
@@ -1242,7 +1272,7 @@ def _final_state(state_log: str, skipped: list[Skip]) -> StateLog | None:
     try:
         return read_state(state_log)
     except OSError as exc:
-        skipped.append(Skip(state_log, str(exc)))
+        skipped.append(Skip(item=state_log, reason=str(exc)))
         return None
 
 
@@ -1270,9 +1300,19 @@ def run_launch(host: UpgradeHost, stage_root: str, state_log: str, tool: str) ->
     verdict, reason = _louder(verdict, reason, cleanup)
     state = _final_state(state_log, skipped)
     report = LaunchReport(
-        TASK_NAME, spec.command_line, removed, registered, wait, count, state, cleanup, verdict, reason,
-        check.locked, check.tool_sha256,
-    )  # fmt: skip
+        task=TASK_NAME,
+        command=spec.command_line,
+        stale_log_removed=removed,
+        registered=registered,
+        wait=wait,
+        setuphost=count,
+        state=state,
+        task_cleanup=cleanup,
+        verdict=verdict,
+        reason=reason,
+        locked=check.locked,
+        tool_sha256=check.tool_sha256,
+    )
     return Outcome(ok=verdict == "OK", data=report, skipped=tuple(skipped))
 
 
@@ -1375,7 +1415,12 @@ def _tool_in_place(host: UpgradeHost, tool: str) -> tuple[bool, str | None, str 
 
 
 def _lock_refused(tool: str, done: Sequence[DirectoryLock], reason: str, *, present: bool = False) -> Outcome:
-    return Outcome(ok=False, data=LockDirsReport(tool, present, None, tuple(done), "FAILED", reason))
+    return Outcome(
+        ok=False,
+        data=LockDirsReport(
+            tool=tool, tool_present=present, tool_sha256=None, directories=tuple(done), verdict="FAILED", reason=reason
+        ),
+    )
 
 
 def run_lock_dirs(host: UpgradeHost, tool: str, stage_root: str | None, *, create: bool = True) -> Outcome:
@@ -1411,11 +1456,16 @@ def run_lock_dirs(host: UpgradeHost, tool: str, stage_root: str | None, *, creat
         action, problem = _judge_directory(host, directory, create=create)
         if problem is not None:
             return _lock_refused(tool, done, problem)
-        done.append(DirectoryLock(directory, action))
+        done.append(DirectoryLock(path=directory, action=action))
     present, digest, problem = _tool_in_place(host, tool)
     if problem is not None:
         return _lock_refused(tool, done, problem, present=present)
-    return Outcome(ok=True, data=LockDirsReport(tool, present, digest, tuple(done), "OK", None))
+    return Outcome(
+        ok=True,
+        data=LockDirsReport(
+            tool=tool, tool_present=present, tool_sha256=digest, directories=tuple(done), verdict="OK", reason=None
+        ),
+    )
 
 
 # --- upgrade-run ----------------------------------------------------------------------------
@@ -1553,18 +1603,18 @@ def _upgrade(host: UpgradeHost, stage_root: str, log: _StateLog, state_log: str)
     if not _is_file(setup):
         log.say("STATE=DONE-FAIL setup.exe missing")
         failed = UpgradeRunReport(
-            state_log,
-            setup,
-            argv,
-            before,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            "DONE-FAIL",
-            "setup.exe missing",
+            state_log=state_log,
+            setup=setup,
+            argv=argv,
+            build_before=before,
+            build_after=None,
+            exit_code=None,
+            exit_hex=None,
+            seconds=None,
+            tree_wait=None,
+            newos_staged=None,
+            verdict="DONE-FAIL",
+            reason="setup.exe missing",
         )
         return Outcome(ok=False, data=failed)
     log.say(f"launching: {setup} {' '.join(argv)}")
@@ -1575,13 +1625,38 @@ def _upgrade(host: UpgradeHost, stage_root: str, log: _StateLog, state_log: str)
         log.say(f"STATE=DONE-FAIL setup.exe could not run: {exc}")
         log.say("=== upgrade_run end ===")
         failed = UpgradeRunReport(
-            state_log, setup, argv, before, None, None, None, None, None, None, "DONE-FAIL", str(exc)
+            state_log=state_log,
+            setup=setup,
+            argv=argv,
+            build_before=before,
+            build_after=None,
+            exit_code=None,
+            exit_hex=None,
+            seconds=None,
+            tree_wait=None,
+            newos_staged=None,
+            verdict="DONE-FAIL",
+            reason=str(exc),
         )
         return Outcome(ok=False, data=failed)
-    return _finish(host, log, UpgradeRunReport(
-        state_log, setup, argv, before, None, run.exit_code, exit_hex(run.exit_code),
-        host.monotonic() - started, run.tree_wait, None, "", None,
-    ))  # fmt: skip
+    return _finish(
+        host,
+        log,
+        UpgradeRunReport(
+            state_log=state_log,
+            setup=setup,
+            argv=argv,
+            build_before=before,
+            build_after=None,
+            exit_code=run.exit_code,
+            exit_hex=exit_hex(run.exit_code),
+            seconds=host.monotonic() - started,
+            tree_wait=run.tree_wait,
+            newos_staged=None,
+            verdict="",
+            reason=None,
+        ),
+    )
 
 
 def _finish(host: UpgradeHost, log: _StateLog, ran: UpgradeRunReport) -> Outcome:
@@ -1598,9 +1673,19 @@ def _finish(host: UpgradeHost, log: _StateLog, ran: UpgradeRunReport) -> Outcome
     log.say("=== upgrade_run end ===")
     reason = None if verdict == "DONE-OK" else marker.removeprefix("STATE=DONE-FAIL ")
     report = UpgradeRunReport(
-        ran.state_log, ran.setup, ran.argv, ran.build_before, after, ran.exit_code, ran.exit_hex,
-        ran.seconds, ran.tree_wait, None if newos is None else newos == "True", verdict, reason,
-    )  # fmt: skip
+        state_log=ran.state_log,
+        setup=ran.setup,
+        argv=ran.argv,
+        build_before=ran.build_before,
+        build_after=after,
+        exit_code=ran.exit_code,
+        exit_hex=ran.exit_hex,
+        seconds=ran.seconds,
+        tree_wait=ran.tree_wait,
+        newos_staged=None if newos is None else newos == "True",
+        verdict=verdict,
+        reason=reason,
+    )
     return Outcome(ok=verdict == "DONE-OK", data=report)
 
 
@@ -1677,27 +1762,27 @@ def commands(host_factory: Callable[[], UpgradeHost] = PwshpyHost) -> tuple[Comm
     """
     return (
         Command(
-            "prepare",
-            "clear read-only, gate on the WIM, write the compat waiver",
-            lambda a: run_prepare(host_factory(), a.stage_root),
-            _stage_root,
+            name="prepare",
+            help="clear read-only, gate on the WIM, write the compat waiver",
+            run=lambda a: run_prepare(host_factory(), a.stage_root),
+            configure=_stage_root,
         ),
         Command(
-            "lock-dirs",
-            r"create C:\winrepair (and the stage root) already locked, before anything is copied into them",
-            lambda a: run_lock_dirs(host_factory(), a.tool, a.stage_root, create=a.create),
-            _configure_lock_dirs,
+            name="lock-dirs",
+            help=r"create C:\winrepair (and the stage root) already locked, before anything is copied into them",
+            run=lambda a: run_lock_dirs(host_factory(), a.tool, a.stage_root, create=a.create),
+            configure=_configure_lock_dirs,
         ),
         Command(
-            "launch",
-            "start upgrade-run as a SYSTEM task and check setup stays up",
-            lambda a: run_launch(host_factory(), a.stage_root, a.state_log, a.tool),
-            _configure_launch,
+            name="launch",
+            help="start upgrade-run as a SYSTEM task and check setup stays up",
+            run=lambda a: run_launch(host_factory(), a.stage_root, a.state_log, a.tool),
+            configure=_configure_launch,
         ),
         Command(
-            "upgrade-run",
-            "run setup.exe (the SYSTEM task's command), write the state log and marker",
-            lambda a: run_upgrade(host_factory(), a.stage_root, a.state_log),
-            _configure_run,
+            name="upgrade-run",
+            help="run setup.exe (the SYSTEM task's command), write the state log and marker",
+            run=lambda a: run_upgrade(host_factory(), a.stage_root, a.state_log),
+            configure=_configure_run,
         ),
     )

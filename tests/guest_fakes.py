@@ -105,10 +105,17 @@ def make_node(runner: Runner, clock: FakeClock | None = None) -> Node:
 
 def locked(*, present: bool, stage_root: str | None = None) -> LockDirsReport:
     r"""lock-dirs' answer for a guest whose ``C:\winrepair`` (and stage root) it locked or found locked."""
-    dirs = (DirectoryLock("C:\\winrepair", "ALREADY_LOCKED"),)
+    dirs = (DirectoryLock(path="C:\\winrepair", action="ALREADY_LOCKED"),)
     if stage_root is not None:
-        dirs += (DirectoryLock(stage_root, "CREATED"),)
-    return LockDirsReport(TOOL_PATH, present, "ab" * 32 if present else None, dirs, "OK", None)
+        dirs += (DirectoryLock(path=stage_root, action="CREATED"),)
+    return LockDirsReport(
+        tool=TOOL_PATH,
+        tool_present=present,
+        tool_sha256="ab" * 32 if present else None,
+        directories=dirs,
+        verdict="OK",
+        reason=None,
+    )
 
 
 @dataclass(frozen=True)
@@ -265,7 +272,14 @@ class FakeClock:
 def state_log(*lines: str, present: bool = True) -> StateLog:
     r"""The guest's ``state`` probe data for a log holding ``lines`` (verdict parsed the guest's way)."""
     verdict, marker = state_verdict(lines)
-    return StateLog(r"C:\upgrade-state.log", present, verdict, marker, len(lines), tuple(lines))
+    return StateLog(
+        path=r"C:\upgrade-state.log",
+        present=present,
+        verdict=verdict,
+        marker=marker,
+        line_count=len(lines),
+        tail=tuple(lines),
+    )
 
 
 class FakePve:
@@ -325,12 +339,12 @@ GIB = 1024**3
 
 def quiesce_report(verdict: str, *, running: tuple[str, ...] = ()) -> QuiesceReport:
     """quiesce-wu's answer with ``verdict``; ``running`` names the services still running."""
-    rows = (ServiceRow("wuauserv", "Disabled", "Running" if running else "Stopped"),)
+    rows = (ServiceRow(name="wuauserv", start_mode="Disabled", state="Running" if running else "Stopped"),)
     return QuiesceReport(
         previous_start_modes={"wuauserv": "Manual", "UsoSvc": "Auto"},
-        writes=(StartWrite("wuauserv", 4, "WRITTEN", None),),
-        stops=(StopIssued("wuauserv", "StopPending", None),),
-        wait=StopWait(10.0, False, running),
+        writes=(StartWrite(service="wuauserv", value=4, result="WRITTEN", error=None),),
+        stops=(StopIssued(service="wuauserv", state="StopPending", error=None),),
+        wait=StopWait(waited_s=10.0, timed_out=False, still_running=running),
         services=rows,
         not_disabled=(),
         still_running=running,
@@ -342,7 +356,8 @@ def drive_report(**free_gib: float) -> DriveReport:
     """drives' answer: one fixed drive per keyword, with that many GiB free."""
     return DriveReport(
         drives=tuple(
-            Drive(letter, int(gib * GIB), int(gib * GIB) * 2, round(gib, 1)) for letter, gib in sorted(free_gib.items())
+            Drive(letter=letter, free_bytes=int(gib * GIB), size_bytes=int(gib * GIB) * 2, free_gb=round(gib, 1))
+            for letter, gib in sorted(free_gib.items())
         )
     )
 
@@ -352,34 +367,42 @@ def servicing_report(total: int) -> ServicingReport:
     return ServicingReport(counts={"TiWorker": total, "TrustedInstaller": 0}, total=total, active=total > 0)
 
 
-IMAGE = WimImage(1, "Windows 11 Pro", "Professional", 26200, 8973, ("de-DE",), "de-DE")
-RUNNING_BUILD = BuildInfo("26200", 7462, "26200.7462")
+IMAGE = WimImage(
+    index=1,
+    name="Windows 11 Pro",
+    edition="Professional",
+    build=26200,
+    spbuild=8973,
+    languages=("de-DE",),
+    default_language="de-DE",
+)
+RUNNING_BUILD = BuildInfo(current_build="26200", ubr=7462, build="26200.7462")
 #: InstallDate (epoch seconds) of the guest before the repair, and after an upgrade that applied.
 INSTALL_DATE = 1_761_206_400
 INSTALL_DATE_AFTER = 1_761_300_000
 #: What ``build`` reports on the guest before the upgrade: :data:`RUNNING_BUILD` and its InstallDate.
-BUILD_BEFORE = BuildReport("26200", 7462, "26200.7462", INSTALL_DATE)
+BUILD_BEFORE = BuildReport(current_build="26200", ubr=7462, build="26200.7462", install_date=INSTALL_DATE)
 
 
 def prepare_report(gate: str, reason: str | None = None, *, tpm: bool | None = True) -> PrepareReport:
     """prepare's answer for :data:`IMAGE` staged on ``D:\\upgrade``: ``gate`` PASS or FAIL with ``reason``."""
     passed = gate == "PASS"
     return PrepareReport(
-        "D:\\upgrade",
-        12,
-        0,
-        "D:\\upgrade\\sources\\install.wim",
-        gate,
-        reason,
-        IMAGE,
-        RUNNING_BUILD,
-        1 if passed else None,
-        tpm if passed else None,
-        (),
+        stage_root="D:\\upgrade",
+        readonly_cleared=12,
+        readonly_failed=0,
+        wim="D:\\upgrade\\sources\\install.wim",
+        gate=gate,
+        reason=reason,
+        image=IMAGE,
+        running=RUNNING_BUILD,
+        waiver_readback=1 if passed else None,
+        tpm_present=tpm if passed else None,
+        drives=(),
     )
 
 
-DISARMED = TaskCleanup("DISARM", None, False, True, None)
+DISARMED = TaskCleanup(action="DISARM", ended=None, disabled=False, deleted=True, error=None)
 
 
 def launch_report(
@@ -392,21 +415,21 @@ def launch_report(
 ) -> LaunchReport:
     """launch's answer with ``verdict``: the SYSTEM task points at the pushed tool."""
     return LaunchReport(
-        "OVMRepairUpgrade",
-        f"powershell -File {TOOL_PATH} upgrade-run",
-        False,
-        True,
-        None if wait is None else LaunchWait(wait, 42.0, None),
-        setuphost,
-        state_log("launching: setup.exe"),
-        cleanup,
-        verdict,
-        reason,
+        task="OVMRepairUpgrade",
+        command=f"powershell -File {TOOL_PATH} upgrade-run",
+        stale_log_removed=False,
+        registered=True,
+        wait=None if wait is None else LaunchWait(status=wait, waited_s=42.0, last_error=None),
+        setuphost=setuphost,
+        state=state_log("launching: setup.exe"),
+        task_cleanup=cleanup,
+        verdict=verdict,
+        reason=reason,
     )
 
 
-ALIVE = answer("setup-alive", SetupReport(1, True))
-GONE = answer("setup-alive", SetupReport(0, False))
+ALIVE = answer("setup-alive", SetupReport(count=1, alive=True))
+GONE = answer("setup-alive", SetupReport(count=0, alive=False))
 NO_LOG = answer("state", state_log(present=False))
 DONE_OK = answer("state", state_log("launching: setup.exe", "STATE=DONE-OK setup exit=0x00000000"))
 
@@ -437,16 +460,17 @@ def agent_runner(pve: FakePve, **overrides: Answer) -> FakeRunner:
 
 
 NEWOS = r"C:\$WINDOWS.~BT\NewOS\Windows\System32\winload.efi"
-TIMED_OUT = SearchProbe("TIMEOUT", None, (), None, 180.0)
+TIMED_OUT = SearchProbe(status="TIMEOUT", pending=None, titles=(), error=None, timeout_s=180.0)
 
 
 def restore_report(verdict: str, still: tuple[str, ...] = (), search: SearchProbe = TIMED_OUT) -> RestoreReport:
     """restore-wu's answer with ``verdict``; ``still`` names the services left disabled."""
     rows = tuple(
-        ServiceRow(name, "Disabled" if name in still else "Manual", "Stopped") for name in ("wuauserv", "UsoSvc")
+        ServiceRow(name=name, start_mode="Disabled" if name in still else "Manual", state="Stopped")
+        for name in ("wuauserv", "UsoSvc")
     )
     return RestoreReport(
-        writes=(StartWrite("wuauserv", 3, "WRITTEN", None),),
+        writes=(StartWrite(service="wuauserv", value=3, result="WRITTEN", error=None),),
         services=rows,
         still_disabled=still,
         verdict=verdict,
@@ -462,7 +486,7 @@ def apply_runner(pve: FakePve, alive: Reply, state: Reply) -> FakeRunner:
         .on("build", answer("build", BUILD_BEFORE), answer("build", BUILD_AFTER))
         .on("setup-alive", alive)
         .on("state", state)
-        .on("staged-os", answer("staged-os", StagedOs(NEWOS, True, "REARMABLE")))
+        .on("staged-os", answer("staged-os", StagedOs(path=NEWOS, present=True, verdict="REARMABLE")))
         .on("hostname", Reply(0, "GUEST\r\n"))
         .on("nic-macs", NIC_MACS)
         .on("restore-wu", answer("restore-wu", restore_report("RESTORED")))
@@ -470,7 +494,7 @@ def apply_runner(pve: FakePve, alive: Reply, state: Reply) -> FakeRunner:
 
 
 #: The guest after an upgrade to :data:`IMAGE` that applied: the image's build, a new InstallDate.
-BUILD_AFTER = BuildReport("26200", 8973, "26200.8973", INSTALL_DATE_AFTER)
+BUILD_AFTER = BuildReport(current_build="26200", ubr=8973, build="26200.8973", install_date=INSTALL_DATE_AFTER)
 #: The receipt a repair of VM 1 leaves for :data:`IMAGE` staged on a guest that ran :data:`BUILD_BEFORE`.
 RECEIPT = RepairReceipt(
     vmid=1,

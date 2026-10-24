@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
+import rtoml
 from json_paths import at
 
 from pve_winrepair_guest import envelope, winrepair_guest
@@ -28,7 +29,7 @@ GUEST = Path(__file__).resolve().parent.parent / "src" / "pve_winrepair_guest" /
 
 
 def _echo(args: argparse.Namespace) -> Outcome:
-    return Outcome(ok=True, data={"value": args.value}, skipped=(Skip("extra", "not asked"),))
+    return Outcome(ok=True, data={"value": args.value}, skipped=(Skip(item="extra", reason="not asked"),))
 
 
 def _configure_echo(parser: argparse.ArgumentParser) -> None:
@@ -44,9 +45,9 @@ def _crash(_args: argparse.Namespace) -> Outcome:
 
 
 COMMANDS = (
-    Command("echo", "echo a value", _echo, _configure_echo),
-    Command("refuse", "a gate that says no", _refuse),
-    Command("crash", "an internal error", _crash),
+    Command(name="echo", help="echo a value", run=_echo, configure=_configure_echo),
+    Command(name="refuse", help="a gate that says no", run=_refuse),
+    Command(name="crash", help="an internal error", run=_crash),
 )
 
 
@@ -151,6 +152,18 @@ def test_header_pins_pywin32_for_windows_only() -> None:
     dependencies = ast.literal_eval(line.split("=", 1)[1].strip())
     assert "pwshpy==1.6.0" in dependencies
     assert [d for d in dependencies if d.startswith("pywin32")] == ["pywin32==312; sys_platform == 'win32'"]
+
+
+def test_header_pins_pydantic_to_the_locked_version() -> None:
+    # The report models import pydantic directly, so it must not float on pwshpy's own unpinned
+    # requirement either; pinning it to uv.lock keeps the packed tool on the pydantic the tests ran.
+    block = GUEST.read_text(encoding="utf-8").split("# ///")[1]
+    line = next(raw for raw in block.splitlines() if raw.startswith("# dependencies"))
+    dependencies = ast.literal_eval(line.split("=", 1)[1].strip())
+    lock = rtoml.load(GUEST.parents[2] / "uv.lock")
+    locked = [p["version"] for p in lock["package"] if p["name"] == "pydantic"]
+    assert len(locked) == 1
+    assert [d for d in dependencies if d.startswith("pydantic")] == [f"pydantic=={locked[0]}"]
 
 
 def test_default_commands_cover_every_feature_module() -> None:

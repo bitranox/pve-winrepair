@@ -480,10 +480,10 @@ def _target(security: Win32Security, files: Win32File, handle: object, path: str
     attributes = _attributes(files, handle)
     owner = security.GetSecurityInfo(handle, SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION)
     return LockTarget(
-        path,
-        (path,) if attributes & FILE_ATTRIBUTE_REPARSE_POINT else (),
-        bool(attributes & FILE_ATTRIBUTE_DIRECTORY),
-        security.ConvertSidToStringSid(owner.GetSecurityDescriptorOwner()),
+        path=path,
+        reparse_points=(path,) if attributes & FILE_ATTRIBUTE_REPARSE_POINT else (),
+        directory=bool(attributes & FILE_ATTRIBUTE_DIRECTORY),
+        owner=security.ConvertSidToStringSid(owner.GetSecurityDescriptorOwner()),
     )
 
 
@@ -514,7 +514,9 @@ def inspect_lock_target(security: Win32Security, files: Win32File, path: str) ->
             files.CloseHandle(handle)
     except (security.error, *_BINDING_ERRORS) as exc:
         raise OSError(f"cannot inspect {path} before locking it: {exc}") from exc
-    return LockTarget(path, ancestors + target.reparse_points, target.directory, target.owner)
+    return LockTarget(
+        path=path, reparse_points=ancestors + target.reparse_points, directory=target.directory, owner=target.owner
+    )
 
 
 def _file_attributes(info: os.stat_result) -> int:
@@ -547,7 +549,7 @@ def walk_tree(root: str, *, attributes: Callable[[os.stat_result], int] = _file_
                 info = entry.stat(follow_symlinks=False)
                 reparse = entry.is_symlink() or bool(attributes(info) & FILE_ATTRIBUTE_REPARSE_POINT)
                 directory = stat.S_ISDIR(info.st_mode)
-                yield TreeEntry(entry.path, reparse, directory)
+                yield TreeEntry(path=entry.path, reparse=reparse, directory=directory)
                 if directory and not reparse:
                     pending.append(entry.path)
 
@@ -606,7 +608,7 @@ def _ace(security: Win32Security, entry: tuple[object, ...]) -> Ace:
     if not isinstance(header, tuple) or not isinstance(mask, int):
         raise OSError(f"unexpected ACE shape from pywin32: {entry!r}")
     kind, flags = cast("tuple[int, int]", header)
-    return Ace(security.ConvertSidToStringSid(cast("Sid", sid)), kind, flags, mask)
+    return Ace(sid=security.ConvertSidToStringSid(cast("Sid", sid)), kind=kind, flags=flags, mask=mask)
 
 
 def read_acl(security: Win32Security, path: str) -> AclReading:
@@ -626,4 +628,4 @@ def read_acl(security: Win32Security, path: str) -> AclReading:
         aces = None if dacl is None else tuple(_ace(security, dacl.GetAce(i)) for i in range(count))
     except (security.error, *_BINDING_ERRORS) as exc:
         raise OSError(f"cannot read the DACL of {path}: {exc}") from exc
-    return AclReading(path, owner, bool(control & SE_DACL_PROTECTED), aces)
+    return AclReading(path=path, owner=owner, protected=bool(control & SE_DACL_PROTECTED), aces=aces)

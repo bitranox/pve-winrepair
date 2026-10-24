@@ -171,7 +171,9 @@ def test_an_inconsistent_envelope_raises_protocol_error(reply: Reply) -> None:
 
 
 def test_probe_treats_a_refusal_as_a_protocol_breach() -> None:
-    runner = FakeRunner().on("staged-os", answer("staged-os", StagedOs("x", False, "RERUN"), ok=False))
+    runner = FakeRunner().on(
+        "staged-os", answer("staged-os", StagedOs(path="x", present=False, verdict="RERUN"), ok=False)
+    )
     with pytest.raises(GuestProtocolError, match="refused"):
         _guest(runner).probe("staged-os", timeout=60)
 

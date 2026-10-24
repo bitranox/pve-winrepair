@@ -63,13 +63,18 @@ if TYPE_CHECKING:
 
 
 def test_read_build_returns_build_decimal_ubr_and_install_date() -> None:
-    runner = FakeRunner().on("build", answer("build", BuildReport("26200", 8973, "26200.8973", 1761206400)))
+    runner = FakeRunner().on(
+        "build",
+        answer("build", BuildReport(current_build="26200", ubr=8973, build="26200.8973", install_date=1761206400)),
+    )
     assert apply.read_build(make_guest(runner)) == GuestBuild(build=26200, ubr=8973, install_date=1761206400)
 
 
 @pytest.mark.parametrize("current_build", ["", "26200a", "-1", "2" * 10, chr(0x0662)])
 def test_read_build_with_a_current_build_that_is_no_number_is_a_protocol_error(current_build: str) -> None:
-    runner = FakeRunner().on("build", answer("build", BuildReport(current_build, 1, "x", 1)))
+    runner = FakeRunner().on(
+        "build", answer("build", BuildReport(current_build=current_build, ubr=1, build="x", install_date=1))
+    )
     with pytest.raises(GuestProtocolError, match="CurrentBuild"):
         apply.read_build(make_guest(runner))
 
@@ -99,14 +104,14 @@ def test_read_build_with_a_renamed_field_is_a_protocol_error() -> None:
 
 
 def test_gate_staged_present_is_rearmable() -> None:
-    runner = FakeRunner().on("staged-os", answer("staged-os", StagedOs(NEWOS, True, "REARMABLE")))
+    runner = FakeRunner().on("staged-os", answer("staged-os", StagedOs(path=NEWOS, present=True, verdict="REARMABLE")))
     rep = Report(vmid=1)
     apply.gate_staged(make_guest(runner), rep)
     assert rep.steps == [{"step": "gate_staged", "ok": True, "verdict": "REARMABLE"}]
 
 
 def test_gate_staged_absent_refuses_to_reboot() -> None:
-    runner = FakeRunner().on("staged-os", answer("staged-os", StagedOs(NEWOS, False, "RERUN")))
+    runner = FakeRunner().on("staged-os", answer("staged-os", StagedOs(path=NEWOS, present=False, verdict="RERUN")))
     rep = Report(vmid=1)
     with pytest.raises(ApplyError, match="NewOS is absent"):
         apply.gate_staged(make_guest(runner), rep)
@@ -121,7 +126,7 @@ def test_gate_staged_unreadable_refuses_to_reboot_on_an_unknown_state(reply: Rep
 
 
 def test_gate_staged_present_flag_contradicting_the_verdict_is_a_protocol_error() -> None:
-    runner = FakeRunner().on("staged-os", answer("staged-os", StagedOs(NEWOS, False, "REARMABLE")))
+    runner = FakeRunner().on("staged-os", answer("staged-os", StagedOs(path=NEWOS, present=False, verdict="REARMABLE")))
     with pytest.raises(GuestProtocolError):
         apply.gate_staged(make_guest(runner), Report(vmid=1))
 
@@ -150,7 +155,7 @@ def test_restore_wu_search_timeout_is_explained_as_no_verdict() -> None:
 
 
 def test_restore_wu_search_ok_records_the_pending_count() -> None:
-    found = SearchProbe("OK", 2, ("KB1", "KB2"), None, 180.0)
+    found = SearchProbe(status="OK", pending=2, titles=("KB1", "KB2"), error=None, timeout_s=180.0)
     runner = FakeRunner().on("restore-wu", answer("restore-wu", restore_report("RESTORED", search=found)))
     rep = Report(vmid=1)
     apply.restore_windows_update(make_guest(runner), rep)
@@ -159,7 +164,7 @@ def test_restore_wu_search_ok_records_the_pending_count() -> None:
 
 
 def test_restore_wu_search_failure_is_recorded_and_still_ok() -> None:
-    failed = SearchProbe("FAILED", None, (), "com_error: 0x8024401c", 180.0)
+    failed = SearchProbe(status="FAILED", pending=None, titles=(), error="com_error: 0x8024401c", timeout_s=180.0)
     runner = FakeRunner().on("restore-wu", answer("restore-wu", restore_report("RESTORED", search=failed)))
     rep = Report(vmid=1)
     apply.restore_windows_update(make_guest(runner), rep)
@@ -376,7 +381,13 @@ def test_after_the_apply_reboot_build_and_restore_wu_run_from_the_verified_profi
 def test_a_changed_winrepair_lock_after_the_upgrade_is_reported_and_still_lifts_the_wu_hold() -> None:
     runner = apply_runner(FakePve(), GONE, DONE_OK)
     reason = r"C:\winrepair existed before lock-dirs and is not locked as lock-dirs creates it (owner)"
-    changed = answer("lock-dirs", LockDirsReport(TOOL_PATH, True, None, (), "FAILED", reason), ok=False)
+    changed = answer(
+        "lock-dirs",
+        LockDirsReport(
+            tool=TOOL_PATH, tool_present=True, tool_sha256=None, directories=(), verdict="FAILED", reason=reason
+        ),
+        ok=False,
+    )
     runner.replies["lock-dirs"] = [lock_dirs_reply, changed]
     verdict, steps = _applied(runner)
     assert verdict == "VERIFIED"
@@ -390,7 +401,14 @@ def test_a_changed_winrepair_lock_after_the_upgrade_is_reported_and_still_lifts_
 
 def test_an_absent_winrepair_dir_after_the_upgrade_is_reported_absent_not_created() -> None:
     runner = apply_runner(FakePve(), GONE, DONE_OK)
-    gone = LockDirsReport(TOOL_PATH, False, None, (DirectoryLock("C:\\winrepair", "ABSENT"),), "OK", None)
+    gone = LockDirsReport(
+        tool=TOOL_PATH,
+        tool_present=False,
+        tool_sha256=None,
+        directories=(DirectoryLock(path="C:\\winrepair", action="ABSENT"),),
+        verdict="OK",
+        reason=None,
+    )
     runner.replies["lock-dirs"] = [lock_dirs_reply, answer("lock-dirs", gone)]
     verdict, steps = _applied(runner)
     assert verdict == "VERIFIED"
@@ -514,7 +532,7 @@ def test_run_apply_maps_an_unexpected_error_to_internal(receipts: FileReceiptSto
 # Media carrying the build the guest already ran: a rollback ends on that same build, so the build
 # alone cannot tell an upgrade that applied from one that never landed.
 SAME_BUILD = RECEIPT.model_copy(update={"build_before": (26200, 8973)})
-UNCHANGED = BuildReport("26200", 8973, "26200.8973", BUILD_BEFORE.install_date)
+UNCHANGED = BuildReport(current_build="26200", ubr=8973, build="26200.8973", install_date=BUILD_BEFORE.install_date)
 
 
 def _run_with(tmp_path: Path, receipt: RepairReceipt, after: BuildReport) -> tuple[FakeRunner, RunResult]:

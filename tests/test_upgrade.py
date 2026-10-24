@@ -163,25 +163,41 @@ class FakeUpgradeHost:
             raise OSError(f"[WinError 5] Zugriff verweigert: '{root}'")
         below = [path for path in self.entries if path.startswith(root + "\\")]
         dirs = {ntpath.dirname(path) for path in self.entries}
-        return [lockdown.TreeEntry(path, path in self.reparse, path in dirs) for path in below]
+        return [lockdown.TreeEntry(path=path, reparse=path in self.reparse, directory=path in dirs) for path in below]
 
     def inspect_lock_target(self, path: str) -> LockTarget:
         """Windows' answer for a real directory an elevated admin created: owned by Administrators."""
         if self.inspect_fails:
             raise OSError(f"cannot inspect {path} before locking it: (5, 'Zugriff verweigert')")
-        return self.lock_targets.get(path, LockTarget(path, (), True, ADMINS_SID))
+        return self.lock_targets.get(path, LockTarget(path=path, reparse_points=(), directory=True, owner=ADMINS_SID))
 
     def read_acl(self, path: str) -> AclReading:
         """Windows' answer: a locked dir and everything below it carry only the two lock ACEs."""
         if path in self.acl_overrides:
             return self.acl_overrides[path]
-        system, admins = Ace(SYSTEM_SID, 0, 0x3, FULL), Ace(ADMINS_SID, 0, 0x3, FULL)
+        system, admins = (
+            Ace(sid=SYSTEM_SID, kind=0, flags=0x3, mask=FULL),
+            Ace(sid=ADMINS_SID, kind=0, flags=0x3, mask=FULL),
+        )
         if path in self.locked:
-            return AclReading(path, ADMINS_SID, True, (system, admins))
+            return AclReading(path=path, owner=ADMINS_SID, protected=True, aces=(system, admins))
         if any(path.startswith(d + "\\") for d in self.locked):
-            return AclReading(path, RUNNER_SID, False, (Ace(SYSTEM_SID, 0, 0x10, FULL), Ace(ADMINS_SID, 0, 0x10, FULL)))
+            return AclReading(
+                path=path,
+                owner=RUNNER_SID,
+                protected=False,
+                aces=(
+                    Ace(sid=SYSTEM_SID, kind=0, flags=0x10, mask=FULL),
+                    Ace(sid=ADMINS_SID, kind=0, flags=0x10, mask=FULL),
+                ),
+            )
         # Not locked: what a directory under a drive root inherits by default.
-        return AclReading(path, ADMINS_SID, False, (system, admins, Ace(USERS_SID, 0, 0x1B, MODIFY)))
+        return AclReading(
+            path=path,
+            owner=ADMINS_SID,
+            protected=False,
+            aces=(system, admins, Ace(sid=USERS_SID, kind=0, flags=0x1B, mask=MODIFY)),
+        )
 
     def registry(self, key: str) -> Iterable[RegistryValue]:
         if key == CURRENT_VERSION:
@@ -598,7 +614,7 @@ def test_prepare_reports_a_waiver_that_did_not_read_back(stage: Path, fileless_h
 
 
 def _running(current_build: str, ubr: int) -> probes.BuildInfo:
-    return probes.BuildInfo(current_build, ubr, f"{current_build}.{ubr}")
+    return probes.BuildInfo(current_build=current_build, ubr=ubr, build=f"{current_build}.{ubr}")
 
 
 @pytest.mark.parametrize(
@@ -613,13 +629,17 @@ def _running(current_build: str, ubr: int) -> probes.BuildInfo:
     ],
 )
 def test_wim_gate_compares_build_and_spbuild_against_the_running_build(build: int, spbuild: int, gate: str) -> None:
-    image = WimImage(1, "n", "e", build, spbuild, ("de-DE",), "de-DE")
+    image = WimImage(
+        index=1, name="n", edition="e", build=build, spbuild=spbuild, languages=("de-DE",), default_language="de-DE"
+    )
 
     assert upgrade.wim_gate((image,), _running("26200", 7462))[0] == gate
 
 
 def test_wim_gate_refuses_a_running_build_that_is_not_a_number() -> None:
-    image = WimImage(1, "n", "e", 26200, 8973, ("de-DE",), "de-DE")
+    image = WimImage(
+        index=1, name="n", edition="e", build=26200, spbuild=8973, languages=("de-DE",), default_language="de-DE"
+    )
 
     gate, reason, found = upgrade.wim_gate((image,), _running("26200a", 7462))
 
@@ -627,7 +647,9 @@ def test_wim_gate_refuses_a_running_build_that_is_not_a_number() -> None:
 
 
 def test_wim_gate_refuses_media_without_image_index_1() -> None:
-    image = WimImage(2, "n", "e", 26200, 9999, ("de-DE",), "de-DE")
+    image = WimImage(
+        index=2, name="n", edition="e", build=26200, spbuild=9999, languages=("de-DE",), default_language="de-DE"
+    )
 
     assert upgrade.wim_gate((image,), _running("26200", 8875)) == (
         "FAIL",
@@ -1415,7 +1437,9 @@ def test_lock_dirs_refuses_a_locked_directory_holding_something_a_non_admin_can_
 ) -> None:
     evil = r"D:\upgrade\sources\evil.dll"
     fileless_host.entries += [r"D:\upgrade\sources", evil]
-    fileless_host.acl_overrides[evil] = AclReading(evil, PLANTER_SID, False, (Ace(SYSTEM_SID, 0, 0x10, FULL),))
+    fileless_host.acl_overrides[evil] = AclReading(
+        path=evil, owner=PLANTER_SID, protected=False, aces=(Ace(sid=SYSTEM_SID, kind=0, flags=0x10, mask=FULL),)
+    )
 
     code, envelope = _lock_dirs(fileless_host, "--stage-root", r"D:\upgrade")
 
@@ -1437,9 +1461,18 @@ def test_lock_dirs_refuses_a_directory_that_held_files_before_it_was_locked(fres
 @pytest.mark.parametrize(
     ("target", "fragment"),
     [
-        (LockTarget(r"D:\upgrade", (r"D:\upgrade",), True, PLANTER_SID), r"D:\upgrade is a reparse point"),
-        (LockTarget(r"D:\upgrade", (), True, PLANTER_SID), f"owned by {PLANTER_SID}"),
-        (LockTarget(r"D:\upgrade", (), False, ADMINS_SID), r"D:\upgrade is not a directory"),
+        (
+            LockTarget(path=r"D:\upgrade", reparse_points=(r"D:\upgrade",), directory=True, owner=PLANTER_SID),
+            r"D:\upgrade is a reparse point",
+        ),
+        (
+            LockTarget(path=r"D:\upgrade", reparse_points=(), directory=True, owner=PLANTER_SID),
+            f"owned by {PLANTER_SID}",
+        ),
+        (
+            LockTarget(path=r"D:\upgrade", reparse_points=(), directory=False, owner=ADMINS_SID),
+            r"D:\upgrade is not a directory",
+        ),
     ],
     ids=["junction", "foreign-owner", "not-a-directory"],
 )
@@ -1490,7 +1523,9 @@ def test_lock_dirs_refuses_a_tool_already_there_whose_bytes_do_not_match_its_nam
 
 
 def test_lock_dirs_refuses_a_tool_already_there_that_others_can_write(fileless_host: FakeUpgradeHost) -> None:
-    fileless_host.acl_overrides[TOOL] = AclReading(TOOL, ADMINS_SID, False, (Ace(USERS_SID, 0, 0, MODIFY),))
+    fileless_host.acl_overrides[TOOL] = AclReading(
+        path=TOOL, owner=ADMINS_SID, protected=False, aces=(Ace(sid=USERS_SID, kind=0, flags=0, mask=MODIFY),)
+    )
 
     code, envelope = _lock_dirs(fileless_host)
 
@@ -1509,8 +1544,14 @@ def test_lock_dirs_refuses_a_directory_it_cannot_create(fresh: FakeUpgradeHost) 
 
 
 def test_lock_dirs_refuses_a_lock_that_does_not_read_back_exactly(fresh: FakeUpgradeHost) -> None:
-    extra = (Ace(SYSTEM_SID, 0, 0x3, FULL), Ace(ADMINS_SID, 0, 0x3, FULL), Ace(USERS_SID, 0, 0x3, 0x1200A9))
-    fresh.acl_overrides[r"C:\winrepair"] = AclReading(r"C:\winrepair", ADMINS_SID, True, extra)
+    extra = (
+        Ace(sid=SYSTEM_SID, kind=0, flags=0x3, mask=FULL),
+        Ace(sid=ADMINS_SID, kind=0, flags=0x3, mask=FULL),
+        Ace(sid=USERS_SID, kind=0, flags=0x3, mask=0x1200A9),
+    )
+    fresh.acl_overrides[r"C:\winrepair"] = AclReading(
+        path=r"C:\winrepair", owner=ADMINS_SID, protected=True, aces=extra
+    )
 
     code, envelope = _lock_dirs(fresh)
 
@@ -1650,7 +1691,12 @@ def test_launch_refuses_a_directory_lock_dirs_never_locked(host: FakeUpgradeHost
 
 
 def test_launch_refuses_when_the_read_back_still_lets_users_write(host: FakeUpgradeHost) -> None:
-    stale = AclReading(r"D:\upgrade", ADMINS_SID, False, (Ace(USERS_SID, 0, 0x1B, MODIFY),))
+    stale = AclReading(
+        path=r"D:\upgrade",
+        owner=ADMINS_SID,
+        protected=False,
+        aces=(Ace(sid=USERS_SID, kind=0, flags=0x1B, mask=MODIFY),),
+    )
     host.acl_overrides[r"D:\upgrade"] = stale
 
     code, envelope = _launch(host)
@@ -1661,7 +1707,9 @@ def test_launch_refuses_when_the_read_back_still_lets_users_write(host: FakeUpgr
 
 def test_launch_refuses_a_setup_exe_that_others_can_still_write(host: FakeUpgradeHost) -> None:
     # An explicit ACE on the file survives the parent's lock.
-    host.acl_overrides[SETUP] = AclReading(SETUP, RUNNER_SID, False, (Ace(USERS_SID, 0, 0, MODIFY),))
+    host.acl_overrides[SETUP] = AclReading(
+        path=SETUP, owner=RUNNER_SID, protected=False, aces=(Ace(sid=USERS_SID, kind=0, flags=0, mask=MODIFY),)
+    )
 
     code, envelope = _launch(host)
 
@@ -1670,7 +1718,9 @@ def test_launch_refuses_a_setup_exe_that_others_can_still_write(host: FakeUpgrad
 
 
 def test_launch_refuses_a_tool_owned_by_an_untrusted_account(host: FakeUpgradeHost) -> None:
-    host.acl_overrides[TOOL] = AclReading(TOOL, USERS_SID, False, (Ace(SYSTEM_SID, 0, 0x10, FULL),))
+    host.acl_overrides[TOOL] = AclReading(
+        path=TOOL, owner=USERS_SID, protected=False, aces=(Ace(sid=SYSTEM_SID, kind=0, flags=0x10, mask=FULL),)
+    )
 
     code, envelope = _launch(host)
 
@@ -1679,7 +1729,7 @@ def test_launch_refuses_a_tool_owned_by_an_untrusted_account(host: FakeUpgradeHo
 
 
 EVIL = r"D:\upgrade\sources\evil.dll"
-INHERITED = (Ace(SYSTEM_SID, 0, 0x10, FULL), Ace(ADMINS_SID, 0, 0x10, FULL))
+INHERITED = (Ace(sid=SYSTEM_SID, kind=0, flags=0x10, mask=FULL), Ace(sid=ADMINS_SID, kind=0, flags=0x10, mask=FULL))
 
 
 @pytest.mark.parametrize(
@@ -1687,18 +1737,31 @@ INHERITED = (Ace(SYSTEM_SID, 0, 0x10, FULL), Ace(ADMINS_SID, 0, 0x10, FULL))
     [
         # A file a local user created (through a handle opened before the lock): its owner can
         # rewrite its DACL, so the locked parent does not protect it.
-        (AclReading(EVIL, PLANTER_SID, False, INHERITED), f"{EVIL} is owned by {PLANTER_SID}"),
+        (
+            AclReading(path=EVIL, owner=PLANTER_SID, protected=False, aces=INHERITED),
+            f"{EVIL} is owned by {PLANTER_SID}",
+        ),
         # An explicit grant on a child survives the parent's lock.
         (
-            AclReading(EVIL, ADMINS_SID, False, (*INHERITED, Ace(USERS_SID, 0, 0, MODIFY))),
+            AclReading(
+                path=EVIL,
+                owner=ADMINS_SID,
+                protected=False,
+                aces=(*INHERITED, Ace(sid=USERS_SID, kind=0, flags=0, mask=MODIFY)),
+            ),
             f"lets {USERS_SID}",
         ),
         # A same-volume move keeps the source's ACEs, still flagged inherited: they count too.
         (
-            AclReading(EVIL, ADMINS_SID, False, (*INHERITED, Ace(USERS_SID, 0, 0x10, MODIFY))),
+            AclReading(
+                path=EVIL,
+                owner=ADMINS_SID,
+                protected=False,
+                aces=(*INHERITED, Ace(sid=USERS_SID, kind=0, flags=0x10, mask=MODIFY)),
+            ),
             f"lets {USERS_SID}",
         ),
-        (AclReading(EVIL, ADMINS_SID, False, None), "NULL DACL"),
+        (AclReading(path=EVIL, owner=ADMINS_SID, protected=False, aces=None), "NULL DACL"),
     ],
     ids=["planted-owner", "explicit-grant", "moved-in-grant", "null-dacl"],
 )
@@ -1796,7 +1859,9 @@ def test_launch_refuses_a_stage_root_outside_the_driver_s_before_reading_anythin
 
 @pytest.mark.parametrize("directory", LOCK_DIRS)
 def test_launch_refuses_a_lock_directory_that_is_a_junction(host: FakeUpgradeHost, directory: str) -> None:
-    host.lock_targets[directory] = LockTarget(directory, (directory,), True, PLANTER_SID)
+    host.lock_targets[directory] = LockTarget(
+        path=directory, reparse_points=(directory,), directory=True, owner=PLANTER_SID
+    )
 
     code, envelope = _launch(host)
 
@@ -1808,7 +1873,9 @@ def test_launch_refuses_a_lock_directory_that_is_a_junction(host: FakeUpgradeHos
 @pytest.mark.parametrize("directory", LOCK_DIRS)
 def test_launch_refuses_a_lock_directory_reached_through_a_reparse_point(host: FakeUpgradeHost, directory: str) -> None:
     ancestor = ntpath.splitdrive(directory)[0] + "\\"
-    host.lock_targets[directory] = LockTarget(directory, (ancestor,), True, ADMINS_SID)
+    host.lock_targets[directory] = LockTarget(
+        path=directory, reparse_points=(ancestor,), directory=True, owner=ADMINS_SID
+    )
 
     code, envelope = _launch(host)
 
@@ -1818,7 +1885,7 @@ def test_launch_refuses_a_lock_directory_reached_through_a_reparse_point(host: F
 
 @pytest.mark.parametrize("directory", LOCK_DIRS)
 def test_launch_refuses_a_lock_directory_another_account_owns(host: FakeUpgradeHost, directory: str) -> None:
-    host.lock_targets[directory] = LockTarget(directory, (), True, PLANTER_SID)
+    host.lock_targets[directory] = LockTarget(path=directory, reparse_points=(), directory=True, owner=PLANTER_SID)
 
     code, envelope = _launch(host)
 
@@ -1828,7 +1895,7 @@ def test_launch_refuses_a_lock_directory_another_account_owns(host: FakeUpgradeH
 
 @pytest.mark.parametrize("directory", LOCK_DIRS)
 def test_launch_refuses_a_lock_target_that_is_not_a_directory(host: FakeUpgradeHost, directory: str) -> None:
-    host.lock_targets[directory] = LockTarget(directory, (), False, ADMINS_SID)
+    host.lock_targets[directory] = LockTarget(path=directory, reparse_points=(), directory=False, owner=ADMINS_SID)
 
     code, envelope = _launch(host)
 
@@ -1848,7 +1915,7 @@ def test_launch_refuses_when_a_lock_directory_cannot_be_inspected(host: FakeUpgr
 def test_launch_accepts_directories_system_owns(host: FakeUpgradeHost) -> None:
     host.task_lines = [(30.0, "launching: D:\\upgrade\\setup.exe")]
     for directory in LOCK_DIRS:
-        host.lock_targets[directory] = LockTarget(directory, (), True, SYSTEM_SID)
+        host.lock_targets[directory] = LockTarget(path=directory, reparse_points=(), directory=True, owner=SYSTEM_SID)
 
     code, envelope = _launch(host)
 

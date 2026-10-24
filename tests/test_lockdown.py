@@ -41,7 +41,12 @@ MODIFY = 0x1301BF
 
 
 def _locked_dir(path: str = r"C:\winrepair", owner: str = ADMINS) -> AclReading:
-    return AclReading(path, owner, True, (Ace(SYSTEM, 0, INHERIT, FULL), Ace(ADMINS, 0, INHERIT, FULL)))
+    return AclReading(
+        path=path,
+        owner=owner,
+        protected=True,
+        aces=(Ace(sid=SYSTEM, kind=0, flags=INHERIT, mask=FULL), Ace(sid=ADMINS, kind=0, flags=INHERIT, mask=FULL)),
+    )
 
 
 # --- the pure checks ----------------------------------------------------------------------------
@@ -53,26 +58,35 @@ def test_a_locked_directory_has_no_problem() -> None:
 
 def test_an_authenticated_users_modify_ace_is_a_problem() -> None:
     # The Windows default a directory under a drive root inherits.
-    aces = (*(_locked_dir().aces or ()), Ace(USERS, 0, 0x1B, MODIFY))
-    reading = AclReading(r"D:\upgrade", ADMINS, False, aces)
+    aces = (*(_locked_dir().aces or ()), Ace(sid=USERS, kind=0, flags=0x1B, mask=MODIFY))
+    reading = AclReading(path=r"D:\upgrade", owner=ADMINS, protected=False, aces=aces)
     problems = lockdown.acl_problems(reading, trusted=TRUSTED, container=True)
     assert any(USERS in p for p in problems)
     assert any("inherits" in p for p in problems)
 
 
 def test_a_read_only_ace_for_others_is_no_problem() -> None:
-    reading = AclReading(r"D:\upgrade\setup.exe", RUNNER, False, (Ace(USERS, 0, 0x10, READ_EXECUTE),))
+    reading = AclReading(
+        path=r"D:\upgrade\setup.exe",
+        owner=RUNNER,
+        protected=False,
+        aces=(Ace(sid=USERS, kind=0, flags=0x10, mask=READ_EXECUTE),),
+    )
     assert lockdown.acl_problems(reading, trusted=TRUSTED, container=False) == ()
 
 
 @pytest.mark.parametrize("right", [0x2, 0x4, 0x40, 0x10000, 0x40000, 0x80000, 0x10000000, 0x40000000])
 def test_any_write_right_for_others_is_a_problem(right: int) -> None:
-    reading = AclReading(r"D:\upgrade\setup.exe", RUNNER, False, (Ace(USERS, 0, 0, right),))
+    reading = AclReading(
+        path=r"D:\upgrade\setup.exe", owner=RUNNER, protected=False, aces=(Ace(sid=USERS, kind=0, flags=0, mask=right),)
+    )
     assert lockdown.acl_problems(reading, trusted=TRUSTED, container=False) != ()
 
 
 def test_a_deny_ace_for_others_is_no_problem() -> None:
-    reading = AclReading(r"D:\upgrade\setup.exe", RUNNER, False, (Ace(USERS, 1, 0, FULL),))
+    reading = AclReading(
+        path=r"D:\upgrade\setup.exe", owner=RUNNER, protected=False, aces=(Ace(sid=USERS, kind=1, flags=0, mask=FULL),)
+    )
     assert lockdown.acl_problems(reading, trusted=TRUSTED, container=False) == ()
 
 
@@ -82,26 +96,28 @@ def test_an_untrusted_owner_is_a_problem_because_an_owner_can_rewrite_the_dacl()
 
 
 def test_a_null_dacl_is_a_problem() -> None:
-    problems = lockdown.acl_problems(AclReading("x", ADMINS, True, None), trusted=TRUSTED, container=False)
+    problems = lockdown.acl_problems(
+        AclReading(path="x", owner=ADMINS, protected=True, aces=None), trusted=TRUSTED, container=False
+    )
     assert any("NULL DACL" in p for p in problems)
 
 
 def test_an_unrecognised_ace_type_is_a_problem() -> None:
-    reading = AclReading("x", ADMINS, False, (Ace(SYSTEM, 9, 0, FULL),))
+    reading = AclReading(path="x", owner=ADMINS, protected=False, aces=(Ace(sid=SYSTEM, kind=9, flags=0, mask=FULL),))
     assert lockdown.acl_problems(reading, trusted=TRUSTED, container=False) != ()
 
 
 @pytest.mark.parametrize(
     "aces",
     [
-        (Ace(SYSTEM, 0, INHERIT, FULL),),
-        (Ace(SYSTEM, 0, INHERIT, FULL), Ace(ADMINS, 0, 0, FULL)),
-        (Ace(SYSTEM, 0, INHERIT, FULL), Ace(ADMINS, 0, INHERIT, READ_EXECUTE)),
+        (Ace(sid=SYSTEM, kind=0, flags=INHERIT, mask=FULL),),
+        (Ace(sid=SYSTEM, kind=0, flags=INHERIT, mask=FULL), Ace(sid=ADMINS, kind=0, flags=0, mask=FULL)),
+        (Ace(sid=SYSTEM, kind=0, flags=INHERIT, mask=FULL), Ace(sid=ADMINS, kind=0, flags=INHERIT, mask=READ_EXECUTE)),
     ],
     ids=["no-admins", "admins-not-inherited", "admins-not-full"],
 )
 def test_a_directory_must_grant_both_full_and_inheritable(aces: tuple[Ace, ...]) -> None:
-    reading = AclReading(r"C:\winrepair", ADMINS, True, aces)
+    reading = AclReading(path=r"C:\winrepair", owner=ADMINS, protected=True, aces=aces)
     assert lockdown.acl_problems(reading, trusted=TRUSTED, container=True) != ()
 
 
@@ -226,7 +242,7 @@ def test_a_followed_junction_would_have_looked_like_a_plain_directory() -> None:
 def test_inspect_lock_target_reads_the_directory_and_each_ancestor_without_following_links() -> None:
     files = FakeFiles({"D:\\": Node(REPARSE_DIR, ADMINS, target="E:\\")})
     target = lockdown.inspect_lock_target(FakeSecurity(), files, r"D:\upgrade")
-    assert target == LockTarget(r"D:\upgrade", ("D:\\",), True, ADMINS)
+    assert target == LockTarget(path=r"D:\upgrade", reparse_points=("D:\\",), directory=True, owner=ADMINS)
     assert [h.path for h in files.opened] == ["D:\\", r"D:\upgrade"]
     assert all(h.flags & OPEN_REPARSE_POINT and h.closed for h in files.opened)
 
@@ -234,7 +250,7 @@ def test_inspect_lock_target_reads_the_directory_and_each_ancestor_without_follo
 def test_inspect_lock_target_reports_a_junction_and_its_own_owner() -> None:
     files = FakeFiles({r"C:\winrepair": Node(REPARSE_DIR, PLANTER, target=r"C:\Windows")})
     target = lockdown.inspect_lock_target(FakeSecurity(), files, r"C:\winrepair")
-    assert target == LockTarget(r"C:\winrepair", (r"C:\winrepair",), True, PLANTER)
+    assert target == LockTarget(path=r"C:\winrepair", reparse_points=(r"C:\winrepair",), directory=True, owner=PLANTER)
 
 
 def test_inspect_lock_target_reports_an_unreadable_path_as_oserror() -> None:
@@ -245,11 +261,16 @@ def test_inspect_lock_target_reports_an_unreadable_path_as_oserror() -> None:
 
 def test_a_real_directory_owned_by_administrators_or_system_is_a_safe_lock_target() -> None:
     for owner in (ADMINS, SYSTEM):
-        assert lockdown.lock_target_problems(LockTarget(r"C:\winrepair", (), True, owner)) == ()
+        assert (
+            lockdown.lock_target_problems(
+                LockTarget(path=r"C:\winrepair", reparse_points=(), directory=True, owner=owner)
+            )
+            == ()
+        )
 
 
 def test_every_unsafe_property_of_a_lock_target_is_named() -> None:
-    target = LockTarget(r"D:\upgrade", ("D:\\", r"D:\upgrade"), False, RUNNER)
+    target = LockTarget(path=r"D:\upgrade", reparse_points=("D:\\", r"D:\upgrade"), directory=False, owner=RUNNER)
     problems = lockdown.lock_target_problems(target)
     assert problems == (
         r"D:\upgrade lies below a reparse point at D:\, so a lock could land on another tree",
@@ -267,7 +288,7 @@ def test_read_acl_reports_an_unreadable_path_as_oserror() -> None:
 def test_read_acl_reads_a_null_dacl_as_none() -> None:
     security = FakeSecurity()
     security.objects["x"] = descriptor(Sid(USERS), None, 0)
-    assert lockdown.read_acl(security, "x") == AclReading("x", USERS, False, None)
+    assert lockdown.read_acl(security, "x") == AclReading(path="x", owner=USERS, protected=False, aces=None)
 
 
 # --- the lock, exactly, and the tree below it ----------------------------------------
@@ -281,29 +302,71 @@ def test_a_directory_with_the_lock_reads_back_as_exactly_locked() -> None:
 @pytest.mark.parametrize(
     ("reading", "fragment"),
     [
-        (AclReading(r"D:\upgrade", ADMINS, False, _locked_dir().aces), "still inherits"),
+        (AclReading(path=r"D:\upgrade", owner=ADMINS, protected=False, aces=_locked_dir().aces), "still inherits"),
         (_locked_dir(owner=RUNNER), f"owned by {RUNNER}"),
-        (AclReading(r"D:\upgrade", ADMINS, True, None), "NULL DACL"),
+        (AclReading(path=r"D:\upgrade", owner=ADMINS, protected=True, aces=None), "NULL DACL"),
         # A read-only grant is harmless to acl_problems, but it is not the lock.
         (
-            AclReading(r"D:\upgrade", ADMINS, True, (*(_locked_dir().aces or ()), Ace(USERS, 0, 0, READ_EXECUTE))),
+            AclReading(
+                path=r"D:\upgrade",
+                owner=ADMINS,
+                protected=True,
+                aces=(*(_locked_dir().aces or ()), Ace(sid=USERS, kind=0, flags=0, mask=READ_EXECUTE)),
+            ),
             "carries 3 ACEs",
         ),
-        (AclReading(r"D:\upgrade", ADMINS, True, (Ace(SYSTEM, 0, INHERIT, FULL),)), "carries 1 ACE"),
         (
-            AclReading(r"D:\upgrade", ADMINS, True, (Ace(SYSTEM, 0, INHERIT, FULL), Ace(SYSTEM, 0, INHERIT, FULL))),
+            AclReading(
+                path=r"D:\upgrade",
+                owner=ADMINS,
+                protected=True,
+                aces=(Ace(sid=SYSTEM, kind=0, flags=INHERIT, mask=FULL),),
+            ),
+            "carries 1 ACE",
+        ),
+        (
+            AclReading(
+                path=r"D:\upgrade",
+                owner=ADMINS,
+                protected=True,
+                aces=(
+                    Ace(sid=SYSTEM, kind=0, flags=INHERIT, mask=FULL),
+                    Ace(sid=SYSTEM, kind=0, flags=INHERIT, mask=FULL),
+                ),
+            ),
             f"does not grant {ADMINS}",
         ),
         (
-            AclReading(r"D:\upgrade", ADMINS, True, (Ace(SYSTEM, 0, INHERIT, FULL), Ace(ADMINS, 0, 0x1, FULL))),
+            AclReading(
+                path=r"D:\upgrade",
+                owner=ADMINS,
+                protected=True,
+                aces=(Ace(sid=SYSTEM, kind=0, flags=INHERIT, mask=FULL), Ace(sid=ADMINS, kind=0, flags=0x1, mask=FULL)),
+            ),
             f"ACE for {ADMINS} is not",
         ),
         (
-            AclReading(r"D:\upgrade", ADMINS, True, (Ace(SYSTEM, 0, INHERIT, MODIFY), Ace(ADMINS, 0, INHERIT, FULL))),
+            AclReading(
+                path=r"D:\upgrade",
+                owner=ADMINS,
+                protected=True,
+                aces=(
+                    Ace(sid=SYSTEM, kind=0, flags=INHERIT, mask=MODIFY),
+                    Ace(sid=ADMINS, kind=0, flags=INHERIT, mask=FULL),
+                ),
+            ),
             f"ACE for {SYSTEM} is not",
         ),
         (
-            AclReading(r"D:\upgrade", ADMINS, True, (Ace(SYSTEM, 1, INHERIT, FULL), Ace(ADMINS, 0, INHERIT, FULL))),
+            AclReading(
+                path=r"D:\upgrade",
+                owner=ADMINS,
+                protected=True,
+                aces=(
+                    Ace(sid=SYSTEM, kind=1, flags=INHERIT, mask=FULL),
+                    Ace(sid=ADMINS, kind=0, flags=INHERIT, mask=FULL),
+                ),
+            ),
             f"ACE for {SYSTEM} is not",
         ),
     ],
