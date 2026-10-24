@@ -23,9 +23,11 @@ from guest_fakes import (
     KEY,
     NEEDS_A_POSIX_STATE_DIR,
     NO_LOG,
+    NODE_LINK,
     NODE_LOGGING,
     CliRun,
     FakePve,
+    FakeRunner,
     Reply,
     agent_runner,
     answer,
@@ -47,8 +49,6 @@ from pve_winrepair.domain.settings import RepairSettings
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-    from guest_fakes import FakeRunner
 
 #: The steps of a whole agent-path repair to STATE=DONE-OK, the receipt step included.
 DONE_OK_STEPS = [
@@ -509,3 +509,15 @@ def test_a_state_dir_below_an_unsearchable_directory_is_refused_naming_it(tmp_pa
     assert run.exit_code == 1
     assert f"cannot be a directory: {locked / 'state'} cannot be checked: Permission denied" in run.stderr
     assert runner.calls == []
+
+
+@NEEDS_A_POSIX_STATE_DIR
+@pytest.mark.xfail(strict=True, reason="wired in Task 1.5")
+def test_an_unusable_remote_node_is_refused_before_any_vm_call(tmp_path: Path) -> None:
+    config = cli_config(tmp_path)
+    config["node"] = {**config["node"], "host": "pve1", "ssh_key": "/keys/node.key"}
+    runner = FakeRunner().on("command", Reply(255, "", "Host key verification failed.\n"))
+    run = run_cli(["repair", "--vmid", "1", "--json"], config, runner)
+    assert run.exit_code == 1
+    assert "node root@pve1 is not usable: Host key verification failed." in run.stdout
+    assert runner.calls == [NODE_LINK.ssh_argv(["command", "-v", "qm"])]

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import subprocess
 from ipaddress import IPv4Address
 from typing import TYPE_CHECKING
 
+import pytest
 from guest_fakes import GUEST_IP, USER, FakeRunner, Reply, route
 
 from pve_winrepair.adapters.guest_ssh import ssh_options
@@ -125,3 +127,63 @@ def test_with_a_link_the_guest_is_reached_through_the_node() -> None:
 
 def test_the_fakes_route_a_remote_qm_call_as_qm() -> None:
     assert route(LINK.ssh_argv(["qm", "status", "1"])) == "qm"
+
+
+def test_the_fakes_route_a_remote_call_by_its_first_word() -> None:
+    assert route(LINK.ssh_argv(["command", "-v", "qm"])) == "command"
+
+
+def test_no_link_needs_no_preflight_call() -> None:
+    runner = FakeRunner()
+    assert Node(ssh=SSH, runner=runner).check_link() is None
+    assert runner.calls == []
+
+
+def test_a_usable_node_answers_the_preflight() -> None:
+    runner = FakeRunner().on("command", Reply(0, "/usr/sbin/qm\n"))
+    assert Node(ssh=SSH, link=LINK, runner=runner).check_link() is None
+    assert runner.calls == [LINK.ssh_argv(["command", "-v", "qm"])]
+
+
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        "Host key verification failed.",
+        "root@pve1: Permission denied (publickey).",
+        "ssh: connect to host pve1 port 22: Connection timed out",
+    ],
+)
+def test_a_link_failure_is_reported_in_ssh_s_own_words(stderr: str) -> None:
+    runner = FakeRunner().on("command", Reply(255, "", stderr + "\n"))
+    assert Node(ssh=SSH, link=LINK, runner=runner).check_link() == f"node root@pve1 is not usable: {stderr}"
+
+
+def test_ssh_s_last_line_is_the_reason_after_its_warnings() -> None:
+    stderr = (
+        "Warning: Permanently added 'pve1' (ED25519) to the list of known hosts.\n"
+        "root@pve1: Permission denied (publickey).\n"
+    )
+    runner = FakeRunner().on("command", Reply(255, "", stderr))
+    assert Node(ssh=SSH, link=LINK, runner=runner).check_link() == (
+        "node root@pve1 is not usable: root@pve1: Permission denied (publickey)."
+    )
+
+
+def test_an_ssh_that_cannot_start_is_reported() -> None:
+    runner = FakeRunner().on("command", FileNotFoundError(2, "No such file or directory", "ssh"))
+    reason = Node(ssh=SSH, link=LINK, runner=runner).check_link()
+    assert reason == "node root@pve1 is not usable: ssh could not start ([Errno 2] No such file or directory: 'ssh')"
+
+
+def test_a_host_without_qm_is_no_pve_node() -> None:
+    runner = FakeRunner().on("command", Reply(1))
+    assert (
+        Node(ssh=SSH, link=LINK, runner=runner).check_link()
+        == "node root@pve1 is not usable: no qm there (not a PVE node?)"
+    )
+
+
+def test_a_preflight_that_times_out_is_reported() -> None:
+    runner = FakeRunner().on("command", subprocess.TimeoutExpired(["ssh"], 30))
+    reason = Node(ssh=SSH, link=LINK, runner=runner).check_link()
+    assert reason is not None and reason.startswith("node root@pve1 is not usable: no answer within 30 s")

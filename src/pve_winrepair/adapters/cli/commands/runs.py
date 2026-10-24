@@ -18,6 +18,7 @@ Contents:
     * :class:`PreflightError` - a check before any call failed; the message names the setting or option.
     * :func:`load_run_settings` - the node CLI settings, or exit 78 naming every refused value.
     * :func:`check_node` - refuse an unconfigured ``[ssh] key`` or an unusable ``[node] state_dir``.
+    * :func:`check_link` - refuse a remote node that does not answer, refuses the key or has no ``qm``.
     * :func:`resolve_snapshot_name` - ``--snapshot-name`` validated as ``[repair] snapshot_name`` is.
     * :func:`refused` - the run result of a :class:`PreflightError`, shaped like the use cases' own.
     * :func:`echo_step` - one step on stderr.
@@ -46,6 +47,7 @@ if TYPE_CHECKING:
 
     import rich_click as click
 
+    from pve_winrepair.application.ports import NodePort
     from pve_winrepair.domain.settings import RepairSettings, Settings
 
     from ..context import CLIContext
@@ -54,6 +56,7 @@ __all__ = [
     "PreflightError",
     "RunCommand",
     "RunEnvelope",
+    "check_link",
     "check_node",
     "echo_step",
     "finish",
@@ -122,6 +125,18 @@ def check_node(settings: Settings) -> None:
     blocker = _not_a_directory(settings.node.state_dir)
     if blocker is not None:
         raise PreflightError(f"[node] state_dir {settings.node.state_dir} cannot be a directory: {blocker}")
+
+
+def check_link(node: NodePort) -> None:
+    """Refuse a remote node that cannot be used, before any call touches the VM.
+
+    Raises:
+        PreflightError: The linked node did not answer, refused the key or its host key, or has no
+            ``qm``; the message is :meth:`NodePort.check_link`'s reason. A node without a link passes.
+    """
+    reason = node.check_link()
+    if reason is not None:
+        raise PreflightError(reason)
 
 
 def _not_a_directory(path: Path) -> str | None:

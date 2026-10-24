@@ -12,6 +12,8 @@ text only here too, where ssh needs it as an argument.
 
 from __future__ import annotations
 
+# The preflight catches the runner's own timeout and failure to start, as subprocess.run raises them.
+import subprocess  # nosec B404
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -26,8 +28,6 @@ from pve_winrepair.domain.vm_config import (
 )
 
 if TYPE_CHECKING:
-    # qm runs through the runner; this module only names the finished process's type.
-    import subprocess  # nosec B404
     from collections.abc import Callable
     from ipaddress import IPv4Address
     from pathlib import Path
@@ -37,6 +37,9 @@ if TYPE_CHECKING:
     from pve_winrepair.domain.settings import SshSettings
 
 __all__ = ["Node", "run"]
+
+#: Seconds the preflight waits for the node; ssh's own ``ConnectTimeout`` (20 s) ends a dead connect first.
+_PREFLIGHT_TIMEOUT = 30
 
 
 @dataclass(frozen=True)
@@ -59,6 +62,26 @@ class Node:
         """Run ``qm`` on this node: here, or over ssh on the linked node."""
         argv = ["qm", *args] if self.link is None else self.link.ssh_argv(["qm", *args])
         return self.runner(argv, timeout)
+
+    def check_link(self) -> str | None:
+        """Why the linked node cannot be used, or None (also when there is no link).
+
+        One round trip proves the node answers, accepts the key, has a known host key, and has
+        ``qm``. Exit codes are not interpreted beyond 0 / 1: ssh's own text says what failed.
+        """
+        if self.link is None:
+            return None
+        prefix = f"node {self.link.target} is not usable"
+        try:
+            proc = self.runner(self.link.ssh_argv(["command", "-v", "qm"]), _PREFLIGHT_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            return f"{prefix}: no answer within {_PREFLIGHT_TIMEOUT} s"
+        except OSError as exc:
+            return f"{prefix}: ssh could not start ({exc})"
+        if proc.returncode == 0:
+            return None
+        lines = proc.stderr.strip().splitlines()
+        return f"{prefix}: {lines[-1]}" if lines else f"{prefix}: no qm there (not a PVE node?)"
 
     def vm_config(self, vmid: int) -> VmConfigRead:
         """``qm config <vmid>``: its exit code, the output a refusal quotes, and its stdout parsed."""

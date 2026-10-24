@@ -176,10 +176,14 @@ def crashed(command: str, error: BaseException) -> Reply:
 
 
 def route(cmd: Sequence[str]) -> str:
-    """The key a call is answered under: ``qm``, ``scp``, the tool subcommand, or the raw remote verb."""
+    """The key a call is answered under: ``qm``, ``scp``, the tool subcommand, or the raw remote verb.
+
+    A call to a remote node is answered under the first word of the command it runs there
+    (``qm``, or ``command`` for the preflight's ``command -v qm``).
+    """
     if cmd[0] == "ssh" and cmd[-2].startswith(f"{NODE_LINK.user}@"):
-        # qm on a remote node: the last word is the quoted command (NodeLink.ssh_argv).
-        return route(shlex.split(cmd[-1]))
+        # The last word is the quoted command (NodeLink.ssh_argv); the node runs no guest tool.
+        return shlex.split(cmd[-1])[0]
     if cmd[0] in ("qm", "scp"):
         return cmd[0]
     at = next(i for i, token in enumerate(cmd) if token.startswith(f"{USER}@"))

@@ -178,6 +178,10 @@ class NodePort(Protocol):
         """Run ``qm`` on this node."""
         ...
 
+    def check_link(self) -> str | None:
+        """Why the linked node cannot be used, or None (also when there is no link)."""
+        ...
+
     def vm_config(self, vmid: int) -> VmConfigRead:
         """``qm config <vmid>``, parsed; the exit code says whether the call succeeded."""
         ...
