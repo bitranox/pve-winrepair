@@ -14,13 +14,11 @@ exclude-newer-span = "P7D"
 [options.exclude-newer-package]
 certifi = "2026-10-20T02:24:17Z"
 fake-winreg = false
-filelock = "2026-10-17T16:48:15Z"
 lib-cli-exit-tools = false
 lib-layered-config = false
 lib-log-rich = false
 lib-registry = false
 pwshpy = false
-virtualenv = "2026-10-17T17:31:56Z"
 
 [[package]]
 name = "annotated-types"
