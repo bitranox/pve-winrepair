@@ -16,8 +16,10 @@ from guest_fakes import (
     GONE,
     GUEST_IP,
     NEEDS_A_POSIX_STATE_DIR,
+    NODE_LINK,
     RECEIPT,
     FakePve,
+    FakeRunner,
     Reply,
     answer,
     apply_runner,
@@ -32,8 +34,6 @@ from pve_winrepair.domain.envelope import WU_HELD_HINT
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-    from guest_fakes import FakeRunner
 
 APPLY = ["apply", "--vmid", "1", "--ip", GUEST_IP]
 
@@ -160,3 +160,36 @@ def test_apply_driver_tool_mismatch_exits_2_with_empty_stdout(tmp_path: Path) ->
     run = run_cli(APPLY, _with_receipt(tmp_path), runner)
     assert (run.exit_code, run.stdout) == (2, "")
     assert "[FAIL] internal" in run.stderr
+
+
+@NEEDS_A_POSIX_STATE_DIR
+def test_apply_on_an_unusable_remote_node_is_refused_before_any_vm_call(tmp_path: Path) -> None:
+    config = _with_receipt(tmp_path)
+    config["node"] = {**config["node"], "ssh_key": "/keys/node.key"}
+    runner = FakeRunner().on("command", Reply(255, "", "Host key verification failed.\n"))
+    run = run_cli([*APPLY, "--json", "--node", "pve1"], config, runner)
+    envelope = json_envelope(run.stdout)
+    assert (run.exit_code, envelope["verdict"]) == (1, "ERROR")
+    assert "node root@pve1 is not usable: Host key verification failed." in str(envelope_steps(envelope)[-1]["message"])
+    assert runner.calls == [NODE_LINK.ssh_argv(["command", "-v", "qm"])]
+
+
+def test_apply_with_a_node_option_ssh_could_read_as_an_option_is_a_usage_error(tmp_path: Path) -> None:
+    runner = FakeRunner()
+    run = run_cli([*APPLY, "--node=-oX"], cli_config(tmp_path), runner)
+    assert run.exit_code == 2
+    assert "Invalid value for '--node'" in run.stderr
+    assert runner.calls == []
+
+
+@NEEDS_A_POSIX_STATE_DIR
+def test_apply_with_the_node_option_runs_every_qm_call_on_that_node(tmp_path: Path) -> None:
+    config = _with_receipt(tmp_path)
+    config["node"] = {**config["node"], "ssh_key": NODE_LINK.key}
+    runner = _runner().on("command", Reply(0, "/usr/sbin/qm\n", ""))
+    run = run_cli([*APPLY, "--json", "--node", NODE_LINK.host], config, runner)
+    assert (run.exit_code, json_envelope(run.stdout)["verdict"]) == (0, "VERIFIED")
+    remote = [call for call in runner.calls if call[0] == "ssh" and call[-2] == NODE_LINK.target]
+    assert remote[0] == NODE_LINK.ssh_argv(["command", "-v", "qm"])
+    assert len(remote) > 1
+    assert not any(call[0] == "qm" for call in runner.calls)

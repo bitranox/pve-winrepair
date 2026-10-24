@@ -51,15 +51,15 @@ moves or removes a module, a CLI option or a public name.
   - `config_load.py`  -  Configuration load for the CLI; records a load failure, `require_config` refuses with exit 78, `check_logging` checks the logging settings of a configuration reloaded by `config --profile`, refusing them as the root does
   - `root.py`  -  Root command group
   - `main.py`  -  Entry point
-  - `param_types.py`  -  Click parameter types of the run options: `PositiveFiniteFloat` (`--hours`, `--apply-minutes`), `StorageId` (`--tpm-storage`), `Ipv4Address` (`--ip`, an `IPv4Address`), `WindowsDrive` (`--stage-root`, a `DriveLetter`)
+  - `param_types.py`  -  Click parameter types of the run options: `PositiveFiniteFloat` (`--hours`, `--apply-minutes`), `StorageId` (`--tpm-storage`), `NodeHost` (`--node`, held to `[node] host`'s rule, empty refused), `Ipv4Address` (`--ip`, an `IPv4Address`), `WindowsDrive` (`--stage-root`, a `DriveLetter`)
   - `typed_click.py`  -  Strictly typed wrappers for rich_click's `option`, `version_option` and `get_current_context`
   - `commands/__init__.py`  -  Re-exports every command (`cli_repair`, `cli_apply`, `cli_guest_tool`, `cli_config`, ...)
   - `commands/info.py`  -  info command
   - `commands/config.py`  -  config, config-deploy, config-generate-examples commands
-  - `commands/repair.py`  -  `repair --vmid N [--stage-only] [--snapshot-name S] [--hours H] [--ip IP] [--stage-root X:] [--tpm-storage S] [--json]`; `--snapshot-name` defaults to `[repair] snapshot_name` and is validated by its rule
-  - `commands/apply.py`  -  `apply --vmid N --ip IP [--apply-minutes M] [--json]`
+  - `commands/repair.py`  -  `repair --vmid N [--stage-only] [--snapshot-name S] [--hours H] [--ip IP] [--node HOST] [--stage-root X:] [--tpm-storage S] [--json]`; `--snapshot-name` defaults to `[repair] snapshot_name` and is validated by its rule
+  - `commands/apply.py`  -  `apply --vmid N --ip IP [--node HOST] [--apply-minutes M] [--json]`
   - `commands/guest_tool.py`  -  `guest-tool path` (the packed tool) and `guest-tool sha256` (`<sha256>  <content address>`); neither reads the configuration
-  - `commands/runs.py`  -  What `repair` and `apply` share: settings (exit 78), the checks before any call (`[ssh] key` set, `[node] state_dir` a directory or creatable as one, a remote node usable (`check_link`); exit 1), steps and progress lines on stderr, the `--json` envelope `{ok, command, vmid, verdict, steps}` (a `RunEnvelope` for a `RunCommand`) or `vm <vmid>: <verdict>` on stdout; exit 0 OK, 1 refused, 2 internal
+  - `commands/runs.py`  -  What `repair` and `apply` share: settings (exit 78), the checks before any call (`[ssh] key` set, `[node] state_dir` a directory or creatable as one, the remote node `--node` or `[node] host` names (`resolve_link`: `[node] ssh_key` set) usable (`check_link`); exit 1), steps and progress lines on stderr, the `--json` envelope `{ok, command, vmid, verdict, steps}` (a `RunEnvelope` for a `RunCommand`) or `vm <vmid>: <verdict>` on stdout; exit 0 OK, 1 refused, 2 internal
 
 ### Adapters Layer (In-Memory / Testing)
 - `src/pve_winrepair/adapters/memory/__init__.py`  -  Public facade + Protocol conformance assertions
@@ -297,11 +297,12 @@ Repair one guest by an in-place repair upgrade (`application/repair.py`).
 
 | Option              | Description                                                                                           |
 |---------------------|-------------------------------------------------------------------------------------------------------|
-| `--vmid N`          | The guest's VMID on this node  -  required, at least 1                                                |
+| `--vmid N`          | The guest's VMID on the node  -  required, at least 1                                                 |
 | `--snapshot-name S` | Snapshot to take (default `[repair] snapshot_name`, validated by its rule)                            |
 | `--hours H`         | Polling deadline in hours, a finite number above 0 (default 6.0)                                      |
 | `--stage-only`      | Stage the media and hold Windows Update, but neither gate the WIM nor launch setup (verdict `STAGED`) |
 | `--ip IP`           | Guest IPv4 address for a guest without QEMU agent; implies the offline snapshot; MAC-checked          |
+| `--node HOST`       | PVE node to drive over ssh, guests reached through it (default `[node] host`; empty: this machine)    |
 | `--stage-root X:`   | Drive to stage on (default: a non-system fixed drive with room, else `C:`)                            |
 | `--tpm-storage S`   | PVE storage ID for a new vTPM volume (default: the storage of the guest's disk)                       |
 | `--json`            | Print the envelope `{ok, command, vmid, verdict, steps}` instead of the verdict line                  |
@@ -314,8 +315,9 @@ Apply the upgrade a repair staged and verify the build its receipt recorded (`ap
 
 | Option              | Description                                                              |
 |---------------------|--------------------------------------------------------------------------|
-| `--vmid N`          | The guest's VMID on this node  -  required, at least 1                   |
+| `--vmid N`          | The guest's VMID on the node  -  required, at least 1                    |
 | `--ip IP`           | The guest's IPv4 address  -  required; MAC-checked against `qm config`   |
+| `--node HOST`       | PVE node to drive over ssh (default `[node] host`; empty: this machine)  |
 | `--apply-minutes M` | Apply phase limit before overrun, a finite number above 0 (default 90.0) |
 | `--json`            | Print the envelope instead of the verdict line                           |
 

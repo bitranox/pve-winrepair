@@ -104,7 +104,7 @@ class RepairRequest:
     """One repair run: the guest, its snapshot, the poll deadline and the operator's overrides.
 
     Attributes:
-        vmid: The guest's VMID on this node.
+        vmid: The guest's VMID on the node.
         snapshot_name: The snapshot taken before the media are staged; one that exists is reused.
             A missing vTPM is added before it, and on a running guest reached through the agent the
             Windows Update hold (plus the servicing wait) comes before it too.

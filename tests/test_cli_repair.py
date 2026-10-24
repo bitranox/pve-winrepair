@@ -41,11 +41,12 @@ from guest_fakes import (
 )
 from lib_layered_config import Config
 
-from pve_winrepair.adapters.cli.commands.runs import PreflightError, resolve_snapshot_name
+from pve_winrepair.adapters.cli.commands.runs import PreflightError, resolve_link, resolve_snapshot_name
 from pve_winrepair.adapters.cli.main import main
 from pve_winrepair.composition import AppServices, build_testing
 from pve_winrepair.domain.envelope import WU_HELD_HINT
-from pve_winrepair.domain.settings import RepairSettings
+from pve_winrepair.domain.node_link import NodeLink
+from pve_winrepair.domain.settings import NodeSettings, RepairSettings, Settings
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -512,7 +513,6 @@ def test_a_state_dir_below_an_unsearchable_directory_is_refused_naming_it(tmp_pa
 
 
 @NEEDS_A_POSIX_STATE_DIR
-@pytest.mark.xfail(strict=True, reason="wired in Task 1.5")
 def test_an_unusable_remote_node_is_refused_before_any_vm_call(tmp_path: Path) -> None:
     config = cli_config(tmp_path)
     config["node"] = {**config["node"], "host": "pve1", "ssh_key": "/keys/node.key"}
@@ -521,3 +521,65 @@ def test_an_unusable_remote_node_is_refused_before_any_vm_call(tmp_path: Path) -
     assert run.exit_code == 1
     assert "node root@pve1 is not usable: Host key verification failed." in run.stdout
     assert runner.calls == [NODE_LINK.ssh_argv(["command", "-v", "qm"])]
+
+
+@NEEDS_A_POSIX_STATE_DIR
+def test_the_node_option_names_the_node_the_run_drives(tmp_path: Path) -> None:
+    config = cli_config(tmp_path)
+    config["node"] = {**config["node"], "host": "pve9", "ssh_key": "/keys/node.key"}
+    runner = FakeRunner().on("command", Reply(255, "", "Host key verification failed.\n"))
+    run = run_cli(["repair", "--vmid", "1", "--json", "--node", "pve1"], config, runner)
+    assert run.exit_code == 1
+    assert "node root@pve1 is not usable: Host key verification failed." in run.stdout
+    assert runner.calls == [NODE_LINK.ssh_argv(["command", "-v", "qm"])]
+
+
+def test_no_node_host_anywhere_means_this_machine() -> None:
+    assert resolve_link(Settings(), None) is None
+
+
+def test_the_node_host_setting_builds_the_link_with_the_node_user_and_key() -> None:
+    settings = Settings(node=NodeSettings(host="pve1", ssh_user="admin1", ssh_key="/k"))
+    assert resolve_link(settings, None) == NodeLink(host="pve1", user="admin1", key="/k")
+
+
+def test_the_node_option_overrides_the_setting() -> None:
+    settings = Settings(node=NodeSettings(host="pve1", ssh_key="/k"))
+    assert resolve_link(settings, "pve2") == NodeLink(host="pve2", user="root", key="/k")
+
+
+def test_a_node_without_a_node_key_is_refused_by_name() -> None:
+    with pytest.raises(PreflightError, match=r"^\[node\] ssh_key is not configured: "):
+        resolve_link(Settings(), "pve1")
+
+
+def test_a_node_option_ssh_could_read_as_an_option_is_a_usage_error(tmp_path: Path) -> None:
+    runner = FakeRunner()
+    run = run_cli(["repair", "--vmid", "1", "--node=-oX"], cli_config(tmp_path), runner)
+    assert run.exit_code == 2
+    assert "--node" in run.stderr
+    assert runner.calls == []
+
+
+@NEEDS_A_POSIX_STATE_DIR
+def test_repair_with_the_node_option_runs_every_qm_call_on_that_node(tmp_path: Path) -> None:
+    config = cli_config(tmp_path)
+    config["node"] = {**config["node"], "ssh_key": NODE_LINK.key}
+    runner = agent_runner(FakePve()).on("command", Reply(0, "/usr/sbin/qm\n", ""))
+    run = run_cli(["repair", "--vmid", "1", "--json", "--node", NODE_LINK.host], config, runner)
+    assert (run.exit_code, json_envelope(run.stdout)["verdict"]) == (0, "STATE=DONE-OK")
+    remote = [call for call in runner.calls if call[0] == "ssh" and call[-2] == NODE_LINK.target]
+    assert remote[0] == NODE_LINK.ssh_argv(["command", "-v", "qm"])
+    assert any(call[-1].startswith("qm snapshot 1 ") for call in remote)
+    assert not any(call[0] == "qm" for call in runner.calls)
+
+
+@NEEDS_A_POSIX_STATE_DIR
+def test_a_bad_snapshot_name_is_refused_before_the_remote_node_is_called(tmp_path: Path) -> None:
+    config = cli_config(tmp_path)
+    config["node"] = {**config["node"], "ssh_key": NODE_LINK.key}
+    runner = FakeRunner()
+    run = run_cli(["repair", "--vmid", "1", "--snapshot-name", "1x", "--node", NODE_LINK.host], config, runner)
+    assert run.exit_code == 1
+    assert "--snapshot-name: String should match pattern " in run.stderr
+    assert runner.calls == []

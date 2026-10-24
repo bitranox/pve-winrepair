@@ -21,6 +21,7 @@ from guest_fakes import (
     MUTATING_QM,
     NEWOS,
     NO_LOG,
+    NODE_LINK,
     PROFILE_ACL,
     RECEIPT,
     TOOL_DIR,
@@ -59,6 +60,8 @@ from pve_winrepair_guest.wu import SearchProbe, SearchStatus
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
+
+    from pve_winrepair.domain.node_link import NodeLink
 
 
 def _wire(steps: Sequence[Step]) -> list[dict[str, object]]:
@@ -390,17 +393,20 @@ def _runs(call: list[str]) -> str:
     return call[call.index("-File") + 1]
 
 
-def _applied(runner: FakeRunner) -> tuple[str | None, list[dict[str, object]]]:
+def _applied(runner: FakeRunner, link: NodeLink | None = None) -> tuple[str | None, list[dict[str, object]]]:
     rep = Report(vmid=1)
     try:
-        return apply.apply_sequence(REQUEST, make_node(runner), rep, receipt=RECEIPT), _wire(rep.steps)
+        return apply.apply_sequence(REQUEST, make_node(runner, link=link), rep, receipt=RECEIPT), _wire(rep.steps)
     except ApplyError:
         return None, _wire(rep.steps)
 
 
-def test_after_the_apply_reboot_build_and_restore_wu_run_from_the_verified_profile_copy() -> None:
+@pytest.mark.parametrize("link", [None, NODE_LINK], ids=["this-node", "remote-node"])
+def test_after_the_apply_reboot_build_and_restore_wu_run_from_the_verified_profile_copy(
+    link: NodeLink | None,
+) -> None:
     runner = apply_runner(FakePve(), GONE, DONE_OK)
-    verdict, steps = _applied(runner)
+    verdict, steps = _applied(runner, link)
     after = _after_reboot(runner)
     assert verdict == "VERIFIED"
     assert [route(call) for call in after] == [

@@ -3,11 +3,13 @@
 A value refused here exits 2 before any node or guest call, naming the option, instead of failing
 deep inside a run: ``--hours 0`` would end the poll at once with TIMEOUT, a ``--tpm-storage`` is
 interpolated into ``qm set -tpmstate0 <storage>:1,...``, ``--ip`` names the guest every call goes to,
-and the stage root built from ``--stage-root`` is a raw argument to cmd.exe on the guest.
+the stage root built from ``--stage-root`` is a raw argument to cmd.exe on the guest, and ``--node``
+becomes the host word of every ssh call to the node.
 
 Contents:
     * :class:`PositiveFiniteFloat` - a float above zero that is neither NaN nor infinite.
     * :class:`StorageId` - a PVE storage ID.
+    * :class:`NodeHost` - a PVE node's host name or IPv4 address.
     * :class:`Ipv4Address` - a dotted-quad IPv4 address.
     * :class:`WindowsDrive` - a Windows drive letter, as a :class:`~pve_winrepair.domain.enums.DriveLetter`.
 """
@@ -22,16 +24,19 @@ from typing import TYPE_CHECKING
 import rich_click as click
 
 from pve_winrepair.domain.enums import DriveLetter
+from pve_winrepair.domain.settings import NODE_HOST_PATTERN
 
 if TYPE_CHECKING:
     from typing import Any
 
-__all__ = ["Ipv4Address", "PositiveFiniteFloat", "StorageId", "WindowsDrive"]
+__all__ = ["Ipv4Address", "NodeHost", "PositiveFiniteFloat", "StorageId", "WindowsDrive"]
 
 # PVE's own rule for a storage ID (pve-storage-id, PVE::JSONSchema parse_storage_id): a letter, then
 # letters, digits, "-", "_" or ".", ending in a letter or a digit, case-insensitive. ASCII ranges
 # only: re's IGNORECASE alone would also fold non-ASCII letters into [a-z].
 _STORAGE_ID = re.compile(r"[a-z][a-z0-9_.-]*[a-z0-9]", re.IGNORECASE | re.ASCII)
+# The rule [node] host is held to, so the option and the setting accept the same hosts.
+_NODE_HOST = re.compile(NODE_HOST_PATTERN)
 
 
 class PositiveFiniteFloat(click.FloatRange):
@@ -65,6 +70,21 @@ class StorageId(click.ParamType[str, str]):
                 param,
                 ctx,
             )
+        return value
+
+
+class NodeHost(click.ParamType[str, str]):
+    """A PVE node's host name or IPv4 address, as ``--node`` takes it."""
+
+    name = "host"
+
+    def convert(self, value: str, param: click.Parameter | None, ctx: click.Context | None) -> str:
+        """The value unchanged, refused unless ssh can only read it as a host.
+
+        The empty string ``[node] host`` allows (no remote node) is refused: an option given names a node.
+        """
+        if not value or not _NODE_HOST.fullmatch(value):
+            self.fail(f"{value!r} is not a host name or IPv4 address.", param, ctx)
         return value
 
 

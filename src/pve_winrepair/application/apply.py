@@ -106,7 +106,7 @@ class ApplyRequest:
     """One apply run: the guest and how long its apply phase may take.
 
     Attributes:
-        vmid: The guest's VMID on this node.
+        vmid: The guest's VMID on the node.
         ip: The guest's address.
         apply_minutes: How long the apply phase may take before it is reported as overrun.
     """

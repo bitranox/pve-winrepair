@@ -1,9 +1,9 @@
-"""``pve-winrepair repair``: run an in-place repair upgrade of one guest on this node.
+"""``pve-winrepair repair``: run an in-place repair upgrade of one guest on this node or the one ``--node`` names.
 
-Thin: it reads the settings, refuses what :mod:`.runs` checks before any call, builds the
-:class:`~pve_winrepair.application.repair.RepairRequest`, runs the use case on the composition's node
-and receipt store, and prints the result (exit 0 repaired or staged, 1 refused, 2 internal; 78 when
-the configuration does not load or validate).
+Thin: it reads the settings, refuses what :mod:`.runs` checks before any call (a remote node that
+cannot be used included), builds the :class:`~pve_winrepair.application.repair.RepairRequest`, runs
+the use case on the composition's node and receipt store, and prints the result (exit 0 repaired or
+staged, 1 refused, 2 internal; 78 when the configuration does not load or validate).
 
 Contents:
     * :func:`cli_repair` - the ``repair`` command.
@@ -20,16 +20,18 @@ from pve_winrepair.application.repair import RepairRequest, run_repair
 
 from ..constants import CLICK_CONTEXT_SETTINGS
 from ..context import get_cli_context
-from ..param_types import Ipv4Address, PositiveFiniteFloat, StorageId, WindowsDrive
+from ..param_types import Ipv4Address, NodeHost, PositiveFiniteFloat, StorageId, WindowsDrive
 from ..typed_click import option
 from .runs import (
     PreflightError,
     RunCommand,
+    check_link,
     check_node,
     echo_step,
     finish,
     load_run_settings,
     refused,
+    resolve_link,
     resolve_snapshot_name,
 )
 
@@ -42,7 +44,7 @@ __all__ = ["cli_repair"]
 
 
 @click.command("repair", context_settings=CLICK_CONTEXT_SETTINGS)
-@option("--vmid", type=click.IntRange(min=1), required=True, help="The guest's VMID on this node.")
+@option("--vmid", type=click.IntRange(min=1), required=True, help="The guest's VMID on the node.")
 @option(
     "--snapshot-name",
     default=None,
@@ -70,6 +72,12 @@ __all__ = ["cli_repair"]
     ),
 )
 @option(
+    "--node",
+    type=NodeHost(),
+    default=None,
+    help="PVE node to drive over ssh, guests reached through it. Default: [node] host; empty: this machine.",
+)
+@option(
     "--stage-root",
     type=WindowsDrive(),
     default=None,
@@ -91,6 +99,7 @@ def cli_repair(
     as_json: bool,
     stage_only: bool,
     ip: IPv4Address | None,
+    node: str | None,
     stage_root: DriveLetter | None,
     tpm_storage: str | None,
 ) -> None:
@@ -116,11 +125,14 @@ def cli_repair(
                 stage_root=stage_root,
                 tpm_storage=tpm_storage,
             )
+            # Last: the link check is the one check that calls out (one round trip to a remote node).
+            node_port = cli_ctx.services.make_node(settings.ssh, resolve_link(settings, node))
+            check_link(node_port)
         except PreflightError as refusal:
             finish(ctx, refused(vmid, refusal, wu_held=False), command=RunCommand.REPAIR, vmid=vmid, as_json=as_json)
         result = run_repair(
             request,
-            cli_ctx.services.make_node(settings.ssh, None),
+            node_port,
             repair=settings.repair,
             guest=settings.guest,
             receipts=cli_ctx.services.make_receipts(settings.node.state_dir),

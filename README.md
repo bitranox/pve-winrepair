@@ -178,18 +178,20 @@ SECTION.KEY=VALUE` (repeatable), `--env-file PATH`, `--traceback` / `--no-traceb
 
 | Option              | Default                  | Meaning                                                                                             |
 |---------------------|--------------------------|-----------------------------------------------------------------------------------------------------|
-| `--vmid N`          | required                 | The guest's VMID on this node                                                                       |
+| `--vmid N`          | required                 | The guest's VMID on the node                                                                        |
 | `--snapshot-name S` | `[repair] snapshot_name` | The snapshot to take; an existing snapshot of that name is reused                                   |
 | `--hours H`         | `6.0`                    | How long to poll for the verdict; a finite number above 0                                           |
 | `--stage-only`      | off                      | Stage the media and hold Windows Update, but neither gate the WIM nor launch setup (verdict STAGED) |
 | `--ip IP`           | from the agent           | The guest's IPv4 address, for a guest without the QEMU agent; implies the powered-off snapshot      |
+| `--node HOST`       | `[node] host`            | The PVE node to drive over ssh, the guests reached through it; with neither, this machine           |
 | `--stage-root X:`   | measured                 | The drive to stage on; by default a non-system fixed drive with room, else `C:`                     |
 | `--tpm-storage S`   | the guest disk's storage | The PVE storage ID for a new vTPM volume                                                            |
 | `--json`            | off                      | Print a JSON envelope on stdout                                                                     |
 
-`apply` takes `--vmid N` and `--ip IP` (both required), `--apply-minutes M` (default `90.0`: how long
-the apply phase may take before it counts as overrun; a finite number above 0) and `--json`. A value
-these options refuse is a usage error (exit 2) before any call.
+`apply` takes `--vmid N` and `--ip IP` (both required), `--node HOST` (as for `repair`),
+`--apply-minutes M` (default `90.0`: how long the apply phase may take before it counts as overrun;
+a finite number above 0) and `--json`. A value these options refuse is a usage error (exit 2) before
+any call.
 
 Both commands print each step on stderr as it happens. stdout carries only the result: one line
 `vm <vmid>: <verdict>`, or with `--json` an envelope like this one:
@@ -229,6 +231,9 @@ every key, the other layers and the environment overrides.
 | `[repair] stage_free_gb`         | `15.0`                     | Free GiB the staging drive needs                       |
 | `[repair] system_free_gb`        | `25.0`                     | Free GiB `C:` needs                                    |
 | `[node] state_dir`               | `"/var/lib/pve-winrepair"` | Where the repair receipts are kept                     |
+| `[node] host`                    | `""`                       | PVE node to drive over ssh; empty: this machine        |
+| `[node] ssh_user`                | `"root"`                   | Account this machine logs in as on the node            |
+| `[node] ssh_key`                 | `""`                       | Private key for the node (required with a node host)   |
 
 Any key can be overridden for one run with `PVE_WINREPAIR___<SECTION>__<KEY>`. The usual case is a
 guest that refuses the configured key:

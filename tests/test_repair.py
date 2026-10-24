@@ -24,6 +24,7 @@ from guest_fakes import (
     MUTATING_QM,
     NIC_MACS,
     NO_LOG,
+    NODE_LINK,
     TOOL_DIR,
     TOOL_PATH,
     USER,
@@ -46,6 +47,7 @@ from guest_fakes import (
     make_node,
     prepare_report,
     quiesce_report,
+    route,
     servicing_report,
     state_log,
     tool_on_the_guest,
@@ -73,6 +75,8 @@ from pve_winrepair_guest.upgrade import LaunchReport, LockDirsReport, LockDirsVe
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
     from pathlib import Path
+
+    from pve_winrepair.domain.node_link import NodeLink
 
 
 def _repair_settings(media: Path) -> RepairSettings:
@@ -807,16 +811,18 @@ def _run(
     hours: float = 6.0,
     stage_only: bool = False,
     receipts: FileReceiptStore | None = None,
+    link: NodeLink | None = None,
 ) -> tuple[RunResult, list[dict[str, object]]]:
     """Run the whole repair (not stage-only by default) on a fake node; return the result and its steps.
 
-    The receipts go to ``receipts``, by default a state directory beside ``media``.
+    The receipts go to ``receipts``, by default a state directory beside ``media``; ``link`` makes the
+    node a remote one (default: this machine).
     """
     address = None if ip is None else IPv4Address(ip)
     request = RepairRequest(vmid=1, snapshot_name="pre_kb_test", hours=hours, ip=address, stage_only=stage_only)
     result = run_repair(
         request,
-        make_node(runner, FakeClock()),
+        make_node(runner, FakeClock(), link=link),
         repair=_repair_settings(media),
         guest=GUEST,
         receipts=receipts or FileReceiptStore(media.parent / "state"),
@@ -833,14 +839,20 @@ def _media(tmp_path: Path) -> Path:
     return media
 
 
-def test_main_runs_the_whole_agent_path_to_done_ok(tmp_path: Path) -> None:
-    result, steps = _run(agent_runner(FakePve()), _media(tmp_path))
+@pytest.mark.parametrize("link", [None, NODE_LINK], ids=["this-node", "remote-node"])
+def test_main_runs_the_whole_agent_path_to_done_ok(tmp_path: Path, link: NodeLink | None) -> None:
+    runner = agent_runner(FakePve())
+    result, steps = _run(runner, _media(tmp_path), link=link)
     assert (result.exit, result.verdict) == (RunExit.OK, "STATE=DONE-OK")
     assert [s["step"] for s in steps] == [
         "running", "push_tool", "no_live_run", "quiesce_wu", "servicing_idle", "vtpm", "running",
         "snapshot", "push_tool", "no_live_run", "stage_root", "lock_dirs", "stage_media", "quiesce_wu",
         "prepare", "build_before", "receipt", "launch", "poll",
     ]  # fmt: skip
+    if link is not None:
+        assert all(call[0] == "ssh" for call in runner.calls if route(call) == "qm")
+        proxy = ["-o", f"ProxyCommand={link.proxy_command()}"]
+        assert all(call[1:3] == proxy for call in runner.calls if route(call) != "qm")
 
 
 def test_the_snapshot_step_reports_whether_pve_froze_the_guest_filesystem(tmp_path: Path) -> None:

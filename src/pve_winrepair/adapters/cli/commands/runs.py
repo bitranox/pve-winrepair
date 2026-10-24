@@ -18,6 +18,7 @@ Contents:
     * :class:`PreflightError` - a check before any call failed; the message names the setting or option.
     * :func:`load_run_settings` - the node CLI settings, or exit 78 naming every refused value.
     * :func:`check_node` - refuse an unconfigured ``[ssh] key`` or an unusable ``[node] state_dir``.
+    * :func:`resolve_link` - the link to the node ``--node`` or ``[node] host`` names, or None for this machine.
     * :func:`check_link` - refuse a remote node that does not answer, refuses the key or has no ``qm``.
     * :func:`resolve_snapshot_name` - ``--snapshot-name`` validated as ``[repair] snapshot_name`` is.
     * :func:`refused` - the run result of a :class:`PreflightError`, shaped like the use cases' own.
@@ -35,6 +36,7 @@ from typing import TYPE_CHECKING, NoReturn
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 
 from pve_winrepair.adapters.config.settings import SettingsError
+from pve_winrepair.domain.node_link import NodeLink
 from pve_winrepair.domain.report import Report, RunExit, RunResult, RunVerdict, Step, StepName
 from pve_winrepair.domain.settings import SnapshotName
 
@@ -62,6 +64,7 @@ __all__ = [
     "finish",
     "load_run_settings",
     "refused",
+    "resolve_link",
     "resolve_snapshot_name",
 ]
 
@@ -125,6 +128,26 @@ def check_node(settings: Settings) -> None:
     blocker = _not_a_directory(settings.node.state_dir)
     if blocker is not None:
         raise PreflightError(f"[node] state_dir {settings.node.state_dir} cannot be a directory: {blocker}")
+
+
+def resolve_link(settings: Settings, node_host: str | None) -> NodeLink | None:
+    """The link to the node ``--node`` or ``[node] host`` names; None when neither does (this machine is the node).
+
+    Args:
+        settings: The loaded settings; ``[node] ssh_user`` and ``ssh_key`` log in to the node.
+        node_host: ``--node``, which overrides ``[node] host``; None when the option was not given.
+
+    Raises:
+        PreflightError: A node is named but ``[node] ssh_key`` is empty.
+    """
+    host = settings.node.host if node_host is None else node_host
+    if not host:
+        return None
+    if not settings.node.ssh_key:
+        raise PreflightError(
+            "[node] ssh_key is not configured: set it to the private key this machine logs in to the node with"
+        )
+    return NodeLink(host=host, user=settings.node.ssh_user, key=settings.node.ssh_key)
 
 
 def check_link(node: NodePort) -> None:
