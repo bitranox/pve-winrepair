@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import ntpath
+from ipaddress import IPv4Address
 from typing import TYPE_CHECKING
 
 import pytest
@@ -56,7 +57,13 @@ from pve_winrepair_guest.upgrade import DirectoryLock, LockDirsReport
 from pve_winrepair_guest.wu import SearchProbe, SearchStatus
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from pathlib import Path
+
+
+def _wire(steps: Sequence[Step]) -> list[dict[str, object]]:
+    """The steps as the --json envelope carries them."""
+    return [step.model_dump() for step in steps]
 
 
 # --- build ----------------------------------------------------------------------------------
@@ -109,7 +116,7 @@ def test_gate_staged_present_is_rearmable() -> None:
     )
     rep = Report(vmid=1)
     apply.gate_staged(make_guest(runner), rep)
-    assert rep.steps == [{"step": "gate_staged", "ok": True, "verdict": "REARMABLE"}]
+    assert _wire(rep.steps) == [{"step": "gate_staged", "ok": True, "verdict": "REARMABLE"}]
 
 
 def test_gate_staged_absent_refuses_to_reboot() -> None:
@@ -119,7 +126,7 @@ def test_gate_staged_absent_refuses_to_reboot() -> None:
     rep = Report(vmid=1)
     with pytest.raises(ApplyError, match="NewOS is absent"):
         apply.gate_staged(make_guest(runner), rep)
-    assert rep.steps == [{"step": "gate_staged", "ok": False, "verdict": "RERUN"}]
+    assert _wire(rep.steps) == [{"step": "gate_staged", "ok": False, "verdict": "RERUN"}]
 
 
 @pytest.mark.parametrize("reply", [Reply(255, "", "reset"), crashed("staged-os", PermissionError("denied"))])
@@ -144,17 +151,17 @@ def test_restore_wu_restored_is_ok() -> None:
     runner = FakeRunner().on("restore-wu", answer("restore-wu", restore_report("RESTORED")))
     rep = Report(vmid=1)
     apply.restore_windows_update(make_guest(runner), rep)
-    assert rep.steps[0]["ok"] is True
-    assert rep.steps[0]["note"] == "all restored"
-    assert rep.steps[0]["search"] == "TIMEOUT"
+    assert _wire(rep.steps)[0]["ok"] is True
+    assert _wire(rep.steps)[0]["note"] == "all restored"
+    assert _wire(rep.steps)[0]["search"] == "TIMEOUT"
 
 
 def test_restore_wu_search_timeout_is_explained_as_no_verdict() -> None:
     runner = FakeRunner().on("restore-wu", answer("restore-wu", restore_report("RESTORED")))
     rep = Report(vmid=1)
     apply.restore_windows_update(make_guest(runner), rep)
-    assert rep.steps[0]["ok"] is True
-    note = str(rep.steps[0]["search_note"])
+    assert _wire(rep.steps)[0]["ok"] is True
+    note = str(_wire(rep.steps)[0]["search_note"])
     assert "not a verdict" in note.lower()
     assert "180 s" in note
     assert "re-run restore-wu" in note
@@ -165,8 +172,9 @@ def test_restore_wu_search_ok_records_the_pending_count() -> None:
     runner = FakeRunner().on("restore-wu", answer("restore-wu", restore_report("RESTORED", search=found)))
     rep = Report(vmid=1)
     apply.restore_windows_update(make_guest(runner), rep)
-    assert (rep.steps[0]["ok"], rep.steps[0]["search"], rep.steps[0]["search_pending"]) == (True, "OK", 2)
-    assert "search_note" not in rep.steps[0]
+    step = _wire(rep.steps)[0]
+    assert (step["ok"], step["search"], step["search_pending"]) == (True, "OK", 2)
+    assert "search_note" not in step
 
 
 def test_restore_wu_search_failure_is_recorded_and_still_ok() -> None:
@@ -176,7 +184,7 @@ def test_restore_wu_search_failure_is_recorded_and_still_ok() -> None:
     runner = FakeRunner().on("restore-wu", answer("restore-wu", restore_report("RESTORED", search=failed)))
     rep = Report(vmid=1)
     apply.restore_windows_update(make_guest(runner), rep)
-    assert (rep.steps[0]["ok"], rep.steps[0]["search_error"]) == (True, "com_error: 0x8024401c")
+    assert (_wire(rep.steps)[0]["ok"], _wire(rep.steps)[0]["search_error"]) == (True, "com_error: 0x8024401c")
 
 
 def test_restore_wu_still_disabled_refuses_naming_the_services() -> None:
@@ -185,7 +193,7 @@ def test_restore_wu_still_disabled_refuses_naming_the_services() -> None:
     rep = Report(vmid=1)
     with pytest.raises(ApplyError, match="Windows Update left disabled: UsoSvc"):
         apply.restore_windows_update(make_guest(runner), rep)
-    assert rep.steps[0]["ok"] is False
+    assert _wire(rep.steps)[0]["ok"] is False
 
 
 def test_restore_wu_unknown_refuses_rather_than_reading_as_restored() -> None:
@@ -199,7 +207,7 @@ def test_restore_wu_without_an_answer_refuses() -> None:
     rep = Report(vmid=1)
     with pytest.raises(ApplyError, match="could not run the Windows Update restore"):
         apply.restore_windows_update(make_guest(runner), rep)
-    assert rep.steps[0]["ok"] is False
+    assert _wire(rep.steps)[0]["ok"] is False
 
 
 # --- ssh readiness --------------------------------------------------------------------------
@@ -222,7 +230,7 @@ def test_push_tool_step_records_the_content_address_and_whether_it_copied() -> N
     runner = tool_on_the_guest(FakeRunner())
     rep = Report(vmid=1)
     apply.push_tool(make_guest(runner), rep)
-    assert (rep.steps[0]["dest"], rep.steps[0]["copied"]) == (TOOL_PATH, False)
+    assert (_wire(rep.steps)[0]["dest"], _wire(rep.steps)[0]["copied"]) == (TOOL_PATH, False)
 
 
 def test_push_tool_step_reports_a_profile_copy_it_could_not_delete() -> None:
@@ -230,14 +238,14 @@ def test_push_tool_step_reports_a_profile_copy_it_could_not_delete() -> None:
     runner.replies["del"] = [Reply(1, "", "Zugriff verweigert")]
     rep = Report(vmid=1)
     apply.push_tool(make_guest(runner), rep)
-    assert "Zugriff verweigert" in str(rep.steps[0]["staged_left"])
+    assert "Zugriff verweigert" in str(_wire(rep.steps)[0]["staged_left"])
 
 
 # --- orchestration: nothing stops the guest until its upgrade run has finished OK -----------
 
 DONE_FAIL = answer("state", state_log("launching: setup.exe", "STATE=DONE-FAIL setup exit=0xC1900200"))
 NO_MARKER = answer("state", state_log("=== start", "launching: setup.exe"))
-REQUEST = ApplyRequest(vmid=1, ip=GUEST_IP)
+REQUEST = ApplyRequest(vmid=1, ip=IPv4Address(GUEST_IP))
 
 
 @pytest.fixture
@@ -299,9 +307,9 @@ def test_apply_reads_a_finished_run_before_the_apply_reboot() -> None:
     shutdown = labels.index("qm shutdown")
     assert labels.index("guest setup-alive") < shutdown
     assert labels.index("guest state") < shutdown
-    names = [s["step"] for s in rep.steps]
+    names = [s["step"] for s in _wire(rep.steps)]
     assert names.index("run_finished") < names.index("clean_stop")
-    assert next(s for s in rep.steps if s["step"] == "run_finished") == {
+    assert next(s for s in _wire(rep.steps) if s["step"] == "run_finished") == {
         "step": "run_finished",
         "ok": True,
         "marker": "STATE=DONE-OK",
@@ -312,8 +320,8 @@ def test_run_result_names_a_live_run_and_is_refused(receipts: FileReceiptStore) 
     runner = apply_runner(FakePve(), ALIVE, NO_MARKER)
     result = run_apply(REQUEST, make_node(runner), receipts=receipts, on_step=lambda _s: None)
     assert (result.exit, result.verdict) == (RunExit.REFUSED, "RUN_LIVE")
-    assert [s["step"] for s in result.steps][-2:] == ["run_finished", "error"]
-    assert result.steps[-2]["ok"] is False
+    assert [s["step"] for s in _wire(result.steps)][-2:] == ["run_finished", "error"]
+    assert _wire(result.steps)[-2]["ok"] is False
 
 
 def test_run_result_names_a_failed_run(receipts: FileReceiptStore) -> None:
@@ -325,7 +333,7 @@ def test_run_result_names_a_failed_run(receipts: FileReceiptStore) -> None:
 def test_run_result_of_a_refusal_says_windows_update_is_still_held(receipts: FileReceiptStore) -> None:
     runner = apply_runner(FakePve(), GONE, DONE_FAIL)
     result = run_apply(REQUEST, make_node(runner), receipts=receipts, on_step=lambda _s: None)
-    error = result.steps[-1]
+    error = _wire(result.steps)[-1]
     assert (result.exit, error["step"], error["wu_held"]) == (RunExit.REFUSED, "error", True)
     assert "restore-wu" in str(error["message"])
 
@@ -333,9 +341,9 @@ def test_run_result_of_a_refusal_says_windows_update_is_still_held(receipts: Fil
 def test_apply_refuses_a_vm_that_never_reaches_the_status(receipts: FileReceiptStore) -> None:
     runner = apply_runner(FakePve(stuck=True), GONE, DONE_OK)
     result = run_apply(REQUEST, make_node(runner), receipts=receipts, on_step=lambda _s: None)
-    assert (result.exit, result.verdict, result.steps[-1]["step"]) == (RunExit.REFUSED, "ERROR", "error")
-    assert "vm 1 did not reach status stopped" in str(result.steps[-1]["message"])
-    assert result.steps[-1]["wu_held"] is True
+    assert (result.exit, result.verdict, _wire(result.steps)[-1]["step"]) == (RunExit.REFUSED, "ERROR", "error")
+    assert "vm 1 did not reach status stopped" in str(_wire(result.steps)[-1]["message"])
+    assert _wire(result.steps)[-1]["wu_held"] is True
     labels = call_labels(runner.calls)
     # The apply run's own bound: 60 reads 5 s apart after the shutdown.
     assert labels[labels.index("qm shutdown") + 1 :] == ["qm status"] * 60
@@ -359,9 +367,9 @@ def _runs(call: list[str]) -> str:
 def _applied(runner: FakeRunner) -> tuple[str | None, list[dict[str, object]]]:
     rep = Report(vmid=1)
     try:
-        return apply.apply_sequence(REQUEST, make_node(runner), rep, receipt=RECEIPT), rep.steps
+        return apply.apply_sequence(REQUEST, make_node(runner), rep, receipt=RECEIPT), _wire(rep.steps)
     except ApplyError:
-        return None, rep.steps
+        return None, _wire(rep.steps)
 
 
 def test_after_the_apply_reboot_build_and_restore_wu_run_from_the_verified_profile_copy() -> None:
@@ -438,7 +446,7 @@ def test_a_profile_copy_that_is_not_the_tool_after_the_reboot_runs_nothing_and_i
     result = run_apply(REQUEST, make_node(runner), receipts=receipts, on_step=lambda _s: None)
     assert (result.exit, result.verdict) == (RunExit.REFUSED, "ERROR")
     assert [route(call) for call in _after_reboot(runner)] == [PROFILE_ACL, "scp", "certutil", "del"]
-    error = result.steps[-1]
+    error = _wire(result.steps)[-1]
     assert error["step"] == "error"
     # "the profile copy": the copy in place C:\winrepair\<STAGED> has the same file name, and a
     # refusal of it (at the pre-reboot push) must not satisfy this.
@@ -467,7 +475,7 @@ def test_a_profile_copy_left_behind_after_the_reboot_is_reported() -> None:
 def test_the_wu_held_hint_names_a_verified_copy_never_the_tool_directory(receipts: FileReceiptStore) -> None:
     runner = apply_runner(FakePve(), GONE, DONE_FAIL)
     result = run_apply(REQUEST, make_node(runner), receipts=receipts, on_step=lambda _s: None)
-    message = str(result.steps[-1]["message"])
+    message = str(_wire(result.steps)[-1]["message"])
     assert "certutil -hashfile" in message
     assert "ssh user's profile" in message
     assert "restore-wu" in message
@@ -482,8 +490,8 @@ def test_apply_without_a_receipt_refuses_before_any_call(tmp_path: Path) -> None
     result = run_apply(REQUEST, make_node(runner), receipts=store, on_step=lambda _s: None)
     assert runner.calls == []
     assert (result.exit, result.verdict) == (RunExit.REFUSED, "ERROR")
-    assert [s["step"] for s in result.steps] == ["error"]
-    assert result.steps[-1]["message"] == (
+    assert [s["step"] for s in _wire(result.steps)] == ["error"]
+    assert _wire(result.steps)[-1]["message"] == (
         f"no repair receipt for VM 1 at {store.path(1)} - run `pve-winrepair repair` for this VM first: "
         f"apply verifies the build its prepare step measured - {WU_HELD_HINT}"
     )
@@ -496,7 +504,7 @@ def test_apply_with_an_unreadable_receipt_refuses_naming_the_file_before_any_cal
     result = run_apply(REQUEST, make_node(runner), receipts=store, on_step=lambda _s: None)
     assert runner.calls == []
     assert (result.exit, result.verdict) == (RunExit.REFUSED, "ERROR")
-    assert str(result.steps[-1]["message"]).startswith(f"the repair receipt {store.path(1)} is not valid: ")
+    assert str(_wire(result.steps)[-1]["message"]).startswith(f"the repair receipt {store.path(1)} is not valid: ")
 
 
 @pytest.mark.parametrize(
@@ -514,15 +522,15 @@ def test_apply_verifies_the_build_the_receipt_recorded(
     result = run_apply(REQUEST, make_node(runner), receipts=store, on_step=recorded.append)
     assert (result.exit, result.verdict) == (exit_, verdict)
     assert recorded == list(result.steps)
-    receipt = next(s for s in result.steps if s["step"] == "receipt")
+    receipt = next(s for s in _wire(result.steps) if s["step"] == "receipt")
     assert (receipt["path"], receipt["want"]) == (str(store.path(1)), f"26200.{spbuild}")
-    check = next(s for s in result.steps if s["step"] == "verify_build")
+    check = next(s for s in _wire(result.steps) if s["step"] == "verify_build")
     if verdict == "VERIFIED":
         assert check == {"step": "verify_build", "ok": True, "build": "26200.8973"}
-        assert result.steps[-1]["step"] == "remove_profile_copy"
+        assert _wire(result.steps)[-1]["step"] == "remove_profile_copy"
     else:
         assert (check["ok"], check["got"], check["want"]) == (False, "26200.8973", "26200.9000")
-        assert str(result.steps[-1]["message"]).startswith("build is 26200.8973, wanted 26200.9000")
+        assert str(_wire(result.steps)[-1]["message"]).startswith("build is 26200.8973, wanted 26200.9000")
 
 
 def test_run_apply_maps_an_unexpected_error_to_internal(receipts: FileReceiptStore) -> None:
@@ -530,7 +538,7 @@ def test_run_apply_maps_an_unexpected_error_to_internal(receipts: FileReceiptSto
     runner.replies["build"] = [ValueError("a driver and tool that disagree")]
     result = run_apply(REQUEST, make_node(runner), receipts=receipts, on_step=lambda _s: None)
     assert (result.exit, result.verdict) == (RunExit.INTERNAL, "INTERNAL")
-    last = result.steps[-1]
+    last = _wire(result.steps)[-1]
     assert (last["step"], last["ok"], last["wu_held"]) == ("internal", False, True)
     assert str(last["message"]).startswith("ValueError('a driver and tool that disagree')")
 
@@ -557,10 +565,10 @@ def test_same_build_media_with_an_unchanged_install_date_is_reverted_or_unchange
 ) -> None:
     runner, result = _run_with(tmp_path, SAME_BUILD, UNCHANGED)
     assert (result.exit, result.verdict) == (RunExit.REFUSED, "REVERTED_OR_UNCHANGED")
-    check = next(s for s in result.steps if s["step"] == "verify_build")
+    check = next(s for s in _wire(result.steps) if s["step"] == "verify_build")
     assert (check["ok"], check["got"], check["install_date"]) == (False, "26200.8973", BUILD_BEFORE.install_date)
     assert "InstallDate" in str(check["note"])
-    error = result.steps[-1]
+    error = _wire(result.steps)[-1]
     assert (error["step"], error["wu_held"]) == ("error", True)
     assert str(error["message"]).startswith(
         f"build is 26200.8973, the build the guest ran before the repair, and its InstallDate "
@@ -573,7 +581,7 @@ def test_same_build_media_with_an_unchanged_install_date_is_reverted_or_unchange
 def test_same_build_media_with_a_changed_install_date_is_verified(tmp_path: Path) -> None:
     runner, result = _run_with(tmp_path, SAME_BUILD, BUILD_AFTER)
     assert (result.exit, result.verdict) == (RunExit.OK, "VERIFIED")
-    check = next(s for s in result.steps if s["step"] == "verify_build")
+    check = next(s for s in _wire(result.steps) if s["step"] == "verify_build")
     assert check == {
         "step": "verify_build",
         "ok": True,
@@ -587,7 +595,7 @@ def test_same_build_media_with_a_changed_install_date_is_verified(tmp_path: Path
 def test_a_newer_build_is_verified_whatever_the_install_date(tmp_path: Path) -> None:
     _runner, result = _run_with(tmp_path, RECEIPT, UNCHANGED)
     assert (result.exit, result.verdict) == (RunExit.OK, "VERIFIED")
-    check = next(s for s in result.steps if s["step"] == "verify_build")
+    check = next(s for s in _wire(result.steps) if s["step"] == "verify_build")
     assert check == {"step": "verify_build", "ok": True, "build": "26200.8973"}
 
 
@@ -599,7 +607,7 @@ def test_a_receipt_without_the_build_before_is_refused_as_unusable_before_any_ca
     result = run_apply(REQUEST, make_node(runner), receipts=store, on_step=lambda _s: None)
     assert runner.calls == []
     assert (result.exit, result.verdict) == (RunExit.REFUSED, "ERROR")
-    message = str(result.steps[-1]["message"])
+    message = str(_wire(result.steps)[-1]["message"])
     assert message.startswith(f"the repair receipt {store.path(1)} is not valid: ")
     assert "build_before: Field required" in message
     assert "install_date_before: Field required" in message
@@ -617,14 +625,14 @@ def test_apply_to_a_guest_that_is_not_the_vm_refuses_before_anything_stops_it(re
     labels = call_labels(runner.calls)
     assert [label for label in labels if label.split()[-1] in MUTATING_QM] == []
     assert pve.status == "running"
-    assert result.steps[-2] == {
+    assert _wire(result.steps)[-2] == {
         "step": "guest_identity",
         "ok": False,
         "ip": GUEST_IP,
         "vm_macs": [VM_MAC],
         "guest_macs": ["BC:24:11:FF:FF:01"],
     }
-    error = result.steps[-1]
+    error = _wire(result.steps)[-1]
     assert str(error["message"]).startswith(f"the guest at {GUEST_IP} is not VM 1: ")
     assert error["wu_held"] is True
 
@@ -636,7 +644,7 @@ def test_apply_binds_the_guest_to_the_vm_before_the_apply_reboot(receipts: FileR
     labels = call_labels(runner.calls)
     assert labels.index("guest nic-macs") < labels.index("qm shutdown")
     assert labels.count("guest nic-macs") == 1
-    assert next(s for s in result.steps if s["step"] == "guest_identity") == {
+    assert next(s for s in _wire(result.steps) if s["step"] == "guest_identity") == {
         "step": "guest_identity",
         "ok": True,
         "ip": GUEST_IP,

@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import subprocess
 from datetime import datetime, timezone
+from ipaddress import IPv4Address
 from typing import TYPE_CHECKING
 
 import pytest
@@ -49,18 +50,27 @@ from guest_fakes import (
     state_log,
     tool_on_the_guest,
 )
+from pydantic import ValidationError
 
 from pve_winrepair.adapters.receipts import FileReceiptStore
 from pve_winrepair.application import repair
 from pve_winrepair.application.repair import RepairError, RepairRequest, run_repair
-from pve_winrepair.domain.envelope import WU_HELD_HINT, GuestProtocolError
+from pve_winrepair.domain.enums import DriveLetter
+from pve_winrepair.domain.envelope import (
+    WU_HELD_HINT,
+    GuestInternalError,
+    GuestProtocolError,
+    InternalErrorAnswer,
+    InternalErrorData,
+)
 from pve_winrepair.domain.receipt import RepairReceipt
-from pve_winrepair.domain.report import Report, RunExit, RunResult, Step
+from pve_winrepair.domain.report import Report, RunExit, RunResult, RunVerdict, Step, StepName
 from pve_winrepair.domain.settings import GuestSettings, RepairSettings
 from pve_winrepair_guest.probes import NicMacReport, SetupReport
 from pve_winrepair_guest.upgrade import LaunchReport, LockDirsReport, TaskCleanup
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Sequence
     from pathlib import Path
 
 
@@ -73,8 +83,13 @@ REPAIR = RepairSettings(snapshot_name="pre_kb_test", stage_free_gb=15.0, system_
 GUEST = GuestSettings(subnet="192.0.2.0/24")
 
 
+def _wire(steps: Sequence[Step]) -> list[dict[str, object]]:
+    """The steps as the --json envelope carries them."""
+    return [step.model_dump() for step in steps]
+
+
 def _step(rep: Report, name: str) -> dict[str, object]:
-    return next(s for s in rep.steps if s["step"] == name)
+    return next(s for s in _wire(rep.steps) if s["step"] == name)
 
 
 # --- the report ------------------------------------------------------------------------------
@@ -83,9 +98,9 @@ def _step(rep: Report, name: str) -> dict[str, object]:
 def test_on_step_receives_each_step_in_order() -> None:
     recorded: list[Step] = []
     rep = Report(vmid=1, on_step=recorded.append)
-    rep.add("shutdown", ok=True, note="already stopped")
-    rep.add("vtpm", ok=False, storage="local")
-    assert recorded == [
+    rep.add(StepName.SHUTDOWN, ok=True, note="already stopped")
+    rep.add(StepName.VTPM, ok=False, storage="local")
+    assert _wire(recorded) == [
         {"step": "shutdown", "ok": True, "note": "already stopped"},
         {"step": "vtpm", "ok": False, "storage": "local"},
     ]
@@ -95,15 +110,55 @@ def test_on_step_receives_each_step_in_order() -> None:
 def test_a_report_held_at_start_flags_the_hold_on_a_failure() -> None:
     rep = Report(vmid=1, held_at_start=True)
     assert rep.wu_held is True
-    rep.failure("error", "refused", RuntimeError("refused"))
-    assert rep.steps[-1]["wu_held"] is True
-    assert "restore-wu" in str(rep.steps[-1]["message"])
+    rep.failure(StepName.ERROR, "refused", RuntimeError("refused"))
+    assert _wire(rep.steps)[-1]["wu_held"] is True
+    assert "restore-wu" in str(_wire(rep.steps)[-1]["message"])
 
 
 def test_a_report_without_a_quiesce_step_is_not_held() -> None:
     rep = Report(vmid=1)
-    rep.add("quiesce_wu", ok=False)
+    rep.add(StepName.QUIESCE_WU, ok=False)
     assert rep.wu_held is False
+
+
+def test_a_step_keeps_the_order_its_keys_were_recorded_in_and_a_held_step_appends_the_new_ones() -> None:
+    """The --json bytes follow recording order: a note recorded first stays first, a new one goes last."""
+    rep = Report(vmid=1, held_at_start=True)
+    rep.add(StepName.VTPM, ok=True, note="added v2.0", storage="local")
+    rep.add(StepName.POLL, ok=False, verdict=RunVerdict.DONE_FAIL)
+    rep.ended_held()
+    assert list(rep.steps[0].model_dump()) == ["step", "ok", "note", "storage"]
+    assert list(rep.steps[1].model_dump()) == ["step", "ok", "verdict", "wu_held", "note"]
+    rep.add(StepName.POLL, ok=False, verdict=RunVerdict.WORKER_GONE, note="no verdict")
+    rep.ended_held()
+    assert list(rep.steps[2].model_dump()) == ["step", "ok", "verdict", "note", "wu_held"]
+    assert rep.steps[2].note == f"no verdict - {WU_HELD_HINT}"
+
+
+def test_a_failure_step_carries_message_hold_and_guest_traceback_in_that_order() -> None:
+    rep = Report(vmid=1, held_at_start=True)
+    crash = InternalErrorAnswer(
+        ok=False, command="quiesce-wu", data=InternalErrorData(error="boom", error_type="OSError"), skipped=()
+    )
+    rep.failure(StepName.ERROR, "refused", GuestInternalError(crash, "line 1\nline 2\n"))
+    assert list(rep.steps[0].model_dump()) == ["step", "ok", "message", "wu_held", "guest_stderr"]
+    assert rep.steps[0].model_dump()["guest_stderr"] == ["line 1", "line 2"]
+
+
+def test_an_enum_measurement_is_kept_as_its_plain_value() -> None:
+    """A RunVerdict a step records is a plain str inside it, so no rendering can show the member name."""
+    step = Step.record(StepName.POLL, ok=True, fields={"verdict": RunVerdict.DONE_OK})
+    assert type(step.detail["verdict"]) is str
+    assert f"{step.detail['verdict']}" == "STATE=DONE-OK"
+
+
+def test_a_step_with_an_unknown_name_or_a_key_order_that_misses_a_key_is_refused() -> None:
+    with pytest.raises(ValidationError, match="step"):
+        Step.model_validate({"step": "no_such_step", "ok": True, "detail": {}, "key_order": ()})
+    with pytest.raises(ValidationError, match="key_order"):
+        Step.model_validate({"step": "poll", "ok": True, "detail": {"verdict": "TIMEOUT"}, "key_order": ()})
+    with pytest.raises(ValidationError, match="key_order"):
+        Step.model_validate({"step": "poll", "ok": True, "note": "x", "detail": {}, "key_order": ()})
 
 
 # --- quiesce-wu -----------------------------------------------------------------------------
@@ -163,7 +218,7 @@ def test_stage_root_refuses_a_full_system_drive() -> None:
 def test_stage_root_refuses_a_drive_the_guest_does_not_have() -> None:
     runner = FakeRunner().on("drives", answer("drives", drive_report(C=80.0)))
     with pytest.raises(RepairError, match="E: which the guest does not have"):
-        repair.pick_stage_root(make_guest(runner), Report(vmid=1), "E:", repair=REPAIR)
+        repair.pick_stage_root(make_guest(runner), Report(vmid=1), DriveLetter.DRIVE_E, repair=REPAIR)
 
 
 def test_stage_root_gates_on_the_configured_system_floor() -> None:
@@ -177,7 +232,7 @@ def test_stage_root_gates_on_the_configured_stage_floor() -> None:
     runner = FakeRunner().on("drives", answer("drives", drive_report(C=60.0, D=200.0)))
     floors = RepairSettings(stage_free_gb=250.0)
     with pytest.raises(RepairError, match=r"^D: has only 200.0 GB free, need 250.0$"):
-        repair.pick_stage_root(make_guest(runner), Report(vmid=1), "D:", repair=floors)
+        repair.pick_stage_root(make_guest(runner), Report(vmid=1), DriveLetter.DRIVE_D, repair=floors)
 
 
 def test_drives_unreadable_refuses_naming_the_guest_error() -> None:
@@ -538,7 +593,8 @@ def test_stage_media_failed_copy_refuses(tmp_path: Path) -> None:
 
 
 def _request(*, ip: str | None = None, stage_only: bool = True, hours: float = 1.0) -> RepairRequest:
-    return RepairRequest(vmid=1, snapshot_name="pre_kb_test", hours=hours, stage_only=stage_only, ip=ip)
+    address = None if ip is None else IPv4Address(ip)
+    return RepairRequest(vmid=1, snapshot_name="pre_kb_test", hours=hours, stage_only=stage_only, ip=address)
 
 
 def _first_mutation(labels: list[str]) -> int:
@@ -602,7 +658,7 @@ def test_an_agentless_run_clears_the_guard_before_its_offline_snapshot(tmp_path:
     first_guard = labels.index("guest setup-alive")
     assert labels.index("guest lock-dirs") < first_guard < labels.index("qm shutdown")
     assert first_guard < _first_mutation(labels)
-    steps = [s["step"] for s in rep.steps]
+    steps = [s["step"] for s in _wire(rep.steps)]
     assert steps.index("no_live_run") < steps.index("shutdown") < steps.index("snapshot")
 
 
@@ -668,7 +724,8 @@ def _run(
 
     The receipts go to ``receipts``, by default a state directory beside ``media``.
     """
-    request = RepairRequest(vmid=1, snapshot_name="pre_kb_test", hours=hours, ip=ip, stage_only=stage_only)
+    address = None if ip is None else IPv4Address(ip)
+    request = RepairRequest(vmid=1, snapshot_name="pre_kb_test", hours=hours, ip=address, stage_only=stage_only)
     result = run_repair(
         request,
         make_node(runner, FakeClock()),
@@ -677,7 +734,7 @@ def _run(
         receipts=receipts or FileReceiptStore(media.parent / "state"),
         on_step=lambda _s: None,
     )
-    return result, list(result.steps)
+    return result, _wire(result.steps)
 
 
 def _media(tmp_path: Path) -> Path:
@@ -709,8 +766,8 @@ def test_an_unconfigured_media_dir_is_refused_before_any_call(tmp_path: Path) ->
         on_step=lambda _s: None,
     )
     assert (result.exit, result.verdict) == (RunExit.REFUSED, "ERROR")
-    assert result.steps[-1]["step"] == "error"
-    assert result.steps[-1]["message"] == (
+    assert _wire(result.steps)[-1]["step"] == "error"
+    assert _wire(result.steps)[-1]["message"] == (
         "[repair] media_dir is not configured: set it to the directory holding the installation media"
     )
     assert runner.calls == []
@@ -778,13 +835,13 @@ def test_on_step_sees_the_hold_flagged_on_the_failed_poll_it_already_received(tm
         receipts=FileReceiptStore(tmp_path / "state"),
         on_step=recorded.append,
     )
-    polls = [step for step in recorded if step["step"] == "poll"]
+    polls = [step for step in recorded if step.step is StepName.POLL]
     assert len(polls) == 2
-    assert "wu_held" not in polls[0]
+    assert polls[0].wu_held is None
     assert recorded[-1] is polls[1]
-    assert (polls[1]["wu_held"], polls[1]["verdict"]) == (True, "STATE=DONE-FAIL")
-    assert "restore-wu" in str(polls[1]["note"])
-    assert [step["step"] for step in recorded[:-1]] == [step["step"] for step in result.steps]
+    assert (polls[1].wu_held, polls[1].detail["verdict"]) == (True, "STATE=DONE-FAIL")
+    assert "restore-wu" in str(polls[1].note)
+    assert [step.step for step in recorded[:-1]] == [step.step for step in result.steps]
 
 
 def test_main_done_ok_does_not_flag_the_hold_as_a_leftover(tmp_path: Path) -> None:
@@ -810,6 +867,73 @@ def test_repair_refuses_a_vm_that_never_reaches_the_status(tmp_path: Path) -> No
     labels = call_labels(runner.calls)
     assert labels.count("qm start") == 1
     # The repair run's own bound: 48 reads 5 s apart after the start.
+    assert labels[labels.index("qm start") + 1 :] == ["qm status"] * 48
+
+
+def test_repair_refuses_at_once_a_status_qm_status_does_not_name(tmp_path: Path) -> None:
+    """An unknown status word is never read as "not running": nothing stops or starts the VM on it."""
+    runner = agent_runner(FakePve(status="suspended"))
+    result, steps = _run(runner, _media(tmp_path))
+    assert (result.exit, result.verdict, steps[-1]["step"]) == (RunExit.REFUSED, RunVerdict.ERROR, "error")
+    assert steps[-1]["message"] == "qm status 1 reported no status running or stopped (rc=0): 'status: suspended'"
+    assert call_labels(runner.calls) == ["qm status"]
+
+
+def test_a_failed_qm_status_refuses_naming_its_stderr(tmp_path: Path) -> None:
+    pve = FakePve()
+
+    def missing_vm(cmd: list[str]) -> Reply:
+        if cmd[1] == "status":
+            return Reply(2, "", "Configuration file 'nodes/pve1/qemu-server/1.conf' does not exist\n")
+        return pve(cmd)
+
+    runner = agent_runner(pve)
+    runner.replies["qm"] = [missing_vm]
+    result, steps = _run(runner, _media(tmp_path))
+    assert (result.exit, result.verdict) == (RunExit.REFUSED, RunVerdict.ERROR)
+    assert steps[-1]["message"] == (
+        "qm status 1 reported no status running or stopped (rc=2): "
+        "\"Configuration file 'nodes/pve1/qemu-server/1.conf' does not exist\""
+    )
+
+
+def _status_fails_after_start(pve: FakePve, *, failures: int | None) -> Callable[[list[str]], Reply]:
+    """``qm`` that fails ``qm status`` after ``qm start``: ``failures`` times, or for good when None."""
+    seen = {"started": False, "failed": 0}
+
+    def qm(cmd: list[str]) -> Reply:
+        seen["started"] = seen["started"] or cmd[1] == "start"
+        transient = failures is None or seen["failed"] < failures
+        if cmd[1] == "status" and seen["started"] and transient:
+            seen["failed"] += 1
+            return Reply(255, "", "trying to acquire lock...\n")
+        return pve(cmd)
+
+    return qm
+
+
+def test_a_wait_polls_through_a_status_read_that_fails_while_the_vm_starts(tmp_path: Path) -> None:
+    """The wait spans the VM's own start, so a failed read means "not there yet", not a refusal."""
+    pve = FakePve(status="stopped")
+    runner = agent_runner(pve)
+    runner.replies["qm"] = [_status_fails_after_start(pve, failures=2)]
+    result, _steps = _run(runner, _media(tmp_path))
+    assert result.exit is RunExit.OK
+    labels = call_labels(runner.calls)
+    assert labels[labels.index("qm start") + 1 : labels.index("qm start") + 4] == ["qm status"] * 3
+
+
+def test_a_wait_whose_reads_never_recover_names_the_last_failure(tmp_path: Path) -> None:
+    pve = FakePve(status="stopped")
+    runner = agent_runner(pve)
+    runner.replies["qm"] = [_status_fails_after_start(pve, failures=None)]
+    result, steps = _run(runner, _media(tmp_path))
+    assert (result.exit, result.verdict) == (RunExit.REFUSED, RunVerdict.ERROR)
+    assert steps[-1]["message"] == (
+        "vm 1 did not reach status running; the last read failed: "
+        "qm status 1 reported no status running or stopped (rc=255): 'trying to acquire lock...'"
+    )
+    labels = call_labels(runner.calls)
     assert labels[labels.index("qm start") + 1 :] == ["qm status"] * 48
 
 
@@ -967,7 +1091,7 @@ def test_repair_writes_the_receipt_after_prepare_and_before_launch(tmp_path: Pat
         written_at=written_at,
     )
     assert labels.index("guest prepare") < labels.index("guest build") < store.calls_at_write[1]
-    step = next(s for s in result.steps if s["step"] == "receipt")
+    step = next(s for s in _wire(result.steps) if s["step"] == "receipt")
     assert step == {"step": "receipt", "ok": True, "path": str(store.path(1)), "expected_build": "26200.8973"}
 
 
@@ -982,13 +1106,13 @@ def test_a_stage_only_repair_ends_held_on_a_staged_step(tmp_path: Path) -> None:
         on_step=recorded.append,
     )
     assert (result.exit, result.verdict) == (RunExit.OK, "STAGED")
-    last = result.steps[-1]
+    last = _wire(result.steps)[-1]
     assert (last["step"], last["ok"], last["wu_held"], last["root"]) == ("staged", True, True, "D:\\upgrade")
     assert str(last["note"]).endswith(f" - {WU_HELD_HINT}")
     # Emitted once when recorded and once more with the hold flagged, as a failed poll is.
-    assert [s["step"] for s in recorded[-2:]] == ["staged", "staged"]
-    assert "wu_held" not in recorded[-2]
-    assert recorded[-1] == last
+    assert [s.step for s in recorded[-2:]] == [StepName.STAGED, StepName.STAGED]
+    assert recorded[-2].wu_held is None
+    assert recorded[-1] == result.steps[-1]
 
 
 def test_a_stage_only_repair_leaves_no_receipt(tmp_path: Path) -> None:

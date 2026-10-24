@@ -45,7 +45,7 @@ from typing import TYPE_CHECKING
 
 from pve_winrepair.application.guest_identity import GuestMismatchError, check_guest_is_vm
 from pve_winrepair.application.guest_state import read_guest_build, read_run_state
-from pve_winrepair.application.vm import VmStatusTimeoutError, wait_status
+from pve_winrepair.application.vm import VmStatus, VmStatusError, wait_status
 from pve_winrepair.domain.envelope import (
     PROBE_TIMEOUT,
     READ_FAILURES,
@@ -53,10 +53,11 @@ from pve_winrepair.domain.envelope import (
     GuestProtocolError,
 )
 from pve_winrepair.domain.receipt import ReceiptError
-from pve_winrepair.domain.report import Report, RunExit, RunResult, Step
+from pve_winrepair.domain.report import Report, RunExit, RunResult, RunVerdict, Step, StepName, StepValue
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from ipaddress import IPv4Address
 
     from pve_winrepair.application.ports import GuestPort, NodePort, ReceiptStore
     from pve_winrepair.domain.envelope import Fields, RunState
@@ -79,7 +80,7 @@ class ApplyError(RuntimeError):
         verdict: The run's verdict for this refusal (ERROR unless a gate names its own).
     """
 
-    def __init__(self, message: str, *, verdict: str = "ERROR") -> None:
+    def __init__(self, message: str, *, verdict: RunVerdict = RunVerdict.ERROR) -> None:
         """Keep ``message`` and the verdict the run reports for it."""
         super().__init__(message)
         self.verdict = verdict
@@ -96,7 +97,7 @@ class ApplyRequest:
     """
 
     vmid: int
-    ip: str
+    ip: IPv4Address
     apply_minutes: float = 90.0
 
 
@@ -112,7 +113,7 @@ def push_tool(guest: GuestPort, rep: Report) -> None:
     except GuestCallError as exc:
         raise ApplyError(str(exc)) from exc
     left = {} if pushed.staged_left is None else {"staged_left": pushed.staged_left}
-    rep.add("push_tool", ok=True, dest=pushed.path, copied=pushed.copied, **left)
+    rep.add(StepName.PUSH_TOOL, ok=True, dest=pushed.path, copied=pushed.copied, **left)
 
 
 def stage_tool(guest: GuestPort, rep: Report) -> GuestPort:
@@ -121,7 +122,7 @@ def stage_tool(guest: GuestPort, rep: Report) -> GuestPort:
         staged = guest.stage_tool()
     except GuestCallError as exc:
         raise ApplyError(str(exc)) from exc
-    rep.add("stage_tool", ok=True, path=staged.tool_path, sha256=staged.packed.sha256)
+    rep.add(StepName.STAGE_TOOL, ok=True, path=staged.tool_path, sha256=staged.packed.sha256)
     return staged
 
 
@@ -141,16 +142,16 @@ def report_tool_dir_lock(staged: GuestPort, rep: Report) -> None:
         envelope = staged.tool("lock-dirs", "--tool", staged.packed.guest_path, "--no-create", timeout=PROBE_TIMEOUT)
         verdict = envelope.gate("verdict", "OK")
     except GuestCallError as exc:
-        rep.add("winrepair_lock", ok=False, note=f"could not read the lock (informational): {exc}")
+        rep.add(StepName.WINREPAIR_LOCK, ok=False, note=f"could not read the lock (informational): {exc}")
         return
     if verdict == "OK":
         actions = [d.text("action") for d in envelope.data.sections("directories")]
         action = actions[0] if actions else None
         gone = {"note": f"{tool_dir} is gone after the upgrade; the next repair creates it locked"}
-        rep.add("winrepair_lock", ok=True, action=action, **(gone if action == "ABSENT" else {}))
+        rep.add(StepName.WINREPAIR_LOCK, ok=True, action=action, **(gone if action == "ABSENT" else {}))
         return
     rep.add(
-        "winrepair_lock",
+        StepName.WINREPAIR_LOCK,
         ok=False,
         reason=envelope.data.text_or_none("reason"),
         note=f"{tool_dir} changed during the upgrade; nothing was relocked and nothing runs "
@@ -162,7 +163,7 @@ def report_tool_dir_lock(staged: GuestPort, rep: Report) -> None:
 def remove_profile_copy(staged: GuestPort, rep: Report) -> None:
     """Delete the verified profile copy; a copy left behind is reported, never raised."""
     left = staged.remove_profile_copy()
-    rep.add("remove_profile_copy", ok=left is None, **({} if left is None else {"error": left}))
+    rep.add(StepName.REMOVE_PROFILE_COPY, ok=left is None, **({} if left is None else {"error": left}))
 
 
 def read_build(guest: GuestPort) -> GuestBuild | None:
@@ -196,18 +197,20 @@ def wait_ssh(
 def _unfinished(state: RunState) -> ApplyError | None:
     """Why ``state`` is no finished, successful run (with its verdict), or None when it is."""
     if state.alive:
-        return ApplyError("SetupHost is running - the upgrade is still live; let it finish", verdict="RUN_LIVE")
+        return ApplyError(
+            "SetupHost is running - the upgrade is still live; let it finish", verdict=RunVerdict.RUN_LIVE
+        )
     if state.live:
         return ApplyError(
             f"{state.log_path} shows a run that started, has no DONE marker, and SetupHost is gone - "
             f"it was cut off; check the guest before applying anything",
-            verdict="RUN_UNFINISHED",
+            verdict=RunVerdict.RUN_UNFINISHED,
         )
     if not state.log_present:
-        return ApplyError(f"no state log at {state.log_path} - no upgrade run to apply", verdict="NO_RUN")
+        return ApplyError(f"no state log at {state.log_path} - no upgrade run to apply", verdict=RunVerdict.NO_RUN)
     if state.marker != "STATE=DONE-OK":
         return ApplyError(
-            f"the run ended {state.marker} - re-diagnose it rather than applying it", verdict="RUN_FAILED"
+            f"the run ended {state.marker} - re-diagnose it rather than applying it", verdict=RunVerdict.RUN_FAILED
         )
     return None
 
@@ -227,9 +230,9 @@ def gate_run_finished(guest: GuestPort, rep: Report) -> None:
         raise ApplyError(f"cannot verify that the upgrade run finished: {exc}") from exc
     refusal = _unfinished(state)
     if refusal is not None:
-        rep.add("run_finished", ok=False, verdict=refusal.verdict, alive=state.alive, marker=state.marker)
+        rep.add(StepName.RUN_FINISHED, ok=False, verdict=refusal.verdict, alive=state.alive, marker=state.marker)
         raise refusal
-    rep.add("run_finished", ok=True, marker=state.marker)
+    rep.add(StepName.RUN_FINISHED, ok=True, marker=state.marker)
 
 
 def gate_staged(guest: GuestPort, rep: Report) -> None:
@@ -247,21 +250,21 @@ def gate_staged(guest: GuestPort, rep: Report) -> None:
     present, verdict = staged.flag("present"), staged.text("verdict")
     if verdict != ("REARMABLE" if present else "RERUN"):
         raise GuestProtocolError(f"staged-os: present={present} contradicts verdict {verdict!r}")
-    rep.add("gate_staged", ok=present, verdict=verdict)
+    rep.add(StepName.GATE_STAGED, ok=present, verdict=verdict)
     if not present:
         raise ApplyError(
             "NewOS is absent - the upgrade rolled back; re-run the down-level rather than re-arming the boot entry"
         )
 
 
-def _search_detail(search: Fields) -> dict[str, object]:
+def _search_detail(search: Fields) -> dict[str, StepValue]:
     """The bounded Windows Update search as step fields: informational, never part of the verdict.
 
     A TIMEOUT is normal on the first boot after the apply, while servicing still runs; bare, it
     reads like a failure, so it carries the sentence that says what it is.
     """
     status = search.text("status")
-    detail: dict[str, object] = {"search": status}
+    detail: dict[str, StepValue] = {"search": status}
     if status == "OK":
         detail["search_pending"] = search.integer("pending")
     elif status == "TIMEOUT":
@@ -285,16 +288,16 @@ def restore_windows_update(guest: GuestPort, rep: Report) -> None:
     try:
         envelope = guest.tool("restore-wu", timeout=900)
     except READ_FAILURES as exc:
-        rep.add("restore_wu", ok=False, note="no answer")
+        rep.add(StepName.RESTORE_WU, ok=False, note="no answer")
         raise ApplyError(f"could not run the Windows Update restore: {exc}") from exc
     verdict = envelope.gate("verdict", "RESTORED")
     data = envelope.data
     still = data.texts("still_disabled")
     search = _search_detail(data.section("search"))
     if verdict == "RESTORED":
-        rep.add("restore_wu", ok=True, note="all restored", **search)
+        rep.add(StepName.RESTORE_WU, ok=True, note="all restored", **search)
         return
-    rep.add("restore_wu", ok=False, verdict=verdict, still_disabled=list(still), **search)
+    rep.add(StepName.RESTORE_WU, ok=False, verdict=verdict, still_disabled=list(still), **search)
     if verdict == "STILL_DISABLED":
         raise ApplyError("Windows Update left disabled: " + ", ".join(still))
     raise ApplyError(f"Windows Update state could not be verified: {verdict}")
@@ -308,12 +311,12 @@ def apply_reboot(node: NodePort, vmid: int, rep: Report) -> None:
     ON DISK, so it survives a clean stop and start.
     """
     node.qm("shutdown", str(vmid), "--timeout", "300", timeout=400)
-    wait_status(node, vmid, "stopped", tries=_STATUS_TRIES)
-    rep.add("clean_stop", ok=True, note="qm shutdown (ACPI)")
+    wait_status(node, vmid, VmStatus.STOPPED, tries=_STATUS_TRIES)
+    rep.add(StepName.CLEAN_STOP, ok=True, note="qm shutdown (ACPI)")
     if node.qm("start", str(vmid), timeout=300).returncode != 0:
         raise ApplyError("start failed")
-    wait_status(node, vmid, "running", tries=_STATUS_TRIES)
-    rep.add("start", ok=True, note="one-shot bootsequence honoured from BCD on disk")
+    wait_status(node, vmid, VmStatus.RUNNING, tries=_STATUS_TRIES)
+    rep.add(StepName.START, ok=True, note="one-shot bootsequence honoured from BCD on disk")
 
 
 def _reboot_into_newos(node: NodePort, request: ApplyRequest, guest: GuestPort, rep: Report) -> None:
@@ -330,7 +333,7 @@ def _reboot_into_newos(node: NodePort, request: ApplyRequest, guest: GuestPort, 
         raise ApplyError(
             f"guest did not answer ssh within {request.apply_minutes} min - check the console for 'undoing changes'"
         )
-    rep.add("guest_back", ok=True)
+    rep.add(StepName.GUEST_BACK, ok=True)
 
 
 def read_receipt(receipts: ReceiptStore, vmid: int, rep: Report) -> RepairReceipt:
@@ -344,7 +347,7 @@ def read_receipt(receipts: ReceiptStore, vmid: int, rep: Report) -> RepairReceip
             f"no repair receipt for VM {vmid} at {receipts.path(vmid)} - run `pve-winrepair repair` for this VM "
             f"first: apply verifies the build its prepare step measured"
         )
-    rep.add("receipt", ok=True, path=str(receipts.path(vmid)), want=receipt.expected_build())
+    rep.add(StepName.RECEIPT, ok=True, path=str(receipts.path(vmid)), want=receipt.expected_build())
     return receipt
 
 
@@ -359,19 +362,21 @@ def _verify_build(after: GuestBuild, receipt: RepairReceipt, rep: Report) -> Non
     if (after.build, after.ubr) != (receipt.image_build, receipt.image_spbuild):
         # A revert carrying a successful down-level means the APPLY was cut off.
         rep.add(
-            "verify_build",
+            StepName.VERIFY_BUILD,
             ok=False,
             got=after.text,
             want=receipt.expected_build(),
             note="did not reach the target - check Panther for Setup360Result before re-diagnosing the upgrade",
         )
-        raise ApplyError(f"build is {after.text}, wanted {receipt.expected_build()}", verdict="REVERTED_OR_UNCHANGED")
+        raise ApplyError(
+            f"build is {after.text}, wanted {receipt.expected_build()}", verdict=RunVerdict.REVERTED_OR_UNCHANGED
+        )
     if not receipt.same_build():
-        rep.add("verify_build", ok=True, build=after.text)
+        rep.add(StepName.VERIFY_BUILD, ok=True, build=after.text)
         return
     if after.install_date == receipt.install_date_before:
         rep.add(
-            "verify_build",
+            StepName.VERIFY_BUILD,
             ok=False,
             got=after.text,
             install_date=after.install_date,
@@ -381,10 +386,10 @@ def _verify_build(after: GuestBuild, receipt: RepairReceipt, rep: Report) -> Non
         raise ApplyError(
             f"build is {after.text}, the build the guest ran before the repair, and its InstallDate "
             f"{after.install_date} did not change across the apply reboot - the upgrade did not apply or rolled back",
-            verdict="REVERTED_OR_UNCHANGED",
+            verdict=RunVerdict.REVERTED_OR_UNCHANGED,
         )
     rep.add(
-        "verify_build",
+        StepName.VERIFY_BUILD,
         ok=True,
         build=after.text,
         install_date_before=receipt.install_date_before,
@@ -392,12 +397,12 @@ def _verify_build(after: GuestBuild, receipt: RepairReceipt, rep: Report) -> Non
     )
 
 
-def apply_sequence(request: ApplyRequest, node: NodePort, rep: Report, *, receipt: RepairReceipt) -> str:
+def apply_sequence(request: ApplyRequest, node: NodePort, rep: Report, *, receipt: RepairReceipt) -> RunVerdict:
     """The whole sequence; returns VERIFIED or raises :class:`ApplyError` naming its verdict.
 
     ``receipt`` holds the build the guest must reach.
     """
-    guest = node.guest(request.ip)
+    guest = node.guest(str(request.ip))
     push_tool(guest, rep)
     # Before the apply reboot stops the VM: the guest at --ip must be the VM --vmid names.
     check_guest_is_vm(node, guest, request.vmid, rep)
@@ -406,7 +411,7 @@ def apply_sequence(request: ApplyRequest, node: NodePort, rep: Report, *, receip
         raise ApplyError(
             "cannot read the build from the guest - it is unreachable, which is not the same as a wrong build"
         )
-    rep.add("build_before", ok=True, build=before.text)
+    rep.add(StepName.BUILD_BEFORE, ok=True, build=before.text)
 
     _reboot_into_newos(node, request, guest, rep)
 
@@ -415,7 +420,7 @@ def apply_sequence(request: ApplyRequest, node: NodePort, rep: Report, *, receip
         _verify_and_restore(staged, receipt, rep)
     finally:
         remove_profile_copy(staged, rep)
-    return "VERIFIED"
+    return RunVerdict.VERIFIED
 
 
 def _verify_and_restore(staged: GuestPort, receipt: RepairReceipt, rep: Report) -> None:
@@ -424,7 +429,7 @@ def _verify_and_restore(staged: GuestPort, receipt: RepairReceipt, rep: Report) 
     after = read_build(staged)
     if after is None:
         raise ApplyError("guest answered ssh but its build could not be read")
-    rep.add("build_after", ok=True, build=after.text)
+    rep.add(StepName.BUILD_AFTER, ok=True, build=after.text)
     _verify_build(after, receipt, rep)
 
     # Lift the WU hold LAST: only a verified build is worth patching again.
@@ -436,9 +441,9 @@ def run_apply(
 ) -> RunResult:
     """Apply and verify, and map how it ended to an exit and a verdict.
 
-    VERIFIED is OK. An :class:`ApplyError` is REFUSED with the error's own verdict; a VM that never
-    reached the status the reboot waits for (:class:`VmStatusTimeoutError`) or a guest at ``ip``
-    that is not the VM (:class:`GuestMismatchError`) is REFUSED with verdict ``ERROR``; anything else
+    VERIFIED is OK. An :class:`ApplyError` is REFUSED with the error's own verdict; a VM whose status
+    could not be read or never reached the one the reboot waits for (:class:`VmStatusError`) or a
+    guest at ``ip`` that is not the VM (:class:`GuestMismatchError`) is REFUSED with verdict ``ERROR``; anything else
     (a driver/tool mismatch) is INTERNAL.
 
     Args:
@@ -458,12 +463,12 @@ def run_apply(
         receipt = read_receipt(receipts, request.vmid, rep)
         verdict = apply_sequence(request, node, rep, receipt=receipt)
     except ApplyError as exc:
-        rep.failure("error", str(exc), exc)
-        return RunResult(RunExit.REFUSED, exc.verdict, tuple(rep.steps))
-    except (VmStatusTimeoutError, GuestMismatchError) as exc:
-        rep.failure("error", str(exc), exc)
-        return RunResult(RunExit.REFUSED, "ERROR", tuple(rep.steps))
+        rep.failure(StepName.ERROR, str(exc), exc)
+        return RunResult(exit=RunExit.REFUSED, verdict=exc.verdict, steps=tuple(rep.steps))
+    except (VmStatusError, GuestMismatchError) as exc:
+        rep.failure(StepName.ERROR, str(exc), exc)
+        return RunResult(exit=RunExit.REFUSED, verdict=RunVerdict.ERROR, steps=tuple(rep.steps))
     except Exception as exc:  # anything unexpected (a driver/tool mismatch) is an internal error
-        rep.failure("internal", repr(exc), exc)
-        return RunResult(RunExit.INTERNAL, "INTERNAL", tuple(rep.steps))
-    return RunResult(RunExit.OK, verdict, tuple(rep.steps))
+        rep.failure(StepName.INTERNAL, repr(exc), exc)
+        return RunResult(exit=RunExit.INTERNAL, verdict=RunVerdict.INTERNAL, steps=tuple(rep.steps))
+    return RunResult(exit=RunExit.OK, verdict=verdict, steps=tuple(rep.steps))

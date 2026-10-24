@@ -13,6 +13,8 @@ internal error without ``--json`` prints nothing to stdout, so a caller reading 
 mistakes a crash for a verdict.
 
 Contents:
+    * :class:`RunCommand` - ``repair`` or ``apply``, the envelope's ``command``.
+    * :class:`RunEnvelope` - the ``--json`` envelope of a run.
     * :class:`PreflightError` - a check before any call failed; the message names the setting or option.
     * :func:`load_run_settings` - the node CLI settings, or exit 78 naming every refused value.
     * :func:`check_node` - refuse an unconfigured ``[ssh] key`` or an unusable ``[node] state_dir``.
@@ -26,13 +28,14 @@ from __future__ import annotations
 
 import json
 import stat
+from enum import Enum
 from typing import TYPE_CHECKING, NoReturn
 
-from pydantic import ValidationError
+from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 
 from pve_winrepair.adapters.config.settings import SettingsError
-from pve_winrepair.domain.report import Report, RunExit, RunResult, Step
-from pve_winrepair.domain.settings import RepairSettings
+from pve_winrepair.domain.report import Report, RunExit, RunResult, RunVerdict, Step, StepName
+from pve_winrepair.domain.settings import SnapshotName
 
 from .. import safe_console
 from ..config_load import require_config
@@ -42,14 +45,15 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     import rich_click as click
-    from pydantic_core import ErrorDetails
 
-    from pve_winrepair.domain.settings import Settings
+    from pve_winrepair.domain.settings import RepairSettings, Settings
 
     from ..context import CLIContext
 
 __all__ = [
     "PreflightError",
+    "RunCommand",
+    "RunEnvelope",
     "check_node",
     "echo_step",
     "finish",
@@ -60,6 +64,29 @@ __all__ = [
 
 #: The step name column is this wide on stderr, so the details line up.
 _STEP_WIDTH = 22
+#: The ``--json`` envelope's indentation, part of its byte form.
+_JSON_INDENT = 2
+
+_SNAPSHOT_NAME: TypeAdapter[str] = TypeAdapter(SnapshotName)
+
+
+class RunCommand(str, Enum):
+    """The run command an envelope reports."""
+
+    REPAIR = "repair"
+    APPLY = "apply"
+
+
+class RunEnvelope(BaseModel):
+    """The ``--json`` envelope of a run: how it ended, for which guest, and every step in order."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    ok: bool
+    command: RunCommand
+    vmid: int
+    verdict: RunVerdict
+    steps: tuple[Step, ...]
 
 
 class PreflightError(Exception):
@@ -122,26 +149,21 @@ def _not_a_directory(path: Path) -> str | None:
 
 
 def resolve_snapshot_name(repair: RepairSettings, override: str | None) -> str:
-    """``--snapshot-name``, validated by ``RepairSettings``' own rule; ``[repair] snapshot_name`` without it.
+    """``--snapshot-name``, held to ``[repair] snapshot_name``'s rule (:data:`SnapshotName`); the setting without it.
+
+    Checked here rather than as a click parameter type: a bad name is a refused run (exit 1,
+    verdict ERROR, an ``error`` step naming the option), not a usage error (exit 2).
 
     Raises:
         PreflightError: The override breaks the rule; the message names the option and the rule, never
-            the value. Any other field the re-validation refuses is named as its own ``[repair]``
-            setting: that is not the option's fault.
+            the value.
     """
     if override is None:
         return repair.snapshot_name
     try:
-        return RepairSettings.model_validate(repair.model_dump() | {"snapshot_name": override}).snapshot_name
+        return _SNAPSHOT_NAME.validate_python(override)
     except ValidationError as error:
-        raise PreflightError("; ".join(_override_problem(item) for item in error.errors())) from None
-
-
-def _override_problem(item: ErrorDetails) -> str:
-    """``--snapshot-name: <reason>`` for the option's own field, ``[repair] <field>: <reason>`` for any other."""
-    if item["loc"] == ("snapshot_name",):
-        return f"--snapshot-name: {item['msg']}"
-    return f"[repair] {'.'.join(str(part) for part in item['loc'])}: {item['msg']}"
+        raise PreflightError("; ".join(f"--snapshot-name: {item['msg']}" for item in error.errors())) from None
 
 
 def refused(vmid: int, refusal: PreflightError, *, wu_held: bool) -> RunResult:
@@ -154,37 +176,38 @@ def refused(vmid: int, refusal: PreflightError, *, wu_held: bool) -> RunResult:
             as the use case's own refusals do.
     """
     rep = Report(vmid, on_step=echo_step, held_at_start=wu_held)
-    rep.failure("error", str(refusal), refusal)
-    return RunResult(RunExit.REFUSED, "ERROR", tuple(rep.steps))
+    rep.failure(StepName.ERROR, str(refusal), refusal)
+    return RunResult(exit=RunExit.REFUSED, verdict=RunVerdict.ERROR, steps=tuple(rep.steps))
 
 
 def echo_step(step: Step) -> None:
-    """Write one step to stderr: ``[ok ]`` or ``[FAIL]``, its name, then ``key=value`` per detail."""
-    state = "ok " if step.get("ok") is True else "FAIL"
-    detail = " ".join(f"{key}={value}" for key, value in step.items() if key not in ("step", "ok"))
-    safe_console.echo(f"[{state}] {step.get('step')!s:<{_STEP_WIDTH}} {detail}".rstrip(), err=True)
+    """Write one step to stderr: ``[ok ]`` or ``[FAIL]``, its name, then ``key=value`` per detail.
+
+    Each value is written as Python's ``str`` of it (a list as ``['a', 'b']``); the values are plain
+    JSON values, so no enum member reaches the line.
+    """
+    state = "ok " if step.ok else "FAIL"
+    detail = " ".join(f"{key}={value}" for key, value in step.items())
+    safe_console.echo(f"[{state}] {step.step.value:<{_STEP_WIDTH}} {detail}".rstrip(), err=True)
 
 
-def finish(ctx: click.Context, result: RunResult, *, command: str, vmid: int, as_json: bool) -> NoReturn:
+def finish(ctx: click.Context, result: RunResult, *, command: RunCommand, vmid: int, as_json: bool) -> NoReturn:
     """Print the result on stdout and exit with the run's code (0 OK, 1 refused, 2 internal).
 
     Args:
         ctx: The running command's click context.
         result: How the run ended.
-        command: ``repair`` or ``apply``, the envelope's ``command``.
+        command: The envelope's ``command``.
         vmid: The guest the run was for.
         as_json: Print the ``{"ok", "command", "vmid", "verdict", "steps"}`` envelope instead of
             the ``vm <vmid>: <verdict>`` line.
     """
     if as_json:
-        envelope = {
-            "ok": result.exit is RunExit.OK,
-            "command": command,
-            "vmid": vmid,
-            "verdict": result.verdict,
-            "steps": list(result.steps),
-        }
-        safe_console.echo(json.dumps(envelope, indent=2))
+        envelope = RunEnvelope(
+            ok=result.exit is RunExit.OK, command=command, vmid=vmid, verdict=result.verdict, steps=result.steps
+        )
+        # json.dumps, not model_dump_json: the envelope's bytes are its indented, ASCII-escaped rendering.
+        safe_console.echo(json.dumps(envelope.model_dump(mode="json"), indent=_JSON_INDENT))
     elif result.exit is not RunExit.INTERNAL:
-        safe_console.echo(f"vm {vmid}: {result.verdict}")
+        safe_console.echo(f"vm {vmid}: {result.verdict.value}")
     ctx.exit(int(result.exit))

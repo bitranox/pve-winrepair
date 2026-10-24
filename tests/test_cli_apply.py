@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 from guest_fakes import (
+    ALIVE,
     DONE_OK,
     GONE,
     GUEST_IP,
@@ -65,6 +66,15 @@ def test_apply_json_with_a_receipt_is_verified(tmp_path: Path) -> None:
     assert (receipt["path"], receipt["want"]) == (str(tmp_path / "state" / "receipt-1.json"), "26200.8973")
     assert steps[-1]["step"] == "remove_profile_copy"
     assert "[ok ] verify_build" in run.stderr
+
+
+@NEEDS_A_POSIX_STATE_DIR
+def test_a_live_run_is_refused_with_its_verdict_written_as_text_on_stderr(tmp_path: Path) -> None:
+    """The step carries the refusal's RunVerdict: the line must show its value, not RunVerdict.RUN_LIVE."""
+    run = run_cli([*APPLY, "--json"], _with_receipt(tmp_path), apply_runner(FakePve(), ALIVE, DONE_OK))
+    assert (run.exit_code, json_envelope(run.stdout)["verdict"]) == (1, "RUN_LIVE")
+    expected = "[FAIL] run_finished" + " " * 11 + "verdict=RUN_LIVE alive=True marker=STATE=DONE-OK"
+    assert expected in run.stderr.splitlines()
 
 
 @NEEDS_A_POSIX_STATE_DIR

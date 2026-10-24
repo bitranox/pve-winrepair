@@ -44,7 +44,7 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
 from pve_winrepair.application.guest_identity import GuestMismatchError, check_guest_is_vm
 from pve_winrepair.application.guest_state import read_guest_build, read_run_state
-from pve_winrepair.application.vm import VmStatusTimeoutError, vm_status, wait_status
+from pve_winrepair.application.vm import VmStatus, VmStatusError, vm_status, wait_status
 from pve_winrepair.domain.addresses import AmbiguousAddressError, lan_address
 from pve_winrepair.domain.envelope import (
     PROBE_TIMEOUT,
@@ -56,13 +56,14 @@ from pve_winrepair.domain.envelope import (
     state_marker,
 )
 from pve_winrepair.domain.receipt import GuestBuild, ReceiptError, RepairReceipt
-from pve_winrepair.domain.report import Report, RunExit, RunResult, Step
+from pve_winrepair.domain.report import Report, RunExit, RunResult, RunVerdict, Step, StepName, StepValue
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from ipaddress import IPv4Network
+    from ipaddress import IPv4Address, IPv4Network
 
     from pve_winrepair.application.ports import GuestPort, NodePort, ReceiptStore
+    from pve_winrepair.domain.enums import DriveLetter
     from pve_winrepair.domain.settings import GuestSettings, RepairSettings
 
 # Progress between steps (still waiting, a read that failed and is retried) is for the operator
@@ -97,7 +98,7 @@ class RepairRequest:
         stage_only: Stage the media and hold Windows Update, but neither gate the WIM
             (``prepare``) nor launch setup; the run ends with the verdict ``STAGED``.
         ip: The guest's address, for a guest with no QEMU agent; implies the offline snapshot.
-        stage_root: The drive to stage the media on (``C:``, ``D:``); default: measured.
+        stage_root: The drive to stage the media on; default: measured.
         tpm_storage: The PVE storage for a new vTPM volume; default: the storage of the guest's disk.
     """
 
@@ -105,8 +106,8 @@ class RepairRequest:
     snapshot_name: str
     hours: float = 6.0
     stage_only: bool = False
-    ip: str | None = None
-    stage_root: str | None = None
+    ip: IPv4Address | None = None
+    stage_root: DriveLetter | None = None
     tpm_storage: str | None = None
 
 
@@ -164,14 +165,14 @@ def guest_ip(node: NodePort, vmid: int, network: IPv4Network | None, tries: int 
 
 def ensure_stopped(node: NodePort, vmid: int, rep: Report) -> None:
     """Stop the guest cleanly (ACPI) unless it is stopped already."""
-    if vm_status(node, vmid) == "stopped":
-        rep.add("shutdown", ok=True, note="already stopped")
+    if vm_status(node, vmid) is VmStatus.STOPPED:
+        rep.add(StepName.SHUTDOWN, ok=True, note="already stopped")
         return
     node.qm("shutdown", str(vmid), "--timeout", "240", timeout=300)
     # Never force-stop: hard-stopping a guest mid-servicing is how component stores get damaged,
     # and the store is the thing under repair.
-    wait_status(node, vmid, "stopped", tries=_STATUS_TRIES)
-    rep.add("shutdown", ok=True, note="clean via qm shutdown (ACPI; agent-assisted only when the guest has one)")
+    wait_status(node, vmid, VmStatus.STOPPED, tries=_STATUS_TRIES)
+    rep.add(StepName.SHUTDOWN, ok=True, note="clean via qm shutdown (ACPI; agent-assisted only when the guest has one)")
 
 
 def vm_storage(node: NodePort, vmid: int) -> str:
@@ -199,36 +200,36 @@ def ensure_vtpm(node: NodePort, vmid: int, rep: Report, storage: str | None = No
     """
     cfg = node.qm("config", str(vmid), timeout=60).stdout
     if re.search(r"^tpmstate0:", cfg, re.M):
-        rep.add("vtpm", ok=True, note="already present")
+        rep.add(StepName.VTPM, ok=True, note="already present")
         return False
     # An openvmm guest gets its TPM from the launcher (`args: ... --tpm`), not from a PVE
     # tpmstate0 volume. Looking only for tpmstate0 would bolt redundant hardware onto a guest
     # that already has a working TPM.
     if re.search(r"^args:.*--tpm\b", cfg, re.M):
-        rep.add("vtpm", ok=True, note="provided by openvmm --tpm")
+        rep.add(StepName.VTPM, ok=True, note="provided by openvmm --tpm")
         return False
     target = storage or vm_storage(node, vmid)
     ensure_stopped(node, vmid, rep)
     proc = node.qm("set", str(vmid), "-tpmstate0", f"{target}:1,version=v2.0", timeout=300)
     if proc.returncode != 0:
         raise RepairError(f"adding vTPM failed: {proc.stderr.strip()}")
-    rep.add("vtpm", ok=True, note="added v2.0", storage=target)
+    rep.add(StepName.VTPM, ok=True, note="added v2.0", storage=target)
     return True
 
 
 def ensure_running(node: NodePort, vmid: int, rep: Report, network: IPv4Network | None) -> str:
     """Start the guest if needed, wait for its agent, and return its LAN address."""
-    if vm_status(node, vmid) != "running":
+    if vm_status(node, vmid) is not VmStatus.RUNNING:
         proc = node.qm("start", str(vmid), timeout=300)
         if proc.returncode != 0:
             raise RepairError(f"start failed: {proc.stderr.strip()}")
-        wait_status(node, vmid, "running", tries=_STATUS_TRIES)
+        wait_status(node, vmid, VmStatus.RUNNING, tries=_STATUS_TRIES)
     for _ in range(60):
         if node.qm("agent", str(vmid), "ping", timeout=30).returncode == 0:
             break
         node.sleep(5)
     ip = guest_ip(node, vmid, network)
-    rep.add("running", ok=True, ip=ip)
+    rep.add(StepName.RUNNING, ok=True, ip=ip)
     return ip
 
 
@@ -285,12 +286,12 @@ def wait_servicing_idle(
             sleep(20)
             continue
         if not servicing.flag("active"):
-            rep.add("servicing_idle", ok=True, note="TiWorker/TrustedInstaller not running")
+            rep.add(StepName.SERVICING_IDLE, ok=True, note="TiWorker/TrustedInstaller not running")
             return
         _log.info("servicing still active (%s processes), waiting", servicing.integer("total"))
         sleep(30)
     rep.add(
-        "servicing_idle",
+        StepName.SERVICING_IDLE,
         ok=False,
         note=f"still active after {minutes} min - proceeding with a "
         f"CLEAN stop, which is safe, but the next boot may roll back",
@@ -306,9 +307,9 @@ def snapshot_offline(node: NodePort, vmid: int, name: str, rep: Report) -> None:
     just costs a shutdown and a boot.
     """
     if name in existing_snapshots(node, vmid):
-        rep.add("snapshot", ok=True, name=name, note="exists")
+        rep.add(StepName.SNAPSHOT, ok=True, name=name, note="exists")
         return
-    if vm_status(node, vmid) != "stopped":
+    if vm_status(node, vmid) is not VmStatus.STOPPED:
         raise RepairError("refusing an agentless snapshot of a running guest - stop it first")
     proc = node.qm(
         "snapshot",
@@ -320,7 +321,7 @@ def snapshot_offline(node: NodePort, vmid: int, name: str, rep: Report) -> None:
     )
     if proc.returncode != 0:
         raise RepairError(f"snapshot failed: {proc.stderr.strip()}")
-    rep.add("snapshot", ok=True, name=name, note="created offline (guest powered off)")
+    rep.add(StepName.SNAPSHOT, ok=True, name=name, note="created offline (guest powered off)")
 
 
 def snapshot(node: NodePort, vmid: int, name: str, rep: Report) -> None:
@@ -339,7 +340,7 @@ def snapshot(node: NodePort, vmid: int, name: str, rep: Report) -> None:
     # "snapshot name 'X' already used", a text free to change and to be localised, and a re-run
     # must continue past an existing snapshot rather than abort on it.
     if name in existing_snapshots(node, vmid):
-        rep.add("snapshot", ok=True, name=name, note="exists")
+        rep.add(StepName.SNAPSHOT, ok=True, name=name, note="exists")
         return
     proc = node.qm(
         "snapshot",
@@ -354,7 +355,7 @@ def snapshot(node: NodePort, vmid: int, name: str, rep: Report) -> None:
     # PVE prints this only when it actually froze the guest fs. Report it either way rather
     # than assume: a snapshot that silently skipped the freeze is the dangerous one.
     froze = "freeze guest filesystem" in (proc.stdout + proc.stderr)
-    rep.add("snapshot", ok=True, name=name, note="created", fs_frozen=froze)
+    rep.add(StepName.SNAPSHOT, ok=True, name=name, note="created", fs_frozen=froze)
 
 
 def wait_agent(node: NodePort, vmid: int, minutes: float = 5.0) -> bool:
@@ -395,7 +396,7 @@ def push_tool(guest: GuestPort, rep: Report) -> None:
     except GuestCallError as exc:
         raise RepairError(str(exc)) from exc
     left = {} if pushed.staged_left is None else {"staged_left": pushed.staged_left}
-    rep.add("push_tool", ok=True, dest=pushed.path, copied=pushed.copied, **left)
+    rep.add(StepName.PUSH_TOOL, ok=True, dest=pushed.path, copied=pushed.copied, **left)
 
 
 def guest_drives(guest: GuestPort) -> dict[str, float]:
@@ -415,7 +416,7 @@ def guest_drives(guest: GuestPort) -> dict[str, float]:
     return drives
 
 
-def pick_stage_root(guest: GuestPort, rep: Report, override: str | None, *, repair: RepairSettings) -> str:
+def pick_stage_root(guest: GuestPort, rep: Report, override: DriveLetter | None, *, repair: RepairSettings) -> str:
     r"""Choose where the media goes, and gate on headroom BEFORE spending an hour on it.
 
     The drive is measured, never assumed: a guest with only C: cannot even create
@@ -434,28 +435,28 @@ def pick_stage_root(guest: GuestPort, rep: Report, override: str | None, *, repa
             f"C: has {shown.get('C', 0.0)} GB free, below the {system_free_gb} GB "
             f"an in-place upgrade needs - free space before retrying"
         )
-    if override:
-        letter = override.rstrip(":\\").upper()
+    if override is not None:
+        letter = override.value
         if letter not in drives:
             raise RepairError(f"--stage-root names {letter}: which the guest does not have: {shown}")
         if drives[letter] < stage_free_gb:
             raise RepairError(f"{letter}: has only {shown[letter]} GB free, need {stage_free_gb}")
-        root = f"{letter}:\\upgrade"
-        rep.add("stage_root", ok=True, root=root, note="explicit", drives=shown)
+        root = override.stage_root
+        rep.add(StepName.STAGE_ROOT, ok=True, root=root, note="explicit", drives=shown)
         return root
     # Prefer a non-system drive so the media does not compete with the upgrade's own working
     # set, but fall back to C: rather than refusing a guest that simply has one disk.
     for letter in sorted(k for k in drives if k != "C"):
         if drives[letter] >= stage_free_gb:
             root = f"{letter}:\\upgrade"
-            rep.add("stage_root", ok=True, root=root, note="non-system drive", drives=shown)
+            rep.add(StepName.STAGE_ROOT, ok=True, root=root, note="non-system drive", drives=shown)
             return root
     if drives["C"] < system_free_gb + stage_free_gb:
         raise RepairError(
             f"only C: is usable and its {shown['C']} GB cannot hold both the media "
             f"and the upgrade ({system_free_gb + stage_free_gb} GB needed)"
         )
-    rep.add("stage_root", ok=True, root="C:\\upgrade", note="no non-system drive; using C:", drives=shown)
+    rep.add(StepName.STAGE_ROOT, ok=True, root="C:\\upgrade", note="no non-system drive; using C:", drives=shown)
     return "C:\\upgrade"
 
 
@@ -477,7 +478,7 @@ def lock_dirs(guest: GuestPort, rep: Report, root: str) -> None:
     if envelope.gate("verdict", "OK") != "OK":
         raise RepairError(f"not staging into {root}: {envelope.data.text_or_none('reason')}")
     locked = {d.text("path"): d.text("action") for d in envelope.data.sections("directories")}
-    rep.add("lock_dirs", ok=True, directories=locked)
+    rep.add(StepName.LOCK_DIRS, ok=True, directories=locked)
 
 
 def stage_media(guest: GuestPort, rep: Report, root: str, *, media: Path) -> None:
@@ -488,7 +489,7 @@ def stage_media(guest: GuestPort, rep: Report, root: str, *, media: Path) -> Non
     proc = guest.copy_to([str(p) for p in sorted(media.iterdir())], f"{root}\\", timeout=5400)
     if proc.returncode != 0:
         raise RepairError(f"media transfer failed rc={proc.returncode}: {proc.stderr.strip()[:400]}")
-    rep.add("stage_media", ok=True, seconds=round(time.time() - started), root=root)
+    rep.add(StepName.STAGE_MEDIA, ok=True, seconds=round(time.time() - started), root=root)
 
 
 def refuse_live_run(guest: GuestPort, rep: Report) -> None:
@@ -511,7 +512,7 @@ def refuse_live_run(guest: GuestPort, rep: Report) -> None:
             f"it may still be running; check the guest before relaunching"
         )
     # .value: the step is echoed with an f-string, which renders a str-mixin enum as its NAME on 3.11+.
-    rep.add("no_live_run", ok=True, previous_verdict=None if state.verdict is None else state.verdict.value)
+    rep.add(StepName.NO_LIVE_RUN, ok=True, previous_verdict=None if state.verdict is None else state.verdict.value)
 
 
 def quiesce_windows_update(guest: GuestPort, rep: Report) -> None:
@@ -541,7 +542,7 @@ def quiesce_windows_update(guest: GuestPort, rep: Report) -> None:
         )
     previous = data.section("previous_start_modes")
     rep.add(
-        "quiesce_wu",
+        StepName.QUIESCE_WU,
         ok=True,
         previous_start_modes={k: previous.text(k) for k in previous.values},
         verdict=verdict,
@@ -578,7 +579,7 @@ def prepare(guest: GuestPort, rep: Report, root: str) -> tuple[int, int]:
     image, running = data.section("image"), data.section("running")
     image_build, image_spbuild = image.integer("build"), image.integer("spbuild")
     rep.add(
-        "prepare",
+        StepName.PREPARE,
         ok=True,
         gate="PASS",
         image_build=image_build,
@@ -605,7 +606,7 @@ def build_before(guest: GuestPort, rep: Report) -> GuestBuild:
         raise RepairError(
             f"cannot read the guest's build and InstallDate for the receipt: {exc} - not launching setup"
         ) from exc
-    rep.add("build_before", ok=True, build=before.text, install_date=before.install_date)
+    rep.add(StepName.BUILD_BEFORE, ok=True, build=before.text, install_date=before.install_date)
     return before
 
 
@@ -627,10 +628,10 @@ def record_receipt(receipts: ReceiptStore, receipt: RepairReceipt, rep: Report) 
         path = receipts.write(receipt)
     except ReceiptError as exc:
         raise RepairError(f"{exc} - not launching setup: apply could not verify the build it installs") from exc
-    rep.add("receipt", ok=True, path=str(path), expected_build=receipt.expected_build())
+    rep.add(StepName.RECEIPT, ok=True, path=str(path), expected_build=receipt.expected_build())
 
 
-def _launch_detail(envelope: Envelope) -> dict[str, object]:
+def _launch_detail(envelope: Envelope) -> dict[str, StepValue]:
     data = envelope.data
     wait = data.section_or_none("wait")
     return {
@@ -664,11 +665,11 @@ def launch(guest: GuestPort, rep: Report, root: str) -> None:
     if verdict not in LAUNCH_VERDICTS:
         raise GuestProtocolError(f"launch: unknown verdict {verdict!r}")
     if verdict == "OK":
-        rep.add("launch", ok=True, **detail)
+        rep.add(StepName.LAUNCH, ok=True, **detail)
         return
     if verdict == "TASK_LEFT" and detail["task_cleanup"] == "DISARM":
         rep.add(
-            "launch",
+            StepName.LAUNCH,
             ok=False,
             **detail,
             note=f"setup was launched ({detail['reason']}); its task is still defined - "
@@ -680,14 +681,16 @@ def launch(guest: GuestPort, rep: Report, root: str) -> None:
     raise RepairError(f"launch did not leave setup running: {verdict}: {detail['reason']}{hint}")
 
 
-def read_marker(guest: GuestPort) -> str | None:
-    """The state log's completion marker (``STATE=DONE-OK`` / ``STATE=DONE-FAIL``), or None.
+def read_marker(guest: GuestPort) -> RunVerdict | None:
+    """The state log's completion marker as the run's verdict (``STATE=DONE-OK`` / ``STATE=DONE-FAIL``), or None.
 
     Raises:
         GuestNoAnswerError, GuestInternalError: The log could not be read - NOT an absent marker.
         GuestProtocolError: The log carries a verdict this driver does not know.
     """
-    return state_marker(guest.probe("state", timeout=PROBE_TIMEOUT))
+    marker = state_marker(guest.probe("state", timeout=PROBE_TIMEOUT))
+    # state_marker returns only the marker lines of StateVerdict, each a RunVerdict value.
+    return None if marker is None else RunVerdict(marker)
 
 
 def setup_alive(guest: GuestPort) -> bool | None:
@@ -698,7 +701,7 @@ def setup_alive(guest: GuestPort) -> bool | None:
         return None
 
 
-def _late_marker(guest: GuestPort, rep: Report, sleep: Callable[[float], None]) -> str:
+def _late_marker(guest: GuestPort, rep: Report, sleep: Callable[[float], None]) -> RunVerdict:
     """Re-read the marker over a grace window after SetupHost vanished.
 
     The worker vanishing is NOT a verdict. The guest appends its marker only AFTER setup.exe
@@ -714,19 +717,19 @@ def _late_marker(guest: GuestPort, rep: Report, sleep: Callable[[float], None]) 
             continue
         if marker:
             rep.add(
-                "poll",
-                ok=marker == "STATE=DONE-OK",
+                StepName.POLL,
+                ok=marker is RunVerdict.DONE_OK,
                 verdict=marker,
                 note=f"verdict read {(attempt + 1) * 20}s after the worker exited",
             )
             return marker
     rep.add(
-        "poll",
+        StepName.POLL,
         ok=False,
-        verdict="WORKER_GONE",
+        verdict=RunVerdict.WORKER_GONE,
         note="SetupHost exited and no verdict appeared within 120s of grace",
     )
-    return "WORKER_GONE"
+    return RunVerdict.WORKER_GONE
 
 
 def poll(
@@ -736,7 +739,7 @@ def poll(
     *,
     clock: Callable[[], float],
     sleep: Callable[[float], None],
-) -> str:
+) -> RunVerdict:
     """Wait on the task's OWN completion marker.
 
     A derived signal (percent, disk, log size) cannot tell finished from aborted, and this
@@ -750,7 +753,7 @@ def poll(
             marker, read_failed = None, True
             _log.info("marker read failed (%s), not treating as absent", exc)
         if marker:
-            rep.add("poll", ok=marker == "STATE=DONE-OK", verdict=marker)
+            rep.add(StepName.POLL, ok=marker is RunVerdict.DONE_OK, verdict=marker)
             return marker
         # Progress is logged for the operator only. It is deliberately NOT a completion test:
         # a percentage that stops moving reads identically for finished and for aborted.
@@ -762,8 +765,8 @@ def poll(
         if alive is False:
             return _late_marker(guest, rep, sleep)
         sleep(300)
-    rep.add("poll", ok=False, verdict="TIMEOUT", note=f"no verdict within {hours} h - investigate")
-    return "TIMEOUT"
+    rep.add(StepName.POLL, ok=False, verdict=RunVerdict.TIMEOUT, note=f"no verdict within {hours} h - investigate")
+    return RunVerdict.TIMEOUT
 
 
 def _clear_live_run(node: NodePort, request: RepairRequest, rep: Report, network: IPv4Network | None) -> GuestPort:
@@ -783,13 +786,13 @@ def _clear_live_run(node: NodePort, request: RepairRequest, rep: Report, network
     ``ip``, the offline snapshot plus ``qm start`` come before any guard - inherent, since a
     stopped guest cannot be asked; the guard then runs again before staging and launch.
     """
-    if request.ip:
-        guest = node.guest(request.ip)
+    if request.ip is not None:
+        guest = node.guest(str(request.ip))
         wait_ssh(guest, sleep=node.sleep)
     else:
         guest = node.guest(ensure_running(node, request.vmid, rep, network))
     push_tool(guest, rep)
-    if request.ip:
+    if request.ip is not None:
         # Before anything acts on the VM: the shutdown for the offline snapshot is next.
         check_guest_is_vm(node, guest, request.vmid, rep)
     refuse_live_run(guest, rep)
@@ -806,21 +809,21 @@ def _early_hold(node: NodePort, guest: GuestPort, rep: Report) -> None:
     wait_servicing_idle(guest, rep, clock=node.clock, sleep=node.sleep)
 
 
-def _agentless_running(node: NodePort, request: RepairRequest, ip: str, rep: Report) -> GuestPort:
+def _agentless_running(node: NodePort, request: RepairRequest, ip: IPv4Address, rep: Report) -> GuestPort:
     """No agent to fsfreeze with, so snapshot the guest POWERED OFF, then boot and wait for ssh.
 
     Powered off is more consistent than the agent path, not less; ssh is the only readiness
     signal such a guest has.
     """
-    guest = node.guest(ip)
+    guest = node.guest(str(ip))
     ensure_stopped(node, request.vmid, rep)
     snapshot_offline(node, request.vmid, request.snapshot_name, rep)
-    if vm_status(node, request.vmid) != "running":
+    if vm_status(node, request.vmid) is not VmStatus.RUNNING:
         if node.qm("start", str(request.vmid), timeout=300).returncode != 0:
             raise RepairError("start failed")
-        wait_status(node, request.vmid, "running", tries=_STATUS_TRIES)
+        wait_status(node, request.vmid, VmStatus.RUNNING, tries=_STATUS_TRIES)
     wait_ssh(guest, sleep=node.sleep)
-    rep.add("running", ok=True, ip=ip, note="agentless (ssh-verified)")
+    rep.add(StepName.RUNNING, ok=True, ip=str(ip), note="agentless (ssh-verified)")
     return guest
 
 
@@ -848,7 +851,7 @@ def repair_sequence(
     repair: RepairSettings,
     guest: GuestSettings,
     receipts: ReceiptStore,
-) -> str:
+) -> RunVerdict:
     """The whole sequence; returns the verdict (STATE=DONE-OK, STAGED, ...).
 
     The VM's previous receipt is removed once the live-run guard passed for the last time, so a
@@ -857,12 +860,12 @@ def repair_sequence(
     """
     media = _media_dir(repair)
     network = guest.network()
-    if vm_status(node, request.vmid) == "running":
+    if vm_status(node, request.vmid) is VmStatus.RUNNING:
         live = _clear_live_run(node, request, rep, network)
-        if not request.ip:
+        if request.ip is None:
             _early_hold(node, live, rep)
     ensure_vtpm(node, request.vmid, rep, request.tpm_storage)
-    if request.ip:
+    if request.ip is not None:
         target = _agentless_running(node, request, request.ip, rep)
     else:
         target = node.guest(ensure_running(node, request.vmid, rep, network))
@@ -870,7 +873,7 @@ def repair_sequence(
     # Pushed again after the vTPM reboot and the snapshot, so the steps below never meet a
     # stale copy; the live-run check guards the restaging as well as the launch.
     push_tool(target, rep)
-    if request.ip:
+    if request.ip is not None:
         # Again after the boot: a VM that was stopped could not be asked before it, and the address
         # may now answer for another guest.
         check_guest_is_vm(node, target, request.vmid, rep)
@@ -884,13 +887,13 @@ def repair_sequence(
     quiesce_windows_update(target, rep)
     if request.stage_only:
         rep.add(
-            "staged",
+            StepName.STAGED,
             ok=True,
             root=stage_root,
             note="setup not launched (--stage-only) and no receipt written, so apply cannot follow this run; "
             "run repair without --stage-only to gate the image and launch setup",
         )
-        return "STAGED"
+        return RunVerdict.STAGED
     image_build, image_spbuild = prepare(target, rep, stage_root)
     before = build_before(target, rep)
     receipt = RepairReceipt(
@@ -921,9 +924,9 @@ def run_repair(
     to apply, so its last step is flagged with the hold as well. Any other verdict the run returns
     (the poll's ``STATE=DONE-FAIL``, ``WORKER_GONE``, ``TIMEOUT``: answers, not exceptions) is
     REFUSED with that verdict, its last step flagged when Windows Update is still held. A :class:`RepairError`,
-    a VM that never reached the status a stop or start waits for (:class:`VmStatusTimeoutError`) or
-    a guest at ``ip`` that is not the VM (:class:`GuestMismatchError`) is REFUSED with verdict
-    ``ERROR``; anything else (a driver/tool mismatch) is INTERNAL.
+    a VM whose status could not be read or never reached the one a stop or start waits for
+    (:class:`VmStatusError`) or a guest at ``ip`` that is not the VM (:class:`GuestMismatchError`) is
+    REFUSED with verdict ``ERROR``; anything else (a driver/tool mismatch) is INTERNAL.
 
     Args:
         request: The guest and the operator's choices for this run.
@@ -939,15 +942,16 @@ def run_repair(
     rep = Report(vmid=request.vmid, on_step=on_step)
     try:
         verdict = repair_sequence(request, rep, node, repair=repair, guest=guest, receipts=receipts)
-    except (RepairError, VmStatusTimeoutError, GuestMismatchError) as exc:
-        rep.failure("error", str(exc), exc)
-        return RunResult(RunExit.REFUSED, "ERROR", tuple(rep.steps))
+    except (RepairError, VmStatusError, GuestMismatchError) as exc:
+        rep.failure(StepName.ERROR, str(exc), exc)
+        return RunResult(exit=RunExit.REFUSED, verdict=RunVerdict.ERROR, steps=tuple(rep.steps))
     except Exception as exc:  # anything unexpected (a driver/tool mismatch) is an internal error
-        rep.failure("internal", repr(exc), exc)
-        return RunResult(RunExit.INTERNAL, "INTERNAL", tuple(rep.steps))
-    if verdict == "STATE=DONE-OK":
-        return RunResult(RunExit.OK, verdict, tuple(rep.steps))
+        rep.failure(StepName.INTERNAL, repr(exc), exc)
+        return RunResult(exit=RunExit.INTERNAL, verdict=RunVerdict.INTERNAL, steps=tuple(rep.steps))
+    if verdict is RunVerdict.DONE_OK:
+        return RunResult(exit=RunExit.OK, verdict=verdict, steps=tuple(rep.steps))
     # STAGED, like a failed poll, leaves the hold for nobody to lift: only apply lifts it, and a
     # stage-only run writes no receipt for apply to follow.
     rep.ended_held()
-    return RunResult(RunExit.OK if verdict == "STAGED" else RunExit.REFUSED, verdict, tuple(rep.steps))
+    exit_code = RunExit.OK if verdict is RunVerdict.STAGED else RunExit.REFUSED
+    return RunResult(exit=exit_code, verdict=verdict, steps=tuple(rep.steps))

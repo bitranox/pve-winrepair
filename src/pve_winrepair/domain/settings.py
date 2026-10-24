@@ -30,6 +30,8 @@ _MAX_EXPECTED_RUNNERS: Final[int] = 999_999
 _SECTION_CONFIG: Final[ConfigDict] = ConfigDict(frozen=True, extra="forbid", coerce_numbers_to_str=True)
 
 TaskName = Annotated[str, Field(pattern=_TASK_PATTERN)]
+#: ``[repair] snapshot_name``'s rule, which ``repair --snapshot-name`` is held to as well.
+SnapshotName = Annotated[str, Field(pattern=_SNAPSHOT_PATTERN)]
 
 
 def _refuse_a_boolean(value: object) -> object:
@@ -121,7 +123,7 @@ class RepairSettings(BaseModel):
     model_config = _SECTION_CONFIG
 
     media_dir: str = ""
-    snapshot_name: str = Field(default="pre_winrepair", pattern=_SNAPSHOT_PATTERN)
+    snapshot_name: SnapshotName = "pre_winrepair"
     stage_free_gb: float = Field(default=15.0, gt=0, allow_inf_nan=False)
     system_free_gb: float = Field(default=25.0, gt=0, allow_inf_nan=False)
 
@@ -177,5 +179,6 @@ __all__ = [
     "NodeSettings",
     "RepairSettings",
     "Settings",
+    "SnapshotName",
     "SshSettings",
 ]

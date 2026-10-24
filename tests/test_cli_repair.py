@@ -83,8 +83,9 @@ def test_repair_echoes_each_step_to_stderr_as_it_happens(tmp_path: Path) -> None
     run = run_cli(["repair", "--vmid", "1", "--json"], cli_config(tmp_path), agent_runner(FakePve()))
     lines = [line for line in run.stderr.splitlines() if line.startswith("[")]
     assert [line.split("] ", 1)[1].split()[0] for line in lines] == DONE_OK_STEPS
-    assert lines[-1].startswith("[ok ] poll ")
-    assert "verdict=STATE=DONE-OK" in lines[-1]
+    # Exactly: the step name and the verdict are str enums inside, and must reach the line as their
+    # values, never as StepName.POLL or RunVerdict.DONE_OK.
+    assert lines[-1] == "[ok ] poll" + " " * 19 + "verdict=STATE=DONE-OK"
 
 
 @NEEDS_A_POSIX_STATE_DIR
@@ -125,21 +126,37 @@ def test_a_bad_snapshot_name_option_is_refused_naming_it_before_any_call(tmp_pat
     assert runner.calls == []
 
 
-def test_a_snapshot_name_override_labels_only_its_own_error_with_the_option() -> None:
-    """Re-validating ``[repair]`` with the override reports every field; only one is the option's fault.
+#: The exact refusal of a --snapshot-name that breaks [repair] snapshot_name's rule.
+BAD_SNAPSHOT_NAME = "--snapshot-name: String should match pattern '^[A-Za-z][A-Za-z0-9_-]{1,39}$'"
 
-    ``model_construct`` builds the settings without validation, the one way an invalid floor reaches
-    the re-validation (a loaded ``RepairSettings`` is always valid).
+
+def test_a_snapshot_name_override_is_validated_alone_never_with_the_other_settings() -> None:
+    """Only the option is judged: the rest of ``[repair]`` was validated when it loaded.
+
+    ``model_construct`` builds settings no load would pass (a negative floor); the override is
+    still accepted or refused on its own rule.
     """
     unchecked = RepairSettings.model_construct(
         media_dir="", snapshot_name="pre_ok", stage_free_gb=-1.0, system_free_gb=25.0
     )
+    assert resolve_snapshot_name(unchecked, "pre_from_option") == "pre_from_option"
     with pytest.raises(PreflightError) as refused:
         resolve_snapshot_name(unchecked, "1-starts-with-a-digit")
-    parts = str(refused.value).split("; ")
-    assert len(parts) == 2
-    assert parts[0].startswith("--snapshot-name: String should match pattern ")
-    assert parts[1] == "[repair] stage_free_gb: Input should be greater than 0"
+    assert str(refused.value) == BAD_SNAPSHOT_NAME
+
+
+@NEEDS_A_POSIX_STATE_DIR
+def test_a_refused_run_prints_the_envelope_byte_for_byte(tmp_path: Path) -> None:
+    """The --json envelope's exact bytes (two-space indent, key order), and the step on stderr."""
+    run = run_cli(
+        ["repair", "--vmid", "1", "--snapshot-name", "1-bad", "--json"], cli_config(tmp_path), agent_runner(FakePve())
+    )
+    assert run.stdout == (
+        '{\n  "ok": false,\n  "command": "repair",\n  "vmid": 1,\n  "verdict": "ERROR",\n  "steps": [\n'
+        '    {\n      "step": "error",\n      "ok": false,\n'
+        f'      "message": "{BAD_SNAPSHOT_NAME}"\n    }}\n  ]\n}}\n'
+    )
+    assert run.stderr == f"[FAIL] error                  message={BAD_SNAPSHOT_NAME}\n"
 
 
 @NEEDS_A_POSIX_STATE_DIR
@@ -332,6 +349,37 @@ def test_stage_root_option_reaches_the_stage_root_step(tmp_path: Path) -> None:
     )
     stage_root = next(step for step in envelope_steps(json_envelope(run.stdout)) if step["step"] == "stage_root")
     assert (stage_root["root"], stage_root["note"]) == ("C:\\upgrade", "explicit")
+
+
+@NEEDS_A_POSIX_STATE_DIR
+@pytest.mark.parametrize("value", ["d", "D", "d:", "D:\\"])
+def test_stage_root_option_takes_any_spelling_of_one_drive(tmp_path: Path, value: str) -> None:
+    run = run_cli(
+        ["repair", "--vmid", "1", "--stage-root", value, "--json"], cli_config(tmp_path), agent_runner(FakePve())
+    )
+    stage_root = next(step for step in envelope_steps(json_envelope(run.stdout)) if step["step"] == "stage_root")
+    assert (run.exit_code, stage_root["root"], stage_root["note"]) == (0, "D:\\upgrade", "explicit")
+
+
+@pytest.mark.parametrize("value", ["", "1:", "CD", "C:\\upgrade", "C;", chr(0x00E4) + ":"])
+def test_a_stage_root_that_is_no_drive_letter_is_refused_before_any_call(tmp_path: Path, value: str) -> None:
+    run, runner = _usage_error(["repair", "--vmid", "1", "--stage-root", value], tmp_path)
+    assert run.exit_code == 2
+    assert "Invalid value for '--stage-root'" in run.stderr
+    assert "is not a drive letter" in run.stderr
+    assert runner.calls == []
+
+
+@NEEDS_A_POSIX_STATE_DIR
+def test_a_stage_root_the_guest_does_not_have_is_refused_naming_it(tmp_path: Path) -> None:
+    run = run_cli(
+        ["repair", "--vmid", "1", "--stage-root", "e", "--json"], cli_config(tmp_path), agent_runner(FakePve())
+    )
+    envelope = json_envelope(run.stdout)
+    assert (run.exit_code, envelope["verdict"]) == (1, "ERROR")
+    assert str(envelope_steps(envelope)[-1]["message"]).startswith(
+        "--stage-root names E: which the guest does not have: {'C': 60.0, 'D': 200.0} - "
+    )
 
 
 @NEEDS_A_POSIX_STATE_DIR

@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 from pve_winrepair.domain.addresses import normalise_mac, vm_macs
 from pve_winrepair.domain.envelope import PROBE_TIMEOUT, READ_FAILURES, GuestProtocolError, snippet
 from pve_winrepair.domain.guest_answers import GuestCommand, NicMacsAnswer
+from pve_winrepair.domain.report import StepName
 
 if TYPE_CHECKING:
     from pve_winrepair.application.ports import GuestPort, NodePort
@@ -73,9 +74,9 @@ def check_guest_is_vm(node: NodePort, guest: GuestPort, vmid: int, rep: Report) 
     reported = _guest_macs(guest)
     common = sorted(configured & reported)
     if common:
-        rep.add("guest_identity", ok=True, ip=guest.ip, macs=common)
+        rep.add(StepName.GUEST_IDENTITY, ok=True, ip=guest.ip, macs=common)
         return
-    rep.add("guest_identity", ok=False, ip=guest.ip, vm_macs=sorted(configured), guest_macs=sorted(reported))
+    rep.add(StepName.GUEST_IDENTITY, ok=False, ip=guest.ip, vm_macs=sorted(configured), guest_macs=sorted(reported))
     raise GuestMismatchError(
         f"the guest at {guest.ip} is not VM {vmid}: none of its NIC MACs ({', '.join(sorted(reported))}) "
         f"is a MAC of VM {vmid} in qm config ({', '.join(sorted(configured))}) - check --ip"

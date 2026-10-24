@@ -11,6 +11,8 @@ Contents:
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import lib_log_rich.runtime
 import rich_click as click
 
@@ -18,10 +20,11 @@ from pve_winrepair.application.repair import RepairRequest, run_repair
 
 from ..constants import CLICK_CONTEXT_SETTINGS
 from ..context import get_cli_context
-from ..param_types import Ipv4Address, PositiveFiniteFloat, StorageId
+from ..param_types import Ipv4Address, PositiveFiniteFloat, StorageId, WindowsDrive
 from ..typed_click import option
 from .runs import (
     PreflightError,
+    RunCommand,
     check_node,
     echo_step,
     finish,
@@ -29,6 +32,11 @@ from .runs import (
     refused,
     resolve_snapshot_name,
 )
+
+if TYPE_CHECKING:
+    from ipaddress import IPv4Address
+
+    from pve_winrepair.domain.enums import DriveLetter
 
 __all__ = ["cli_repair"]
 
@@ -63,6 +71,7 @@ __all__ = ["cli_repair"]
 )
 @option(
     "--stage-root",
+    type=WindowsDrive(),
     default=None,
     help="Drive to stage the media on, e.g. C: or D:. Default: a non-system fixed drive with room, else C:.",
 )
@@ -81,8 +90,8 @@ def cli_repair(
     hours: float,
     as_json: bool,
     stage_only: bool,
-    ip: str | None,
-    stage_root: str | None,
+    ip: IPv4Address | None,
+    stage_root: DriveLetter | None,
     tpm_storage: str | None,
 ) -> None:
     """Repair a guest whose cumulative update fails, by an in-place repair upgrade.
@@ -108,7 +117,7 @@ def cli_repair(
                 tpm_storage=tpm_storage,
             )
         except PreflightError as refusal:
-            finish(ctx, refused(vmid, refusal, wu_held=False), command="repair", vmid=vmid, as_json=as_json)
+            finish(ctx, refused(vmid, refusal, wu_held=False), command=RunCommand.REPAIR, vmid=vmid, as_json=as_json)
         result = run_repair(
             request,
             cli_ctx.services.make_node(settings.ssh),
@@ -117,4 +126,4 @@ def cli_repair(
             receipts=cli_ctx.services.make_receipts(settings.node.state_dir),
             on_step=echo_step,
         )
-        finish(ctx, result, command="repair", vmid=vmid, as_json=as_json)
+        finish(ctx, result, command=RunCommand.REPAIR, vmid=vmid, as_json=as_json)

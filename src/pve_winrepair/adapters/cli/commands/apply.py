@@ -11,6 +11,8 @@ Contents:
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import lib_log_rich.runtime
 import rich_click as click
 
@@ -20,7 +22,10 @@ from ..constants import CLICK_CONTEXT_SETTINGS
 from ..context import get_cli_context
 from ..param_types import Ipv4Address, PositiveFiniteFloat
 from ..typed_click import option
-from .runs import PreflightError, check_node, echo_step, finish, load_run_settings, refused
+from .runs import PreflightError, RunCommand, check_node, echo_step, finish, load_run_settings, refused
+
+if TYPE_CHECKING:
+    from ipaddress import IPv4Address
 
 __all__ = ["cli_apply"]
 
@@ -42,7 +47,7 @@ __all__ = ["cli_apply"]
 )
 @option("--json", "as_json", is_flag=True, default=False, help="Print a JSON envelope on stdout.")
 @click.pass_context
-def cli_apply(ctx: click.Context, *, vmid: int, ip: str, apply_minutes: float, as_json: bool) -> None:
+def cli_apply(ctx: click.Context, *, vmid: int, ip: IPv4Address, apply_minutes: float, as_json: bool) -> None:
     """Apply the upgrade a repair run staged, and verify the build it recorded.
 
     Refuses unless the guest's upgrade run finished OK, reboots it cleanly into the new OS, waits
@@ -57,11 +62,11 @@ def cli_apply(ctx: click.Context, *, vmid: int, ip: str, apply_minutes: float, a
             check_node(settings)
         except PreflightError as refusal:
             # The repair run held Windows Update and only a verified apply lifts it.
-            finish(ctx, refused(vmid, refusal, wu_held=True), command="apply", vmid=vmid, as_json=as_json)
+            finish(ctx, refused(vmid, refusal, wu_held=True), command=RunCommand.APPLY, vmid=vmid, as_json=as_json)
         result = run_apply(
             ApplyRequest(vmid=vmid, ip=ip, apply_minutes=apply_minutes),
             cli_ctx.services.make_node(settings.ssh),
             receipts=cli_ctx.services.make_receipts(settings.node.state_dir),
             on_step=echo_step,
         )
-        finish(ctx, result, command="apply", vmid=vmid, as_json=as_json)
+        finish(ctx, result, command=RunCommand.APPLY, vmid=vmid, as_json=as_json)
