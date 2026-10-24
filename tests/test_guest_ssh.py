@@ -62,8 +62,8 @@ from pve_winrepair.domain.guest_answers import (
 )
 from pve_winrepair.domain.settings import SshSettings
 from pve_winrepair_guest import lockdown
-from pve_winrepair_guest.probes import SetupReport
-from pve_winrepair_guest.upgrade import LockDirsReport
+from pve_winrepair_guest.probes import SetupReport, StateLog
+from pve_winrepair_guest.upgrade import LockDirsReport, LockDirsVerdict
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -333,7 +333,12 @@ def test_push_tool_deletes_the_profile_copy_when_lock_dirs_refuses_and_writes_no
     source = _packed(tmp_path)
     reason = r"C:\winrepair held files before it was locked: remove it (rd /s /q C:\winrepair) and rerun"
     refused = LockDirsReport(
-        tool=TOOL_PATH, tool_present=False, tool_sha256=None, directories=(), verdict="FAILED", reason=reason
+        tool=TOOL_PATH,
+        tool_present=False,
+        tool_sha256=None,
+        directories=(),
+        verdict=LockDirsVerdict.FAILED,
+        reason=reason,
     )
     runner = _pushing(source)
     runner.replies["lock-dirs"] = [answer("lock-dirs", refused, ok=False)]
@@ -606,7 +611,7 @@ DONE_FAIL_LINES = ("launching: setup.exe", "STATE=DONE-FAIL setup exit=0xC190020
     ],
     ids=["no-log", "done-ok", "done-fail", "no-marker", "alive-over-done-ok", "alive-no-log"],
 )
-def test_run_state_reads_live_and_marker(alive: bool, log: object, live: bool, marker: str | None) -> None:
+def test_run_state_reads_live_and_marker(alive: bool, log: StateLog, live: bool, marker: str | None) -> None:
     runner = FakeRunner().on("setup-alive", answer("setup-alive", SetupReport(count=int(alive), alive=alive)))
     runner.on("state", answer("state", log))
     state = read_run_state(_guest(runner), timeout=300)

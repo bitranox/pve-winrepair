@@ -50,10 +50,10 @@ import os
 import re
 import stat
 import time
-from dataclasses import dataclass
 from datetime import datetime
+from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast
 
 from pwshpy import (
     CimInstance,
@@ -65,8 +65,9 @@ from pwshpy import (
     TaskState,
     ps,
 )
+from pydantic import BaseModel, ConfigDict
 
-from pve_winrepair_guest.envelope import Command, Outcome, Skip
+from pve_winrepair_guest.envelope import Command, Outcome, Report, Skip
 from pve_winrepair_guest.lockdown import (
     LOCK_SIDS,
     AclReading,
@@ -90,6 +91,7 @@ from pve_winrepair_guest.probes import (
     BuildInfo,
     Drive,
     StateLog,
+    StateVerdict,
     build_info,
     current_version,
     drive_from_cim,
@@ -109,17 +111,30 @@ __all__ = [
     "SUCCESS_CODES",
     "TASK_NAME",
     "TREE_LIMIT",
+    "DirectoryAction",
     "DirectoryLock",
+    "GateResult",
+    "LaunchArgs",
     "LaunchReport",
+    "LaunchVerdict",
     "LaunchWait",
+    "LaunchWaitStatus",
+    "LockDirsArgs",
     "LockDirsReport",
+    "LockDirsVerdict",
+    "MoSetup",
     "Preflight",
+    "PrepareArgs",
+    "PrepareGate",
     "PrepareReport",
     "PwshpyHost",
     "SetupRun",
     "TaskCleanup",
+    "TaskCleanupAction",
     "TaskSpec",
+    "TreeWait",
     "UpgradeHost",
+    "UpgradeRunArgs",
     "UpgradeRunReport",
     "WimImage",
     "account_text",
@@ -127,6 +142,7 @@ __all__ = [
     "elapsed_text",
     "exit_hex",
     "media_image",
+    "mo_setup",
     "powershell_path",
     "preflight",
     "register_on_demand",
@@ -193,26 +209,38 @@ _BUILD_NUMBER = re.compile(r"[0-9]{1,9}")
 # path names a different file; no trailing backslash (setup's /copylogs appends "-logs").
 _ABSOLUTE_PATH = re.compile(r"[A-Za-z]:(?:\\[A-Za-z0-9_.-]+)+")
 _GB = 1024**3
+_T = TypeVar("_T")
+
+
+class _Internal(BaseModel):
+    """Base of the frozen records that stay inside the guest tool and are never serialised."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
 
 # --- port and adapter -----------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
-class SetupRun:
+class TreeWait(str, Enum):
+    """How the wait for setup.exe covered the processes it started."""
+
+    # pwshpy's job object: the wait ends once the job holds no process.
+    JOB = "job"
+
+
+class SetupRun(_Internal):
     """How setup.exe ended.
 
     Attributes:
         exit_code: Its exit code as the unsigned DWORD Windows returns (0xC1900200 = 3247440384).
-        tree_wait: How the wait covered setup's child processes: "job" (pwshpy's job object).
+        tree_wait: How the wait covered setup's child processes.
     """
 
     exit_code: int
-    tree_wait: str
+    tree_wait: TreeWait
 
 
-@dataclass(frozen=True)
-class TaskSpec:
+class TaskSpec(_Internal):
     r"""A scheduled task to register: one exec action, a principal, settings, and NO trigger.
 
     There is deliberately no trigger field: the only way this task runs is an explicit start, so
@@ -501,7 +529,7 @@ class PwshpyHost:
         requires that no SetupHost runs (``setup-alive``).
         """
         result = ps.exec(list(argv), wait_tree=True)  # no timeout: the down-level phase runs for hours
-        return SetupRun(exit_code=result.exit_code, tree_wait="job")
+        return SetupRun(exit_code=result.exit_code, tree_wait=TreeWait.JOB)
 
 
 def _win32() -> Win32Security:
@@ -554,8 +582,39 @@ def _connect_scheduler() -> Any:
 # --- prepare --------------------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
-class PrepareReport:
+class PrepareGate(str, Enum):
+    """prepare's WIM gate: the media may be applied, or they must not be."""
+
+    PASSED = "PASS"
+    FAILED = "FAIL"
+
+
+class WimImage(Report):
+    """One image of the staged media, as prepare reports it (the envelope's ``image``).
+
+    The node reads ``build`` and ``spbuild`` from it into the repair receipt, so the field names
+    are the envelope's contract, not pwshpy's (``WindowsImage.sp_build``).
+
+    Attributes:
+        index: The image's 1-based index.
+        name: The image name, or "" when absent.
+        edition: WINDOWS/EDITIONID, or "" when absent.
+        build: WINDOWS/VERSION/BUILD (e.g. 26200); 0 when the XML holds no numeric one.
+        spbuild: WINDOWS/VERSION/SPBUILD, the servicing build compared against a guest's UBR.
+        languages: Every WINDOWS/LANGUAGES/LANGUAGE, in document order.
+        default_language: WINDOWS/LANGUAGES/DEFAULT, or "" when absent.
+    """
+
+    index: int
+    name: str
+    edition: str
+    build: int
+    spbuild: int
+    languages: tuple[str, ...]
+    default_language: str
+
+
+class PrepareReport(Report):
     """prepare's answer.
 
     Attributes:
@@ -576,7 +635,7 @@ class PrepareReport:
     readonly_cleared: int
     readonly_failed: int
     wim: str
-    gate: str
+    gate: PrepareGate
     reason: str | None
     image: WimImage | None
     running: BuildInfo
@@ -608,32 +667,6 @@ def clear_read_only(root: str) -> tuple[int, list[Skip]]:
     return cleared, failed
 
 
-@dataclass(frozen=True)
-class WimImage:
-    """One image of the staged media, as prepare reports it (the envelope's ``image``).
-
-    The node reads ``build`` and ``spbuild`` from it into the repair receipt, so the field names
-    are the envelope's contract, not pwshpy's (``WindowsImage.sp_build``).
-
-    Attributes:
-        index: The image's 1-based index.
-        name: The image name, or "" when absent.
-        edition: WINDOWS/EDITIONID, or "" when absent.
-        build: WINDOWS/VERSION/BUILD (e.g. 26200); 0 when the XML holds no numeric one.
-        spbuild: WINDOWS/VERSION/SPBUILD, the servicing build compared against a guest's UBR.
-        languages: Every WINDOWS/LANGUAGES/LANGUAGE, in document order.
-        default_language: WINDOWS/LANGUAGES/DEFAULT, or "" when absent.
-    """
-
-    index: int
-    name: str
-    edition: str
-    build: int
-    spbuild: int
-    languages: tuple[str, ...]
-    default_language: str
-
-
 def media_image(record: WindowsImage) -> WimImage:
     """The envelope's view of one image pwshpy read from the WIM's header and XML."""
     return WimImage(
@@ -647,7 +680,25 @@ def media_image(record: WindowsImage) -> WimImage:
     )
 
 
-def wim_gate(images: Sequence[WimImage], running: BuildInfo) -> tuple[str, str | None, WimImage | None]:
+class GateResult(_Internal):
+    """The WIM gate's answer.
+
+    Attributes:
+        gate: PASS or FAIL.
+        reason: Why it is FAIL, else None.
+        image: Image index 1, or None when the WIM has none.
+    """
+
+    gate: PrepareGate
+    reason: str | None
+    image: WimImage | None
+
+
+def _gate_failed(reason: str, image: WimImage | None) -> GateResult:
+    return GateResult(gate=PrepareGate.FAILED, reason=reason, image=image)
+
+
+def wim_gate(images: Sequence[WimImage], running: BuildInfo) -> GateResult:
     """Gate the media: image index 1 must not be older than the running build.
 
     ``(BUILD, SPBUILD)`` is compared against ``(CurrentBuild, UBR)`` as a tuple: SPBuild alone
@@ -655,20 +706,20 @@ def wim_gate(images: Sequence[WimImage], running: BuildInfo) -> tuple[str, str |
     (19045.9000 on a 26200.7462 guest), and setup would downgrade it.
 
     Returns:
-        (PASS or FAIL, the reason for FAIL, image index 1 or None when absent).
+        PASS or FAIL, the reason for FAIL, and image index 1 (None when absent).
     """
     image = next((i for i in images if i.index == 1), None)
     if image is None:
-        return "FAIL", "the WIM has no image index 1", None
+        return _gate_failed("the WIM has no image index 1", None)
     if image.build == 0:
         # pwshpy reads a BUILD that is missing or not a number as 0. The tuple compare below would
         # FAIL it too, but with a reason naming a build "0" the media never carried.
-        return "FAIL", "image index 1 names no build (WINDOWS/VERSION/BUILD missing or not a number)", image
+        return _gate_failed("image index 1 names no build (WINDOWS/VERSION/BUILD missing or not a number)", image)
     if not _BUILD_NUMBER.fullmatch(running.current_build):
-        return "FAIL", f"running CurrentBuild {running.current_build!r} is not a number", image
+        return _gate_failed(f"running CurrentBuild {running.current_build!r} is not a number", image)
     if (image.build, image.spbuild) < (int(running.current_build), running.ubr):
-        return "FAIL", f"image {image.build}.{image.spbuild} older than running {running.build}", image
-    return "PASS", None, image
+        return _gate_failed(f"image {image.build}.{image.spbuild} older than running {running.build}", image)
+    return GateResult(gate=PrepareGate.PASSED, reason=None, image=image)
 
 
 def _read_wim(path: str) -> tuple[tuple[WimImage, ...] | None, str | None]:
@@ -685,8 +736,36 @@ def _read_wim(path: str) -> tuple[tuple[WimImage, ...] | None, str | None]:
         return None, f"the WIM reader refused the image: {exc}"
 
 
-def _values(host: UpgradeHost, key: str) -> dict[str, object]:
-    return {value.name: value.data for value in host.registry(key)}
+def _gate(path: str, running: BuildInfo) -> GateResult:
+    """The WIM gate over the file at ``path``: FAIL with the reader's reason when it cannot be read."""
+    images, reason = _read_wim(path)
+    if images is None:
+        # _read_wim names a reason whenever it returns no images.
+        return GateResult(gate=PrepareGate.FAILED, reason=reason, image=None)
+    return wim_gate(images, running)
+
+
+class MoSetup(_Internal):
+    r"""The ``HKLM\SYSTEM\Setup\MoSetup`` values prepare reads back, parsed once from the registry.
+
+    Attributes:
+        waiver: The compat waiver when it reads back as a DWORD (an int), else None.
+    """
+
+    waiver: int | None
+
+
+def mo_setup(values: Iterable[RegistryValue]) -> MoSetup:
+    r"""Parse the values under ``HKLM\SYSTEM\Setup\MoSetup`` (read eagerly, so a failed read raises here).
+
+    Example:
+        >>> from pwshpy import RegistryHive
+        >>> text = RegistryValue(hive=RegistryHive.HKLM, key="k", name=WAIVER, type=RegistryValueType.REG_SZ, data="1")
+        >>> mo_setup([text]).waiver is None
+        True
+    """
+    data = {value.name: value.data for value in values}.get(WAIVER)
+    return MoSetup(waiver=data if isinstance(data, int) else None)
 
 
 def _write_waiver(host: UpgradeHost, skipped: list[Skip]) -> int | None:
@@ -698,11 +777,10 @@ def _write_waiver(host: UpgradeHost, skipped: list[Skip]) -> int | None:
     except PwshPyError as exc:
         skipped.append(Skip(item=item, reason=str(exc)))
     try:
-        value = _values(host, MOSETUP_KEY).get(WAIVER)
+        return mo_setup(host.registry(MOSETUP_KEY)).waiver
     except PwshPyError as exc:
         skipped.append(Skip(item=f"{item} readback", reason=str(exc)))
         return None
-    return value if isinstance(value, int) else None
 
 
 def _tpm_present(host: UpgradeHost, skipped: list[Skip]) -> bool | None:
@@ -725,65 +803,70 @@ def _drives(host: UpgradeHost, skipped: list[Skip]) -> tuple[Drive, ...]:
     return drives
 
 
-def run_prepare(host: UpgradeHost, stage_root: str) -> Outcome:
+class PrepareArgs(_Internal):
+    """prepare's arguments, read from argparse's namespace in one place.
+
+    Attributes:
+        stage_root: The staged media.
+    """
+
+    stage_root: str
+
+    @classmethod
+    def from_namespace(cls, args: argparse.Namespace) -> PrepareArgs:
+        """The attribute ``_stage_root`` defines."""
+        return cls(stage_root=args.stage_root)
+
+
+def run_prepare(host: UpgradeHost, args: PrepareArgs) -> Outcome:
     """Clear read-only, gate on the WIM; on PASS write the waiver and report TPM and free space."""
+    stage_root = args.stage_root
     cleared, skipped = clear_read_only(stage_root)
     failed = len(skipped)
     running = build_info(current_version(host.registry(CURRENT_VERSION_KEY)))
     wim_path = os.fspath(Path(stage_root, "sources", "install.wim"))
-    images, reason = _read_wim(wim_path)
-    gate, image = "FAIL", None
-    if images is not None:
-        gate, reason, image = wim_gate(images, running)
+    gated = _gate(wim_path, running)
+    passed = gated.gate is PrepareGate.PASSED
+    # The waiver, the TPM and the drives are asked only once the media passed: a FAIL writes nothing.
     report = PrepareReport(
         stage_root=stage_root,
         readonly_cleared=cleared,
         readonly_failed=failed,
         wim=wim_path,
-        gate=gate,
-        reason=reason,
-        image=image,
+        gate=gated.gate,
+        reason=gated.reason,
+        image=gated.image,
         running=running,
-        waiver_readback=None,
-        tpm_present=None,
-        drives=(),
+        waiver_readback=_write_waiver(host, skipped) if passed else None,
+        tpm_present=_tpm_present(host, skipped) if passed else None,
+        drives=_drives(host, skipped) if passed else (),
     )
-    if gate != "PASS":
-        return Outcome(ok=False, data=report, skipped=tuple(skipped))
-    waiver = _write_waiver(host, skipped)
-    tpm = _tpm_present(host, skipped)
-    drives = _drives(host, skipped)
-    report = PrepareReport(
-        stage_root=stage_root,
-        readonly_cleared=cleared,
-        readonly_failed=failed,
-        wim=wim_path,
-        gate=gate,
-        reason=reason,
-        image=image,
-        running=running,
-        waiver_readback=waiver,
-        tpm_present=tpm,
-        drives=drives,
-    )
-    return Outcome(ok=True, data=report, skipped=tuple(skipped))
+    return Outcome(ok=passed, data=report, skipped=tuple(skipped))
 
 
 # --- launch ---------------------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
-class LaunchWait:
+class LaunchWaitStatus(str, Enum):
+    """How the bounded wait for the SYSTEM run to start setup ended."""
+
+    # Its "launching" line appeared.
+    LAUNCHED = "LAUNCHED"
+    # A completion marker appeared first: the run gave up before setup started.
+    ENDED = "ENDED"
+    TIMEOUT = "TIMEOUT"
+
+
+class LaunchWait(Report):
     """The bounded wait for the SYSTEM run to start setup.
 
     Attributes:
-        status: LAUNCHED (its "launching" line appeared), ENDED (a completion marker appeared
-            first: the run gave up before setup started), or TIMEOUT.
+        status: LAUNCHED, ENDED or TIMEOUT.
         waited_s: Seconds waited.
         last_error: The last error reading the state log, or None.
     """
 
-    status: str
+    status: LaunchWaitStatus
     waited_s: float
     last_error: str | None
 
@@ -808,11 +891,11 @@ def wait_for_launch(
         except OSError as exc:
             lines, last_error = (), str(exc)
         if any(_LAUNCHING.search(line) for line in lines):
-            return LaunchWait(status="LAUNCHED", waited_s=clock() - started, last_error=last_error)
+            return LaunchWait(status=LaunchWaitStatus.LAUNCHED, waited_s=clock() - started, last_error=last_error)
         if state_verdict(lines)[0] is not None:
-            return LaunchWait(status="ENDED", waited_s=clock() - started, last_error=last_error)
+            return LaunchWait(status=LaunchWaitStatus.ENDED, waited_s=clock() - started, last_error=last_error)
         if clock() - started >= limit:
-            return LaunchWait(status="TIMEOUT", waited_s=clock() - started, last_error=last_error)
+            return LaunchWait(status=LaunchWaitStatus.TIMEOUT, waited_s=clock() - started, last_error=last_error)
         sleep(interval)
 
 
@@ -909,8 +992,15 @@ def register_on_demand(
         raise NativeCallError(str(exc) or f"cannot register task {spec.path!r}") from exc
 
 
-@dataclass(frozen=True)
-class TaskCleanup:
+class TaskCleanupAction(str, Enum):
+    """What launch did to the SYSTEM task once it had its verdict (see :class:`TaskCleanup`)."""
+
+    DISARM = "DISARM"
+    REMOVE = "REMOVE"
+    NONE = "NONE"
+
+
+class TaskCleanup(Report):
     """What launch did to the SYSTEM task once it had its verdict.
 
     The task has no trigger, so a definition left behind cannot start by itself; it is removed
@@ -931,7 +1021,7 @@ class TaskCleanup:
         error: Why the cleanup did not reach its goal, else None.
     """
 
-    action: str
+    action: TaskCleanupAction
     ended: bool | None
     disabled: bool
     deleted: bool
@@ -962,9 +1052,11 @@ def _disarm(host: UpgradeHost) -> TaskCleanup:
     """Delete the definition of a task whose run is launching setup; the instance keeps running."""
     errors: list[str] = []
     if _deleted(host, errors):
-        return TaskCleanup(action="DISARM", ended=None, disabled=False, deleted=True, error=None)
+        return TaskCleanup(action=TaskCleanupAction.DISARM, ended=None, disabled=False, deleted=True, error=None)
     disabled = _attempt(errors, "disable", lambda: host.disable_task(TASK_PATH))
-    return TaskCleanup(action="DISARM", ended=None, disabled=disabled, deleted=False, error="; ".join(errors))
+    return TaskCleanup(
+        action=TaskCleanupAction.DISARM, ended=None, disabled=disabled, deleted=False, error="; ".join(errors)
+    )
 
 
 def _ended(host: UpgradeHost, errors: list[str]) -> bool:
@@ -990,30 +1082,60 @@ def _remove(host: UpgradeHost) -> TaskCleanup:
     try:
         state = host.task_state(TASK_PATH)
     except PwshPyError as exc:
-        return TaskCleanup(action="REMOVE", ended=None, disabled=False, deleted=False, error=f"read: {exc}")
+        return TaskCleanup(
+            action=TaskCleanupAction.REMOVE, ended=None, disabled=False, deleted=False, error=f"read: {exc}"
+        )
     if state is None:
-        return TaskCleanup(action="REMOVE", ended=True, disabled=False, deleted=True, error=None)
+        return TaskCleanup(action=TaskCleanupAction.REMOVE, ended=True, disabled=False, deleted=True, error=None)
     errors: list[str] = []
     if state is TaskState.RUNNING and not _ended(host, errors):
         # Keep the definition: deleting it would leave a live instance that nothing can end by name.
         disabled = _attempt(errors, "disable", lambda: host.disable_task(TASK_PATH))
-        return TaskCleanup(action="REMOVE", ended=False, disabled=disabled, deleted=False, error="; ".join(errors))
+        return TaskCleanup(
+            action=TaskCleanupAction.REMOVE, ended=False, disabled=disabled, deleted=False, error="; ".join(errors)
+        )
     if _deleted(host, errors):
-        return TaskCleanup(action="REMOVE", ended=True, disabled=False, deleted=True, error=None)
-    return TaskCleanup(action="REMOVE", ended=True, disabled=False, deleted=False, error="; ".join(errors))
+        return TaskCleanup(action=TaskCleanupAction.REMOVE, ended=True, disabled=False, deleted=True, error=None)
+    return TaskCleanup(
+        action=TaskCleanupAction.REMOVE, ended=True, disabled=False, deleted=False, error="; ".join(errors)
+    )
 
 
-def _louder(verdict: str, reason: str | None, cleanup: TaskCleanup) -> tuple[str, str | None]:
+class LaunchVerdict(str, Enum):
+    """launch's verdict (see :class:`LaunchReport`)."""
+
+    OK = "OK"
+    SUSPECT = "SUSPECT"
+    NO_START = "NO_START"
+    FAILED = "FAILED"
+    TASK_LEFT = "TASK_LEFT"
+
+
+class _Judgement(_Internal):
+    """A launch verdict and why it is not OK.
+
+    Attributes:
+        verdict: The verdict.
+        reason: Why it is not OK, else None.
+    """
+
+    verdict: LaunchVerdict
+    reason: str | None
+
+
+def _louder(judged: _Judgement, cleanup: TaskCleanup) -> _Judgement:
     """A task cleanup that failed overrides the verdict: the task is still there, armed or live."""
     if cleanup.error is None:
-        return verdict, reason
-    what = "disarmed" if cleanup.action == "DISARM" else "ended and removed"
-    before = f"{verdict}: {reason}" if reason else verdict
-    return "TASK_LEFT", f"{before}; the task {TASK_PATH} could not be {what}: {cleanup.error}"
+        return judged
+    what = "disarmed" if cleanup.action is TaskCleanupAction.DISARM else "ended and removed"
+    verdict = judged.verdict.value
+    before = f"{verdict}: {judged.reason}" if judged.reason else verdict
+    return _Judgement(
+        verdict=LaunchVerdict.TASK_LEFT, reason=f"{before}; the task {TASK_PATH} could not be {what}: {cleanup.error}"
+    )
 
 
-@dataclass(frozen=True)
-class LaunchReport:
+class LaunchReport(Report):
     """launch's answer.
 
     Attributes:
@@ -1046,14 +1168,13 @@ class LaunchReport:
     setuphost: int | None
     state: StateLog | None
     task_cleanup: TaskCleanup
-    verdict: str
+    verdict: LaunchVerdict
     reason: str | None
     locked: tuple[str, ...] = ()
     tool_sha256: str | None = None
 
 
-@dataclass(frozen=True)
-class Preflight:
+class Preflight(_Internal):
     """What launch checked before it touched the task.
 
     Attributes:
@@ -1221,8 +1342,8 @@ def _refused(spec: TaskSpec, check: Preflight) -> Outcome:
         wait=None,
         setuphost=None,
         state=None,
-        task_cleanup=TaskCleanup(action="NONE", ended=None, disabled=False, deleted=False, error=None),
-        verdict="FAILED",
+        task_cleanup=TaskCleanup(action=TaskCleanupAction.NONE, ended=None, disabled=False, deleted=False, error=None),
+        verdict=LaunchVerdict.FAILED,
         reason=f"refused before the task was registered: {check.problem}",
         locked=check.locked,
         tool_sha256=check.tool_sha256,
@@ -1256,17 +1377,19 @@ def _setuphost_count(host: UpgradeHost) -> int:
     return sum(1 for p in host.processes() if p.name.casefold() == SETUP_PROCESS.casefold())
 
 
-def _settle(host: UpgradeHost, wait: LaunchWait) -> tuple[int | None, str, str | None]:
-    """After the wait: (SetupHost count, verdict, reason)."""
-    if wait.status == "TIMEOUT":
-        return None, "NO_START", f"no 'launching' line within {LAUNCH_WAIT:g} s"
-    if wait.status == "ENDED":
-        return None, "SUSPECT", "the run ended before launching setup, read the state verdict"
+def _settle(host: UpgradeHost, wait: LaunchWait) -> tuple[int | None, _Judgement]:
+    """After the wait: the SetupHost count (None when not checked) and the verdict."""
+    if wait.status is LaunchWaitStatus.TIMEOUT:
+        reason = f"no 'launching' line within {LAUNCH_WAIT:g} s"
+        return None, _Judgement(verdict=LaunchVerdict.NO_START, reason=reason)
+    if wait.status is LaunchWaitStatus.ENDED:
+        reason = "the run ended before launching setup, read the state verdict"
+        return None, _Judgement(verdict=LaunchVerdict.SUSPECT, reason=reason)
     host.sleep(SETUP_SETTLE)
     count = _setuphost_count(host)
     if count == 0:
-        return 0, "SUSPECT", "setup already gone, read the state verdict"
-    return count, "OK", None
+        return 0, _Judgement(verdict=LaunchVerdict.SUSPECT, reason="setup already gone, read the state verdict")
+    return count, _Judgement(verdict=LaunchVerdict.OK, reason=None)
 
 
 def _final_state(state_log: str, skipped: list[Skip]) -> StateLog | None:
@@ -1277,7 +1400,26 @@ def _final_state(state_log: str, skipped: list[Skip]) -> StateLog | None:
         return None
 
 
-def run_launch(host: UpgradeHost, stage_root: str, state_log: str, tool: str) -> Outcome:
+class LaunchArgs(_Internal):
+    """launch's arguments, read from argparse's namespace in one place.
+
+    Attributes:
+        stage_root: The staged media.
+        state_log: The run's state log.
+        tool: This tool's packed .ps1 as the driver pushed it.
+    """
+
+    stage_root: str
+    state_log: str
+    tool: str
+
+    @classmethod
+    def from_namespace(cls, args: argparse.Namespace) -> LaunchArgs:
+        """The attributes ``_configure_launch`` defines."""
+        return cls(stage_root=args.stage_root, state_log=args.state_log, tool=args.tool)
+
+
+def run_launch(host: UpgradeHost, args: LaunchArgs) -> Outcome:
     """Start upgrade-run as a SYSTEM task, wait for it to launch setup, clean the task up, check SetupHost.
 
     The preflight comes first and a refusal there touches nothing (no task, the old state log
@@ -1285,20 +1427,22 @@ def run_launch(host: UpgradeHost, stage_root: str, state_log: str, tool: str) ->
     launching its task has no further use, and a run that never launched must be stopped before
     it does.
     """
-    spec = task_spec(tool, stage_root, state_log, powershell_path(host.system_root()))
-    check = preflight(host, tool, stage_root, spec.program)
+    state_log = args.state_log
+    spec = task_spec(args.tool, args.stage_root, state_log, powershell_path(host.system_root()))
+    check = preflight(host, args.tool, args.stage_root, spec.program)
     if check.problem is not None:
         return _refused(spec, check)
     removed = _remove_stale(state_log)
     registered, failure = _start_task(host, spec)
     skipped: list[Skip] = []
-    wait, count, verdict, reason = None, None, "FAILED", failure
+    wait = None
     if failure is None:
         wait = wait_for_launch(lambda: read_state(state_log).tail, clock=host.monotonic, sleep=host.sleep)
-    cleanup = _disarm(host) if wait is not None and wait.status == "LAUNCHED" else _remove(host)
+    cleanup = _disarm(host) if wait is not None and wait.status is LaunchWaitStatus.LAUNCHED else _remove(host)
+    count, judged = None, _Judgement(verdict=LaunchVerdict.FAILED, reason=failure)
     if wait is not None:
-        count, verdict, reason = _settle(host, wait)
-    verdict, reason = _louder(verdict, reason, cleanup)
+        count, judged = _settle(host, wait)
+    judged = _louder(judged, cleanup)
     state = _final_state(state_log, skipped)
     report = LaunchReport(
         task=TASK_NAME,
@@ -1309,19 +1453,33 @@ def run_launch(host: UpgradeHost, stage_root: str, state_log: str, tool: str) ->
         setuphost=count,
         state=state,
         task_cleanup=cleanup,
-        verdict=verdict,
-        reason=reason,
+        verdict=judged.verdict,
+        reason=judged.reason,
         locked=check.locked,
         tool_sha256=check.tool_sha256,
     )
-    return Outcome(ok=verdict == "OK", data=report, skipped=tuple(skipped))
+    return Outcome(ok=judged.verdict is LaunchVerdict.OK, data=report, skipped=tuple(skipped))
 
 
 # --- lock-dirs ------------------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
-class DirectoryLock:
+class DirectoryAction(str, Enum):
+    """What lock-dirs did to one directory (see :class:`DirectoryLock`)."""
+
+    CREATED = "CREATED"
+    ALREADY_LOCKED = "ALREADY_LOCKED"
+    ABSENT = "ABSENT"
+
+
+class LockDirsVerdict(str, Enum):
+    """lock-dirs' verdict."""
+
+    OK = "OK"
+    FAILED = "FAILED"
+
+
+class DirectoryLock(Report):
     """One directory lock-dirs secured.
 
     Attributes:
@@ -1332,11 +1490,10 @@ class DirectoryLock:
     """
 
     path: str
-    action: str
+    action: DirectoryAction
 
 
-@dataclass(frozen=True)
-class LockDirsReport:
+class LockDirsReport(Report):
     """lock-dirs' answer.
 
     Attributes:
@@ -1352,8 +1509,18 @@ class LockDirsReport:
     tool_present: bool
     tool_sha256: str | None
     directories: tuple[DirectoryLock, ...]
-    verdict: str
+    verdict: LockDirsVerdict
     reason: str | None
+
+
+class _LockProblem(_Internal):
+    """Why a directory cannot be trusted: lock-dirs refuses and touches nothing after it.
+
+    Attributes:
+        problem: The reason, as the refusal names it.
+    """
+
+    problem: str
 
 
 def _not_locked(directory: str, problems: Sequence[str], *, created: bool) -> str:
@@ -1367,26 +1534,26 @@ def _not_locked(directory: str, problems: Sequence[str], *, created: bool) -> st
     )
 
 
-def _secure(host: UpgradeHost, directory: str, *, created: bool) -> tuple[str, str | None]:
-    """(action, problem) for a directory just created locked, or one that already existed.
+def _secure(host: UpgradeHost, directory: str, *, created: bool) -> DirectoryAction | _LockProblem:
+    """The action for a directory just created locked, or one that already existed; else the problem.
 
     The same three checks either way: what the name leads to (no reparse point, a directory, an
     allowed owner), exactly the lock's DACL, and nothing below it a non-admin owns or may write.
     """
     problems = lock_target_problems(host.inspect_lock_target(directory))
     if problems:
-        return "", "; ".join(problems)
+        return _LockProblem(problem="; ".join(problems))
     problems = exact_lock_problems(host.read_acl(directory))
     if problems:
-        return "", _not_locked(directory, problems, created=created)
+        return _LockProblem(problem=_not_locked(directory, problems, created=created))
     below = _summary(_tree_problems(host, directory, _trusted(host)))
     if below is not None:
-        return "", below
-    return ("CREATED" if created else "ALREADY_LOCKED"), None
+        return _LockProblem(problem=below)
+    return DirectoryAction.CREATED if created else DirectoryAction.ALREADY_LOCKED
 
 
-def _judge_directory(host: UpgradeHost, directory: str, *, create: bool) -> tuple[str, str | None]:
-    """(action, problem): create an absent directory locked, or with ``create`` off report it ABSENT.
+def _judge_directory(host: UpgradeHost, directory: str, *, create: bool) -> DirectoryAction | _LockProblem:
+    """Create an absent directory locked, or with ``create`` off report it ABSENT; else the problem.
 
     An existing directory is judged by :func:`_secure` either way, so ``create`` never changes the
     verdict on one; with it off nothing is written at all.
@@ -1397,10 +1564,10 @@ def _judge_directory(host: UpgradeHost, directory: str, *, create: bool) -> tupl
         elif host.name_taken(directory):
             created = False
         else:
-            return "ABSENT", None
+            return DirectoryAction.ABSENT
         return _secure(host, directory, created=created)
     except (OSError, PwshPyError) as exc:
-        return "", str(exc)
+        return _LockProblem(problem=str(exc))
 
 
 def _tool_in_place(host: UpgradeHost, tool: str) -> tuple[bool, str | None, str | None]:
@@ -1419,12 +1586,36 @@ def _lock_refused(tool: str, done: Sequence[DirectoryLock], reason: str, *, pres
     return Outcome(
         ok=False,
         data=LockDirsReport(
-            tool=tool, tool_present=present, tool_sha256=None, directories=tuple(done), verdict="FAILED", reason=reason
+            tool=tool,
+            tool_present=present,
+            tool_sha256=None,
+            directories=tuple(done),
+            verdict=LockDirsVerdict.FAILED,
+            reason=reason,
         ),
     )
 
 
-def run_lock_dirs(host: UpgradeHost, tool: str, stage_root: str | None, *, create: bool = True) -> Outcome:
+class LockDirsArgs(_Internal):
+    """lock-dirs' arguments, read from argparse's namespace in one place.
+
+    Attributes:
+        tool: The content address the driver pushes the tool to.
+        stage_root: The stage root to lock as well, or None.
+        create: Create an absent directory (off with ``--no-create``: report it ABSENT).
+    """
+
+    tool: str
+    stage_root: str | None
+    create: bool
+
+    @classmethod
+    def from_namespace(cls, args: argparse.Namespace) -> LockDirsArgs:
+        """The attributes ``_configure_lock_dirs`` defines."""
+        return cls(tool=args.tool, stage_root=args.stage_root, create=args.create)
+
+
+def run_lock_dirs(host: UpgradeHost, args: LockDirsArgs) -> Outcome:
     r"""Create and lock ``C:\winrepair`` (and ``stage_root``) before anything is copied into them.
 
     Each directory absent is created with the lock already in place (``lockdown.create_locked_dir``:
@@ -1449,22 +1640,28 @@ def run_lock_dirs(host: UpgradeHost, tool: str, stage_root: str | None, *, creat
     read-only report, and its CREATED would hide that the upgrade removed it. An existing one is
     judged exactly as above.
     """
+    tool, stage_root = args.tool, args.stage_root
     scope = lock_scope_problem(tool, stage_root)
     if scope is not None:
         return _lock_refused(tool, (), scope)
     done: list[DirectoryLock] = []
     for directory in (ntpath.dirname(tool), *(() if stage_root is None else (stage_root,))):
-        action, problem = _judge_directory(host, directory, create=create)
-        if problem is not None:
-            return _lock_refused(tool, done, problem)
-        done.append(DirectoryLock(path=directory, action=action))
+        judged = _judge_directory(host, directory, create=args.create)
+        if isinstance(judged, _LockProblem):
+            return _lock_refused(tool, done, judged.problem)
+        done.append(DirectoryLock(path=directory, action=judged))
     present, digest, problem = _tool_in_place(host, tool)
     if problem is not None:
         return _lock_refused(tool, done, problem, present=present)
     return Outcome(
         ok=True,
         data=LockDirsReport(
-            tool=tool, tool_present=present, tool_sha256=digest, directories=tuple(done), verdict="OK", reason=None
+            tool=tool,
+            tool_present=present,
+            tool_sha256=digest,
+            directories=tuple(done),
+            verdict=LockDirsVerdict.OK,
+            reason=None,
         ),
     )
 
@@ -1472,8 +1669,7 @@ def run_lock_dirs(host: UpgradeHost, tool: str, stage_root: str | None, *, creat
 # --- upgrade-run ----------------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
-class UpgradeRunReport:
+class UpgradeRunReport(Report):
     r"""upgrade-run's answer; the state log carries the same facts for the host's poll.
 
     Attributes:
@@ -1499,9 +1695,9 @@ class UpgradeRunReport:
     exit_code: int | None
     exit_hex: str | None
     seconds: float | None
-    tree_wait: str | None
+    tree_wait: TreeWait | None
     newos_staged: bool | None
-    verdict: str
+    verdict: StateVerdict
     reason: str | None
 
 
@@ -1562,36 +1758,67 @@ class _StateLog:
             handle.write(state_line(self._now(), message) + "\r\n")
 
 
-def _info(read: Callable[[], str]) -> tuple[str | None, str]:
-    """Read one informational value; a failure is logged as unknown, never a reason to stop."""
+def _info(read: Callable[[], _T]) -> tuple[_T | None, str]:
+    """Read one informational value: (the value, its log text), or (None, "unknown (...)") on failure.
+
+    A failure is logged as unknown, never a reason to stop. The log text is ``str(value)``: a
+    float that way always carries a dot whatever the guest locale (a German one renders a
+    decimal comma, which would break a host-side parse of a number like the free space).
+    """
     try:
         value = read()
     # Any exception, deliberately: these reads only fill log lines inside the run whose one purpose
     # is to start setup, and a pywin32 shape change (TypeError, KeyError) must not abort it.
     except Exception as exc:
         return None, f"unknown ({type(exc).__name__}: {exc})"
-    return value, value
+    return value, str(value)
 
 
 def _build(host: UpgradeHost) -> str:
     return build_info(current_version(host.registry(CURRENT_VERSION_KEY))).build
 
 
-def _free_c_gb(host: UpgradeHost) -> str:
+def _free_c_gb(host: UpgradeHost) -> float:
     disks = list(host.cim("Win32_LogicalDisk", where="DeviceID='C:'"))
     drive = drive_from_cim(disks[0]) if disks else None
     if drive is None:
         raise ValueError("no C: drive")
-    # str(float) always writes a dot, whatever the guest locale; a decimal comma (as a German locale
-    # renders one) would break a host-side parse of a number like this one.
-    return str(drive.free_gb)
+    return drive.free_gb
 
 
-def _verdict(code: int) -> tuple[str, str]:
-    """(verdict, marker message) for setup's exit code."""
-    if (code & 0xFFFFFFFF) in SUCCESS_CODES:
-        return "DONE-OK", "STATE=DONE-OK reboot required to apply"
-    return "DONE-FAIL", f"STATE=DONE-FAIL rc={exit_hex(code)}"
+class _Setup(_Internal):
+    """What upgrade-run knows before setup.exe runs, carried into every report it can end with.
+
+    Attributes:
+        state_log: The log written.
+        setup: setup.exe's path.
+        argv: Its arguments.
+        build_before: The build before setup ran, or None when unreadable.
+    """
+
+    state_log: str
+    setup: str
+    argv: tuple[str, ...]
+    build_before: str | None
+
+
+def _not_run(setup: _Setup, reason: str) -> Outcome:
+    """The DONE-FAIL answer of a run in which setup.exe never ran."""
+    report = UpgradeRunReport(
+        state_log=setup.state_log,
+        setup=setup.setup,
+        argv=setup.argv,
+        build_before=setup.build_before,
+        build_after=None,
+        exit_code=None,
+        exit_hex=None,
+        seconds=None,
+        tree_wait=None,
+        newos_staged=None,
+        verdict=StateVerdict.DONE_FAIL,
+        reason=reason,
+    )
+    return Outcome(ok=False, data=report)
 
 
 def _upgrade(host: UpgradeHost, stage_root: str, log: _StateLog, state_log: str) -> Outcome:
@@ -1600,109 +1827,95 @@ def _upgrade(host: UpgradeHost, stage_root: str, log: _StateLog, state_log: str)
     before, before_text = _info(lambda: _build(host))
     log.say(f"build_before={before_text}")
     log.say("free_C_GB=" + _info(lambda: _free_c_gb(host))[1])
-    setup, argv = os.fspath(Path(stage_root, "setup.exe")), setup_arguments(stage_root)
-    if not _is_file(setup):
-        log.say("STATE=DONE-FAIL setup.exe missing")
-        failed = UpgradeRunReport(
-            state_log=state_log,
-            setup=setup,
-            argv=argv,
-            build_before=before,
-            build_after=None,
-            exit_code=None,
-            exit_hex=None,
-            seconds=None,
-            tree_wait=None,
-            newos_staged=None,
-            verdict="DONE-FAIL",
-            reason="setup.exe missing",
-        )
-        return Outcome(ok=False, data=failed)
-    log.say(f"launching: {setup} {' '.join(argv)}")
+    path, argv = os.fspath(Path(stage_root, "setup.exe")), setup_arguments(stage_root)
+    setup = _Setup(state_log=state_log, setup=path, argv=argv, build_before=before)
+    if not _is_file(path):
+        log.say(f"{StateVerdict.DONE_FAIL.marker} setup.exe missing")
+        return _not_run(setup, "setup.exe missing")
+    log.say(f"launching: {path} {' '.join(argv)}")
     started = host.monotonic()
     try:
-        run = host.run_setup([setup, *argv])
+        run = host.run_setup([path, *argv])
     except PwshPyError as exc:
-        log.say(f"STATE=DONE-FAIL setup.exe could not run: {exc}")
+        log.say(f"{StateVerdict.DONE_FAIL.marker} setup.exe could not run: {exc}")
         log.say("=== upgrade_run end ===")
-        failed = UpgradeRunReport(
-            state_log=state_log,
-            setup=setup,
-            argv=argv,
-            build_before=before,
-            build_after=None,
-            exit_code=None,
-            exit_hex=None,
-            seconds=None,
-            tree_wait=None,
-            newos_staged=None,
-            verdict="DONE-FAIL",
-            reason=str(exc),
-        )
-        return Outcome(ok=False, data=failed)
-    return _finish(
-        host,
-        log,
-        UpgradeRunReport(
-            state_log=state_log,
-            setup=setup,
-            argv=argv,
-            build_before=before,
-            build_after=None,
-            exit_code=run.exit_code,
-            exit_hex=exit_hex(run.exit_code),
-            seconds=host.monotonic() - started,
-            tree_wait=run.tree_wait,
-            newos_staged=None,
-            verdict="",
-            reason=None,
-        ),
-    )
+        return _not_run(setup, str(exc))
+    return _finish(host, log, setup, run, host.monotonic() - started)
 
 
-def _finish(host: UpgradeHost, log: _StateLog, ran: UpgradeRunReport) -> Outcome:
+def _verdict(code: int) -> tuple[StateVerdict, str | None]:
+    """The verdict for setup's exit code, and why it is DONE-FAIL (None for DONE-OK)."""
+    if (code & 0xFFFFFFFF) in SUCCESS_CODES:
+        return StateVerdict.DONE_OK, None
+    return StateVerdict.DONE_FAIL, f"rc={exit_hex(code)}"
+
+
+def _marker(verdict: StateVerdict, reason: str | None) -> str:
+    """The completion marker line's message, e.g. ``STATE=DONE-FAIL rc=0xC1900200``."""
+    if verdict is StateVerdict.DONE_OK:
+        return f"{verdict.marker} reboot required to apply"
+    return f"{verdict.marker} {reason}"
+
+
+def _finish(host: UpgradeHost, log: _StateLog, setup: _Setup, run: SetupRun, seconds: float) -> Outcome:
     """Log setup's result, the build and NewOS, then the marker."""
-    code, seconds = ran.exit_code or 0, ran.seconds or 0.0
+    code = run.exit_code
     log.say(f"setup exit={exit_hex(code)} ({signed32(code)}) after {elapsed_text(seconds)}")
-    log.say(f"setup tree wait={ran.tree_wait}")
+    log.say(f"setup tree wait={run.tree_wait.value}")
     after, after_text = _info(lambda: _build(host))
     log.say(f"build_after_downlevel={after_text} (unchanged until the apply reboot)")
-    newos, newos_text = _info(lambda: str(host.test_path(NEWOS_DIR)))
+    newos, newos_text = _info(lambda: host.test_path(NEWOS_DIR))
     log.say(f"NewOS_staged={newos_text}")
-    verdict, marker = _verdict(code)
-    log.say(marker)
+    verdict, reason = _verdict(code)
+    log.say(_marker(verdict, reason))
     log.say("=== upgrade_run end ===")
-    reason = None if verdict == "DONE-OK" else marker.removeprefix("STATE=DONE-FAIL ")
     report = UpgradeRunReport(
-        state_log=ran.state_log,
-        setup=ran.setup,
-        argv=ran.argv,
-        build_before=ran.build_before,
+        state_log=setup.state_log,
+        setup=setup.setup,
+        argv=setup.argv,
+        build_before=setup.build_before,
         build_after=after,
-        exit_code=ran.exit_code,
-        exit_hex=ran.exit_hex,
-        seconds=ran.seconds,
-        tree_wait=ran.tree_wait,
-        newos_staged=None if newos is None else newos == "True",
+        exit_code=code,
+        exit_hex=exit_hex(code),
+        seconds=seconds,
+        tree_wait=run.tree_wait,
+        newos_staged=newos,
         verdict=verdict,
         reason=reason,
     )
-    return Outcome(ok=verdict == "DONE-OK", data=report)
+    return Outcome(ok=verdict is StateVerdict.DONE_OK, data=report)
 
 
-def run_upgrade(host: UpgradeHost, stage_root: str, state_log: str) -> Outcome:
+class UpgradeRunArgs(_Internal):
+    """upgrade-run's arguments, read from argparse's namespace in one place.
+
+    Attributes:
+        stage_root: The staged media.
+        state_log: The run's state log.
+    """
+
+    stage_root: str
+    state_log: str
+
+    @classmethod
+    def from_namespace(cls, args: argparse.Namespace) -> UpgradeRunArgs:
+        """The attributes ``_configure_run`` defines."""
+        return cls(stage_root=args.stage_root, state_log=args.state_log)
+
+
+def run_upgrade(host: UpgradeHost, args: UpgradeRunArgs) -> Outcome:
     """Run setup.exe as the task's command, logging every step and ending with a marker.
 
     An unexpected error still leaves a ``STATE=DONE-FAIL`` marker (best effort), so the host's
     poll ends on a verdict instead of waiting out its deadline on a run that already died.
     """
-    log = _StateLog(state_log, host.now)
+    log = _StateLog(args.state_log, host.now)
     try:
-        return _upgrade(host, stage_root, log, state_log)
+        return _upgrade(host, args.stage_root, log, args.state_log)
     except Exception as exc:
         # If the log itself is what failed, the envelope still reports the error.
         with contextlib.suppress(OSError):
-            log.say(f"STATE=DONE-FAIL internal error: {type(exc).__name__}: {exc}")
+            log.say(f"{StateVerdict.DONE_FAIL.marker} internal error: {type(exc).__name__}: {exc}")
         raise
 
 
@@ -1765,25 +1978,25 @@ def commands(host_factory: Callable[[], UpgradeHost] = PwshpyHost) -> tuple[Comm
         Command(
             name="prepare",
             help="clear read-only, gate on the WIM, write the compat waiver",
-            run=lambda a: run_prepare(host_factory(), a.stage_root),
+            run=lambda a: run_prepare(host_factory(), PrepareArgs.from_namespace(a)),
             configure=_stage_root,
         ),
         Command(
             name="lock-dirs",
             help=r"create C:\winrepair (and the stage root) already locked, before anything is copied into them",
-            run=lambda a: run_lock_dirs(host_factory(), a.tool, a.stage_root, create=a.create),
+            run=lambda a: run_lock_dirs(host_factory(), LockDirsArgs.from_namespace(a)),
             configure=_configure_lock_dirs,
         ),
         Command(
             name="launch",
             help="start upgrade-run as a SYSTEM task and check setup stays up",
-            run=lambda a: run_launch(host_factory(), a.stage_root, a.state_log, a.tool),
+            run=lambda a: run_launch(host_factory(), LaunchArgs.from_namespace(a)),
             configure=_configure_launch,
         ),
         Command(
             name="upgrade-run",
             help="run setup.exe (the SYSTEM task's command), write the state log and marker",
-            run=lambda a: run_upgrade(host_factory(), a.stage_root, a.state_log),
+            run=lambda a: run_upgrade(host_factory(), UpgradeRunArgs.from_namespace(a)),
             configure=_configure_run,
         ),
     )

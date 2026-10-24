@@ -42,6 +42,7 @@ from pwshpy import (
     TaskState,
     ps,
 )
+from pydantic import BaseModel, ValidationError
 from win32_fakes import Descriptor, FakeFiles, FakeSecurity, Node, Sid
 
 from pve_winrepair_guest import lockdown, probes, upgrade, winrepair_guest
@@ -307,7 +308,7 @@ class FakeUpgradeHost:
         if self.setup_crash:
             raise RuntimeError("boom")
         self.now_s += self.setup_seconds
-        return upgrade.SetupRun(exit_code=self.setup_exit, tree_wait="job")
+        return upgrade.SetupRun(exit_code=self.setup_exit, tree_wait=upgrade.TreeWait.JOB)
 
 
 def _run(host: FakeUpgradeHost, *argv: str) -> tuple[int, dict[str, object]]:
@@ -633,7 +634,7 @@ def test_wim_gate_compares_build_and_spbuild_against_the_running_build(build: in
         index=1, name="n", edition="e", build=build, spbuild=spbuild, languages=("de-DE",), default_language="de-DE"
     )
 
-    assert upgrade.wim_gate((image,), _running("26200", 7462))[0] == gate
+    assert upgrade.wim_gate((image,), _running("26200", 7462)).gate == upgrade.PrepareGate(gate)
 
 
 def test_wim_gate_refuses_a_running_build_that_is_not_a_number() -> None:
@@ -641,9 +642,11 @@ def test_wim_gate_refuses_a_running_build_that_is_not_a_number() -> None:
         index=1, name="n", edition="e", build=26200, spbuild=8973, languages=("de-DE",), default_language="de-DE"
     )
 
-    gate, reason, found = upgrade.wim_gate((image,), _running("26200a", 7462))
+    gated = upgrade.wim_gate((image,), _running("26200a", 7462))
 
-    assert (gate, reason, found) == ("FAIL", "running CurrentBuild '26200a' is not a number", image)
+    assert gated == upgrade.GateResult(
+        gate=upgrade.PrepareGate.FAILED, reason="running CurrentBuild '26200a' is not a number", image=image
+    )
 
 
 def test_wim_gate_refuses_media_without_image_index_1() -> None:
@@ -651,11 +654,90 @@ def test_wim_gate_refuses_media_without_image_index_1() -> None:
         index=2, name="n", edition="e", build=26200, spbuild=9999, languages=("de-DE",), default_language="de-DE"
     )
 
-    assert upgrade.wim_gate((image,), _running("26200", 8875)) == (
-        "FAIL",
-        "the WIM has no image index 1",
-        None,
+    assert upgrade.wim_gate((image,), _running("26200", 8875)) == upgrade.GateResult(
+        gate=upgrade.PrepareGate.FAILED, reason="the WIM has no image index 1", image=None
     )
+
+
+# --- the reports' closed value sets ---------------------------------------------------------
+
+_WAIT = upgrade.LaunchWait(status=upgrade.LaunchWaitStatus.LAUNCHED, waited_s=1.0, last_error=None)
+_CLEANUP = upgrade.TaskCleanup(
+    action=upgrade.TaskCleanupAction.DISARM, ended=None, disabled=False, deleted=True, error=None
+)
+_LOCK = upgrade.DirectoryLock(path=r"C:\winrepair", action=upgrade.DirectoryAction.CREATED)
+
+
+@pytest.mark.parametrize(
+    ("report", "field", "planted"),
+    [
+        (_WAIT, "status", "SOON"),
+        (_CLEANUP, "action", "EVICT"),
+        (_LOCK, "action", ""),
+        (
+            upgrade.LockDirsReport(
+                tool=TOOL,
+                tool_present=False,
+                tool_sha256=None,
+                directories=(_LOCK,),
+                verdict=upgrade.LockDirsVerdict.OK,
+                reason=None,
+            ),
+            "verdict",
+            "MAYBE",
+        ),
+        (
+            upgrade.LaunchReport(
+                task="OVMRepairUpgrade",
+                command="x",
+                stale_log_removed=False,
+                registered=True,
+                wait=_WAIT,
+                setuphost=1,
+                state=None,
+                task_cleanup=_CLEANUP,
+                verdict=upgrade.LaunchVerdict.OK,
+                reason=None,
+            ),
+            "verdict",
+            "MAYBE",
+        ),
+        (
+            upgrade.UpgradeRunReport(
+                state_log=STATE_LOG,
+                setup=SETUP,
+                argv=(),
+                build_before=None,
+                build_after=None,
+                exit_code=0,
+                exit_hex="0x00000000",
+                seconds=1.0,
+                tree_wait=upgrade.TreeWait.JOB,
+                newos_staged=True,
+                verdict=probes.StateVerdict.DONE_OK,
+                reason=None,
+            ),
+            "verdict",
+            "DONE-MAYBE",
+        ),
+        (upgrade.SetupRun(exit_code=0, tree_wait=upgrade.TreeWait.JOB), "tree_wait", "wait"),
+    ],
+    ids=lambda value: type(value).__name__ if isinstance(value, BaseModel) else str(value),
+)
+def test_a_report_refuses_a_value_outside_its_closed_set(report: BaseModel, field: str, planted: str) -> None:
+    # Each of these fields was free text, so a misspelt verdict or action reached the host as-is.
+    sent = report.model_dump(mode="json")
+
+    assert type(report).model_validate(sent) == report
+    with pytest.raises(ValidationError, match=field):
+        type(report).model_validate(sent | {field: planted})
+
+
+def test_mo_setup_reads_only_a_dword_waiver() -> None:
+    # A waiver read back as text is not the DWORD prepare wrote: it reads as None.
+    assert upgrade.mo_setup([_reg(WAIVER, 1)]).waiver == 1
+    assert upgrade.mo_setup([_reg(WAIVER, "1")]).waiver is None
+    assert upgrade.mo_setup([_reg("Other", 1)]).waiver is None
 
 
 # --- launch ---------------------------------------------------------------------------------
@@ -1101,7 +1183,7 @@ def test_wait_for_launch_keeps_polling_through_read_errors() -> None:
 
     wait = upgrade.wait_for_launch(read, clock=lambda: clock[0], sleep=sleep)
 
-    assert wait == upgrade.LaunchWait(status="LAUNCHED", waited_s=10.0, last_error="locked")
+    assert wait == upgrade.LaunchWait(status=upgrade.LaunchWaitStatus.LAUNCHED, waited_s=10.0, last_error="locked")
 
 
 # --- upgrade-run ----------------------------------------------------------------------------
@@ -1316,7 +1398,7 @@ def test_pwshpy_host_runs_setup_until_every_process_it_started_has_exited(tmp_pa
 
     run = upgrade.PwshpyHost().run_setup([sys.executable, "-c", _HANDS_OFF, _GRANDCHILD, str(marker)])
 
-    assert (run.exit_code, run.tree_wait) == (0, "job")
+    assert (run.exit_code, run.tree_wait) == (0, upgrade.TreeWait.JOB)
     assert marker.read_text(encoding="utf-8") == "done"
 
 

@@ -4,8 +4,8 @@ The down-level runs with /noreboot, which arms a ONE-SHOT BCD bootsequence point
 staged NewOS. This use case performs that reboot the only way that is safe on a hypervisor, then
 verifies the result and lifts the Windows Update hold.
 
-Every in-guest read runs the packed guest tool through the :class:`GuestPort` and gates on typed
-fields of its JSON envelope.
+Every in-guest read runs the packed guest tool through the :class:`GuestPort` and gates on the
+typed answer it validates (:mod:`pve_winrepair.domain.guest_answers`).
 
 Nothing stops the guest before the run gate: SetupHost gone AND the state log ending
 ``STATE=DONE-OK``, then the NewOS gate. Otherwise the verdict is RUN_LIVE (SetupHost runs),
@@ -52,6 +52,18 @@ from pve_winrepair.domain.envelope import (
     GuestCallError,
     GuestProtocolError,
 )
+from pve_winrepair.domain.guest_answers import (
+    DirectoryAction,
+    GuestCommand,
+    LockDirsAnswer,
+    LockDirsVerdict,
+    RestoreVerdict,
+    RestoreWuAnswer,
+    SearchStatus,
+    StagedOsAnswer,
+    StagedOsVerdict,
+    StateVerdict,
+)
 from pve_winrepair.domain.receipt import ReceiptError
 from pve_winrepair.domain.report import Report, RunExit, RunResult, RunVerdict, Step, StepName, StepValue
 
@@ -60,7 +72,8 @@ if TYPE_CHECKING:
     from ipaddress import IPv4Address
 
     from pve_winrepair.application.ports import GuestPort, NodePort, ReceiptStore
-    from pve_winrepair.domain.envelope import Fields, RunState
+    from pve_winrepair.domain.envelope import RunState
+    from pve_winrepair.domain.guest_answers import UpdateSearch
     from pve_winrepair.domain.receipt import GuestBuild, RepairReceipt
 
 __all__ = [
@@ -139,21 +152,28 @@ def report_tool_dir_lock(staged: GuestPort, rep: Report) -> None:
     # The directory of the tool's content address: the one the ssh adapter pushes into.
     tool_dir = ntpath.dirname(staged.packed.guest_path)
     try:
-        envelope = staged.tool("lock-dirs", "--tool", staged.packed.guest_path, "--no-create", timeout=PROBE_TIMEOUT)
-        verdict = envelope.gate("verdict", "OK")
+        lock = staged.ask(
+            GuestCommand.LOCK_DIRS,
+            LockDirsAnswer,
+            "--tool",
+            staged.packed.guest_path,
+            "--no-create",
+            timeout=PROBE_TIMEOUT,
+        ).data
     except GuestCallError as exc:
         rep.add(StepName.WINREPAIR_LOCK, ok=False, note=f"could not read the lock (informational): {exc}")
         return
-    if verdict == "OK":
-        actions = [d.text("action") for d in envelope.data.sections("directories")]
-        action = actions[0] if actions else None
+    if lock.verdict is LockDirsVerdict.OK:
+        # Without --stage-root lock-dirs reports the tool's directory only, so the first entry is its.
+        action = lock.directories[0].action if lock.directories else None
         gone = {"note": f"{tool_dir} is gone after the upgrade; the next repair creates it locked"}
-        rep.add(StepName.WINREPAIR_LOCK, ok=True, action=action, **(gone if action == "ABSENT" else {}))
+        shown = None if action is None else action.value
+        rep.add(StepName.WINREPAIR_LOCK, ok=True, action=shown, **(gone if action is DirectoryAction.ABSENT else {}))
         return
     rep.add(
         StepName.WINREPAIR_LOCK,
         ok=False,
-        reason=envelope.data.text_or_none("reason"),
+        reason=lock.reason,
         note=f"{tool_dir} changed during the upgrade; nothing was relocked and nothing runs "
         f"from it - remove it (rd /s /q {tool_dir}, as an administrator) before the next "
         f"repair run, which refuses it otherwise",
@@ -208,7 +228,7 @@ def _unfinished(state: RunState) -> ApplyError | None:
         )
     if not state.log_present:
         return ApplyError(f"no state log at {state.log_path} - no upgrade run to apply", verdict=RunVerdict.NO_RUN)
-    if state.marker != "STATE=DONE-OK":
+    if state.verdict is not StateVerdict.DONE_OK:
         return ApplyError(
             f"the run ended {state.marker} - re-diagnose it rather than applying it", verdict=RunVerdict.RUN_FAILED
         )
@@ -230,7 +250,7 @@ def gate_run_finished(guest: GuestPort, rep: Report) -> None:
         raise ApplyError(f"cannot verify that the upgrade run finished: {exc}") from exc
     refusal = _unfinished(state)
     if refusal is not None:
-        rep.add(StepName.RUN_FINISHED, ok=False, verdict=refusal.verdict, alive=state.alive, marker=state.marker)
+        rep.add(StepName.RUN_FINISHED, ok=False, verdict=refusal.verdict.value, alive=state.alive, marker=state.marker)
         raise refusal
     rep.add(StepName.RUN_FINISHED, ok=True, marker=state.marker)
 
@@ -242,39 +262,39 @@ def gate_staged(guest: GuestPort, rep: Report) -> None:
     down-level has to be re-run from setup.exe.
     """
     try:
-        staged = guest.probe("staged-os", timeout=PROBE_TIMEOUT)
+        staged = guest.ask(GuestCommand.STAGED_OS, StagedOsAnswer, timeout=PROBE_TIMEOUT).data
     except READ_FAILURES as exc:
         raise ApplyError(
             f"could not read the staged-OS state from the guest - refusing to reboot on an unknown state: {exc}"
         ) from exc
-    present, verdict = staged.flag("present"), staged.text("verdict")
-    if verdict != ("REARMABLE" if present else "RERUN"):
-        raise GuestProtocolError(f"staged-os: present={present} contradicts verdict {verdict!r}")
-    rep.add(StepName.GATE_STAGED, ok=present, verdict=verdict)
+    present, verdict = staged.present, staged.verdict
+    # The probe derives its verdict from the flag; one disagreeing with it is a driver/tool mismatch.
+    if verdict is not (StagedOsVerdict.REARMABLE if present else StagedOsVerdict.RERUN):
+        raise GuestProtocolError(f"staged-os: present={present} contradicts verdict {verdict.value!r}")
+    rep.add(StepName.GATE_STAGED, ok=present, verdict=verdict.value)
     if not present:
         raise ApplyError(
             "NewOS is absent - the upgrade rolled back; re-run the down-level rather than re-arming the boot entry"
         )
 
 
-def _search_detail(search: Fields) -> dict[str, StepValue]:
+def _search_detail(search: UpdateSearch) -> dict[str, StepValue]:
     """The bounded Windows Update search as step fields: informational, never part of the verdict.
 
     A TIMEOUT is normal on the first boot after the apply, while servicing still runs; bare, it
     reads like a failure, so it carries the sentence that says what it is.
     """
-    status = search.text("status")
-    detail: dict[str, StepValue] = {"search": status}
-    if status == "OK":
-        detail["search_pending"] = search.integer("pending")
-    elif status == "TIMEOUT":
+    detail: dict[str, StepValue] = {"search": search.status.value}
+    if search.status is SearchStatus.OK:
+        detail["search_pending"] = search.pending
+    elif search.status is SearchStatus.TIMEOUT:
         detail["search_note"] = (
-            f"Windows Update search abandoned after {search.number('timeout_s'):g} s - informational, "
+            f"Windows Update search abandoned after {search.timeout_s:g} s - informational, "
             f"NOT a verdict; normal on the first boot after the apply while servicing runs; "
             f"re-run restore-wu later to list pending updates"
         )
     else:
-        detail["search_error"] = search.text_or_none("error")
+        detail["search_error"] = search.error
     return detail
 
 
@@ -286,21 +306,19 @@ def restore_windows_update(guest: GuestPort, rep: Report) -> None:
     (UNKNOWN, or no answer) is a failure, not "all restored".
     """
     try:
-        envelope = guest.tool("restore-wu", timeout=900)
+        restored = guest.ask(GuestCommand.RESTORE_WU, RestoreWuAnswer, timeout=900).data
     except READ_FAILURES as exc:
         rep.add(StepName.RESTORE_WU, ok=False, note="no answer")
         raise ApplyError(f"could not run the Windows Update restore: {exc}") from exc
-    verdict = envelope.gate("verdict", "RESTORED")
-    data = envelope.data
-    still = data.texts("still_disabled")
-    search = _search_detail(data.section("search"))
-    if verdict == "RESTORED":
+    verdict, still = restored.verdict, restored.still_disabled
+    search = _search_detail(restored.search)
+    if verdict is RestoreVerdict.RESTORED:
         rep.add(StepName.RESTORE_WU, ok=True, note="all restored", **search)
         return
-    rep.add(StepName.RESTORE_WU, ok=False, verdict=verdict, still_disabled=list(still), **search)
-    if verdict == "STILL_DISABLED":
+    rep.add(StepName.RESTORE_WU, ok=False, verdict=verdict.value, still_disabled=list(still), **search)
+    if verdict is RestoreVerdict.STILL_DISABLED:
         raise ApplyError("Windows Update left disabled: " + ", ".join(still))
-    raise ApplyError(f"Windows Update state could not be verified: {verdict}")
+    raise ApplyError(f"Windows Update state could not be verified: {verdict.value}")
 
 
 def apply_reboot(node: NodePort, vmid: int, rep: Report) -> None:

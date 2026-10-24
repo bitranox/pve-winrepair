@@ -14,10 +14,11 @@ apply reboot (:meth:`RepairReceipt.same_build`).
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from datetime import datetime
 from typing import TYPE_CHECKING, Annotated, NamedTuple
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from pve_winrepair.domain.envelope import GuestProtocolError
 
@@ -40,8 +41,8 @@ class BuildPair(NamedTuple):
         True
     """
 
-    build: int
-    ubr: int
+    build: _Count
+    ubr: _Count
 
 
 class GuestBuild(BaseModel):
@@ -114,7 +115,7 @@ class RepairReceipt(BaseModel):
         ...     vmid=100,
         ...     image_build=26200,
         ...     image_spbuild=8973,
-        ...     build_before=(26200, 7462),
+        ...     build_before=BuildPair(build=26200, ubr=7462),
         ...     install_date_before=1761206400,
         ...     written_at=at,
         ... )
@@ -127,9 +128,18 @@ class RepairReceipt(BaseModel):
     vmid: int = Field(ge=1)
     image_build: int = Field(ge=0)
     image_spbuild: int = Field(ge=0)
-    build_before: tuple[_Count, _Count]
+    build_before: BuildPair
     install_date_before: int = Field(ge=0)
     written_at: datetime
+
+    @field_validator("build_before", mode="before")
+    @classmethod
+    def _build_before_is_an_array(cls, value: object) -> object:
+        # pydantic also builds a NamedTuple from an object keyed by its field names; a receipt has
+        # only ever held the array, so an object is refused rather than read.
+        if isinstance(value, Mapping):
+            raise ValueError("expected the array [build, ubr], not an object")
+        return value
 
     def expected_build(self) -> str:
         """The build apply must find on the guest, as ``<CurrentBuild>.<UBR>``."""
@@ -137,4 +147,4 @@ class RepairReceipt(BaseModel):
 
     def same_build(self) -> bool:
         """The media carry the build the guest already ran, so the build alone cannot prove the upgrade applied."""
-        return (self.image_build, self.image_spbuild) == self.build_before
+        return BuildPair(build=self.image_build, ubr=self.image_spbuild) == self.build_before

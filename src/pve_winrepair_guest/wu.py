@@ -26,6 +26,7 @@ Contents:
 from __future__ import annotations
 
 import time
+from collections.abc import Mapping
 from enum import Enum, IntEnum
 from typing import TYPE_CHECKING, Protocol
 
@@ -437,9 +438,7 @@ class QuiesceReport(Report):
         verdict: OK, FAIL, or UNKNOWN (no target service readable).
     """
 
-    # dict, not Mapping: ruff cannot see that Report is a pydantic model, so a runtime
-    # collections.abc import here would be moved under TYPE_CHECKING and break the model.
-    previous_start_modes: dict[str, StartMode]
+    previous_start_modes: Mapping[str, StartMode]
     writes: tuple[StartWrite, ...]
     stops: tuple[StopIssued, ...]
     wait: StopWait

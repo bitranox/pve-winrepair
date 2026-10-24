@@ -20,7 +20,7 @@ import rtoml
 from json_paths import at
 
 from pve_winrepair_guest import envelope, winrepair_guest
-from pve_winrepair_guest.envelope import Command, Outcome, Skip
+from pve_winrepair_guest.envelope import Command, Outcome, Report, Skip
 
 if TYPE_CHECKING:
     import argparse
@@ -28,8 +28,27 @@ if TYPE_CHECKING:
 GUEST = Path(__file__).resolve().parent.parent / "src" / "pve_winrepair_guest" / "winrepair_guest.py"
 
 
+class _Echoed(Report):
+    value: str
+
+
+class _Said(Report):
+    verdict: str
+
+
+class _Named(Report):
+    name: str
+
+
+class _Nested(Report):
+    """A payload holding a report and a tuple of reports, as PrepareReport holds its image and drives."""
+
+    inner: Skip
+    many: tuple[Skip, ...]
+
+
 def _echo(args: argparse.Namespace) -> Outcome:
-    return Outcome(ok=True, data={"value": args.value}, skipped=(Skip(item="extra", reason="not asked"),))
+    return Outcome(ok=True, data=_Echoed(value=args.value), skipped=(Skip(item="extra", reason="not asked"),))
 
 
 def _configure_echo(parser: argparse.ArgumentParser) -> None:
@@ -37,7 +56,7 @@ def _configure_echo(parser: argparse.ArgumentParser) -> None:
 
 
 def _refuse(_args: argparse.Namespace) -> Outcome:
-    return Outcome(ok=False, data={"verdict": "NO"})
+    return Outcome(ok=False, data=_Said(verdict="NO"))
 
 
 def _crash(_args: argparse.Namespace) -> Outcome:
@@ -138,10 +157,28 @@ def test_no_command_exits_2_with_a_usage_envelope() -> None:
 
 
 def test_non_ascii_data_is_escaped_so_a_cp1252_console_cannot_crash_the_write() -> None:
-    rendered = envelope.render(envelope.build("x", Outcome(ok=True, data={"name": "Gr\u00fc\u00dfe"})))
+    rendered = envelope.render(envelope.build("x", Outcome(ok=True, data=_Named(name="Gr\u00fc\u00dfe"))))
 
     assert rendered.isascii()
     assert json.loads(rendered)["data"] == {"name": "Gr\u00fc\u00dfe"}
+
+
+def test_a_payload_is_rendered_as_the_report_subclass_it_is_nested_fields_included() -> None:
+    # The envelope declares its data as the Report base; serialised by that declared type, every
+    # payload would come out as {} while its keys-only checks still passed.
+    data = _Nested(inner=Skip(item="D:", reason="locked"), many=(Skip(item="E:", reason="gone"),))
+
+    rendered = json.loads(envelope.render(envelope.build("x", Outcome(ok=True, data=data))))
+
+    assert at(rendered, "data", "inner", "reason") == "locked"
+    assert rendered["data"]["many"] == [{"item": "E:", "reason": "gone"}]
+
+
+def test_the_envelope_keeps_its_separators_and_key_order() -> None:
+    # The host parsers and every recorded answer read json.dumps' ", " and ": " separators.
+    rendered = envelope.render(envelope.build("x", Outcome(ok=False, data=_Said(verdict="NO"))))
+
+    assert rendered == '{"ok": false, "command": "x", "data": {"verdict": "NO"}, "skipped": []}'
 
 
 def test_header_pins_pywin32_for_windows_only() -> None:

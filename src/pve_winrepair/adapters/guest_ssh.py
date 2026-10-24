@@ -51,19 +51,14 @@ from pve_winrepair.domain.acl import SddlError, parse_sddl, trusted_writers, wri
 from pve_winrepair.domain.envelope import (
     POWERSHELL,
     READ_FAILURES,
-    Envelope,
-    Fields,
     GuestAnswer,
     GuestCallError,
     GuestNoAnswerError,
-    GuestProtocolError,
     GuestPushError,
     PayloadT,
     Runner,
-    check_argument,
     describe_validation_error,
     parse_answer,
-    parse_envelope,
     snippet,
     tool_argv,
 )
@@ -85,7 +80,6 @@ __all__ = [
     "TOOL_NAME",
     "Guest",
     "ask_guest",
-    "guest_tool",
     "packed_tool",
     "push_tool",
     "remove_staged",
@@ -253,22 +247,6 @@ def ask_guest(
     argv = _ssh_argv(guest.ip, guest.ssh_settings, tool_argv(guest.tool_path, command, args))
     proc = _call(guest.runner, argv, timeout, f"guest tool {command.value}")
     return parse_answer(command, payload, proc)
-
-
-def guest_tool(guest: Guest, command: str, *args: str, timeout: float) -> Envelope:
-    """Run one subcommand and return its envelope, read by name (ok or refused).
-
-    TEMPORARY(data-arch): removed once repair.py/apply.py read typed answers.
-
-    Raises:
-        UnsafeArgumentError: Before ssh, see :func:`check_argument`.
-        GuestPushError: The packed tool is missing on this node, so its guest path is unknown.
-        GuestNoAnswerError, GuestInternalError, GuestProtocolError: See :func:`parse_envelope`.
-    """
-    # check_argument first, so an unsafe name is refused as unsafe rather than as an unknown command.
-    known = GuestCommand(check_argument(command))
-    argv = _ssh_argv(guest.ip, guest.ssh_settings, tool_argv(guest.tool_path, known, args))
-    return parse_envelope(command, _call(guest.runner, argv, timeout, f"guest tool {command}"))
 
 
 def packed_tool(directory: Path) -> PackedTool:
@@ -527,23 +505,6 @@ class Guest:
     def ask(self, command: GuestCommand, payload: type[PayloadT], *args: str, timeout: float) -> GuestAnswer[PayloadT]:
         """See :func:`ask_guest`; runs the copy at :attr:`tool_path`."""
         return ask_guest(self, command, payload, *args, timeout=timeout)
-
-    # TEMPORARY(data-arch): removed once repair.py/apply.py read typed answers
-    def tool(self, command: str, *args: str, timeout: float) -> Envelope:
-        """See :func:`guest_tool`; runs the copy at :attr:`tool_path`."""
-        return guest_tool(self, command, *args, timeout=timeout)
-
-    # TEMPORARY(data-arch): removed once repair.py/apply.py read typed answers
-    def probe(self, command: str, *args: str, timeout: float) -> Fields:
-        """Run a subcommand that never refuses (a pure probe) and return its data.
-
-        Raises:
-            GuestProtocolError: It refused anyway.
-        """
-        envelope = self.tool(command, *args, timeout=timeout)
-        if not envelope.ok:
-            raise GuestProtocolError(f"probe {command} refused (exit {envelope.exit_code}); it never should")
-        return envelope.data
 
     def ssh(self, *remote: str, timeout: float) -> subprocess.CompletedProcess[str]:
         """Run a raw remote command (``hostname``, ``mkdir``); the caller checks the result.

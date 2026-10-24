@@ -27,9 +27,8 @@ finished process to :func:`parse_answer`.
 
 from __future__ import annotations
 
-import json
 import re
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Generic, TypeVar, cast
 
@@ -52,8 +51,6 @@ __all__ = [
     "READ_FAILURES",
     "STDERR_TAIL_LINES",
     "WU_HELD_HINT",
-    "Envelope",
-    "Fields",
     "GuestAnswer",
     "GuestCallError",
     "GuestInternalError",
@@ -71,9 +68,7 @@ __all__ = [
     "describe_validation_error",
     "guest_stderr",
     "parse_answer",
-    "parse_envelope",
     "snippet",
-    "state_marker",
     "tool_argv",
 ]
 
@@ -443,170 +438,6 @@ def parse_answer(command: GuestCommand, payload: type[PayloadT], proc: Completed
     answer = _validated(GuestAnswer[payload], line, command.value)
     _check_verdict(answer)
     return answer
-
-
-# --- TEMPORARY(data-arch): the name-keyed read path ------------------------------------------
-# TEMPORARY(data-arch): removed once repair.py/apply.py read typed answers
-
-
-def _kind(value: object) -> str:
-    return "null" if value is None else type(value).__name__
-
-
-@dataclass(frozen=True)
-class Fields:  # TEMPORARY(data-arch): removed once repair.py/apply.py read typed answers
-    """A JSON object from an envelope, read by name and type.
-
-    A missing or mistyped field raises :class:`GuestProtocolError` instead of reading as a
-    default, so a field renamed on the guest side fails loudly rather than gating as "absent".
-
-    Attributes:
-        values: The object.
-        where: Where it came from, for error messages (``launch.data.task_cleanup``).
-    """
-
-    values: Mapping[str, object]
-    where: str
-
-    def __contains__(self, name: str) -> bool:
-        """Whether the object has the field ``name``."""
-        return name in self.values
-
-    def raw(self, name: str) -> object:
-        """The value as parsed; raises when the field is missing."""
-        if name not in self.values:
-            raise GuestProtocolError(f"{self.where} has no field {name!r}")
-        return self.values[name]
-
-    def _typed(self, name: str, kinds: tuple[type, ...], *, optional: bool = False) -> object:
-        value = self.raw(name)
-        if value is None and optional:
-            return None
-        # bool is an int subclass in Python, but a JSON true is never a count.
-        is_bool_for_number = isinstance(value, bool) and bool not in kinds
-        if is_bool_for_number or not isinstance(value, kinds):
-            wanted = "/".join(k.__name__ for k in kinds)
-            raise GuestProtocolError(f"{self.where} field {name!r} is {_kind(value)}, expected {wanted}")
-        return value
-
-    def text(self, name: str) -> str:
-        """A string field."""
-        return cast("str", self._typed(name, (str,)))
-
-    def text_or_none(self, name: str) -> str | None:
-        """A string field that may be null."""
-        return cast("str | None", self._typed(name, (str,), optional=True))
-
-    def flag(self, name: str) -> bool:
-        """A boolean field."""
-        return cast("bool", self._typed(name, (bool,)))
-
-    def flag_or_none(self, name: str) -> bool | None:
-        """A boolean field that may be null."""
-        return cast("bool | None", self._typed(name, (bool,), optional=True))
-
-    def integer(self, name: str) -> int:
-        """An integer field (a JSON true/false is not one)."""
-        return cast("int", self._typed(name, (int,)))
-
-    def integer_or_none(self, name: str) -> int | None:
-        """An integer field that may be null."""
-        return cast("int | None", self._typed(name, (int,), optional=True))
-
-    def number(self, name: str) -> float:
-        """A numeric field, integer or float."""
-        return float(cast("int | float", self._typed(name, (int, float))))
-
-    def section(self, name: str) -> Fields:
-        """A nested object."""
-        return Fields(cast("Mapping[str, object]", self._typed(name, (dict,))), f"{self.where}.{name}")
-
-    def section_or_none(self, name: str) -> Fields | None:
-        """A nested object that may be null."""
-        value = self._typed(name, (dict,), optional=True)
-        return None if value is None else Fields(cast("Mapping[str, object]", value), f"{self.where}.{name}")
-
-    def _items(self, name: str) -> list[object]:
-        return cast("list[object]", self._typed(name, (list,)))
-
-    def texts(self, name: str) -> tuple[str, ...]:
-        """A list of strings."""
-        items = self._items(name)
-        if not all(isinstance(item, str) for item in items):
-            raise GuestProtocolError(f"{self.where} field {name!r} is not a list of strings")
-        return tuple(cast("list[str]", items))
-
-    def sections(self, name: str) -> tuple[Fields, ...]:
-        """A list of objects."""
-        items = self._items(name)
-        if not all(isinstance(item, dict) for item in items):
-            raise GuestProtocolError(f"{self.where} field {name!r} is not a list of objects")
-        return tuple(
-            Fields(cast("Mapping[str, object]", item), f"{self.where}.{name}[{i}]") for i, item in enumerate(items)
-        )
-
-
-@dataclass(frozen=True)
-class Envelope:  # TEMPORARY(data-arch): removed once repair.py/apply.py read typed answers
-    """One guest tool answer that the caller gates on (exit 0 ok, or exit 1 refused), read by name.
-
-    Attributes:
-        ok: True on exit 0; False when the command's own gate refused (exit 1).
-        command: The subcommand that answered.
-        data: The payload, read through typed getters.
-        skipped: What the command could not check, as ``{item, reason}`` objects.
-        exit_code: The tool's exit code.
-    """
-
-    ok: bool
-    command: str
-    data: Fields
-    skipped: tuple[Fields, ...]
-    exit_code: int
-
-    def gate(self, name: str, passing: str) -> str:
-        """Return the verdict field ``name``, checking it agrees with ``ok``.
-
-        Raises:
-            GuestProtocolError: ``ok`` is set but the verdict is not ``passing``, or the reverse.
-        """
-        value = self.data.text(name)
-        if (value == passing) != self.ok:
-            raise GuestProtocolError(f"{self.command}: ok={self.ok} contradicts {name}={value!r} (pass is {passing!r})")
-        return value
-
-
-def parse_envelope(command: str, proc: CompletedProcess[str]) -> Envelope:
-    """Read one guest tool answer by name (TEMPORARY(data-arch): removed once repair.py/apply.py read typed answers).
-
-    Raises:
-        GuestNoAnswerError: No envelope, or an exit code the tool never uses (ssh's 255 included).
-        GuestInternalError: Exit 2.
-        GuestProtocolError: The envelope contradicts its exit code or the command, or is malformed.
-    """
-    line = _envelope_line(command, proc)
-    header = _validated(_EnvelopeHeader, line, command)
-    _check_header(GuestCommand(command), header, proc.returncode)
-    # json.loads here only: Fields reads the payload by name until its last readers are migrated.
-    obj = cast("dict[str, object]", json.loads(line))
-    data = Fields(cast("Mapping[str, object]", obj["data"]), f"{command}.data")
-    skipped = tuple(Fields(item.model_dump(), f"{command}.skipped[{i}]") for i, item in enumerate(header.skipped))
-    return Envelope(header.ok, command, data, skipped, proc.returncode)
-
-
-def state_marker(state: Fields) -> str | None:  # TEMPORARY(data-arch): removed once repair.py reads StateAnswer
-    """The marker line (``STATE=DONE-OK``) for a ``state`` probe's verdict, or None while it has none.
-
-    Raises:
-        GuestProtocolError: The log carries a verdict this driver does not know.
-    """
-    verdict = state.text_or_none("verdict")
-    if verdict is None:
-        return None
-    known = {member.value: member for member in StateVerdict}
-    if verdict not in known:
-        raise GuestProtocolError(f"state: unknown verdict {verdict!r}")
-    return known[verdict].marker
 
 
 # --- the run state --------------------------------------------------------------------------

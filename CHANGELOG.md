@@ -4,6 +4,34 @@ All notable changes to this project will be documented in this file following
 the [Keep a Changelog](https://keepachangelog.com/) format.
 
 
+## [Unreleased]
+
+### Changed
+
+- Every guest tool answer is validated once, strictly, into a typed model per subcommand, closed
+  to unknown fields. A malformed answer still ends the run as an internal error (exit 2), but its
+  message now reads `guest tool <cmd>: the answer breaks the contract: <field>: <reason>` and no
+  longer quotes the guest's value. An envelope with extra top-level keys, an exit-2 envelope
+  without its `error`/`error_type`, a `prepare` that passes with no image, and a Windows Update
+  search whose `pending` count contradicts its status are now refused the same way.
+- The guest tool builds its answers from pydantic models and pins `pydantic==2.14.1` in its own
+  dependency header; the JSON it prints is byte-identical.
+- A malformed `--stage-root` (empty, `1:`, `CD`, `C:\upgrade`, a non-ASCII letter) is a usage
+  error (exit 2) before anything runs, instead of exit 1 after the snapshot and staging steps.
+  Omitting the option still measures the stage drive.
+- A `qm status` answer that names neither `running` nor `stopped` (a VM this node does not have,
+  a failed call) refuses the run at once with exit 1 instead of being read as "not running". A
+  wait for a status keeps polling through such a read until its bound and then names the last
+  failure.
+- The guest tool refuses a Win32_Service start mode or state outside the documented set in
+  `quiesce-wu` and `restore-wu` (exit 2) instead of passing it through as text, and skips a
+  `docker ps` line whose name or status is not text.
+- A guest agent address whose type is neither `ipv4` nor `ipv6` ends the run as an internal error
+  instead of being skipped.
+- A `[lib_log_rich]` section with several invalid settings reports every one of them, not only
+  the first.
+
+
 ## [1.0.0] 2026-10-23 22:06:16
 
 The first public release, 1.0.0. The tool was developed in a private repository before it; that

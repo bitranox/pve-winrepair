@@ -30,7 +30,7 @@ def _receipt(vmid: int = 1, spbuild: int = 8973) -> RepairReceipt:
         vmid=vmid,
         image_build=26200,
         image_spbuild=spbuild,
-        build_before=(26200, 7462),
+        build_before=BuildPair(build=26200, ubr=7462),
         install_date_before=1761206400,
         written_at=WRITTEN_AT,
     )
@@ -59,7 +59,12 @@ def test_a_receipt_without_a_field_apply_needs_is_refused(tmp_path: Path, missin
         store.read(1)
 
 
-@pytest.mark.parametrize("build_before", [[26200], [26200, 1, 2], [26200, "7462"], [26200, -1], [True, 1]], ids=str)
+# The object form: a NamedTuple field would build itself from one, but the 1.0.0 format is an array.
+@pytest.mark.parametrize(
+    "build_before",
+    [[26200], [26200, 1, 2], [26200, "7462"], [26200, -1], [True, 1], {"build": 26200, "ubr": 1}],
+    ids=str,
+)
 def test_a_build_before_that_is_not_two_counts_is_refused(tmp_path: Path, build_before: object) -> None:
     store = FileReceiptStore(tmp_path)
     document = _receipt().model_dump(mode="json") | {"build_before": build_before}

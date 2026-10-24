@@ -50,10 +50,10 @@ from pve_winrepair.adapters.receipts import FileReceiptStore
 from pve_winrepair.application import apply
 from pve_winrepair.application.apply import ApplyError, ApplyRequest, run_apply
 from pve_winrepair.domain.envelope import WU_HELD_HINT, GuestProtocolError
-from pve_winrepair.domain.receipt import GuestBuild, RepairReceipt
+from pve_winrepair.domain.receipt import BuildPair, GuestBuild, RepairReceipt
 from pve_winrepair.domain.report import Report, RunExit, RunResult, Step
 from pve_winrepair_guest.probes import BuildReport, NicMacReport, StagedOs, StagedVerdict
-from pve_winrepair_guest.upgrade import DirectoryLock, LockDirsReport
+from pve_winrepair_guest.upgrade import DirectoryAction, DirectoryLock, LockDirsReport, LockDirsVerdict
 from pve_winrepair_guest.wu import SearchProbe, SearchStatus
 
 if TYPE_CHECKING:
@@ -136,12 +136,19 @@ def test_gate_staged_unreadable_refuses_to_reboot_on_an_unknown_state(reply: Rep
         apply.gate_staged(make_guest(runner), Report(vmid=1))
 
 
-def test_gate_staged_present_flag_contradicting_the_verdict_is_a_protocol_error() -> None:
-    runner = FakeRunner().on(
-        "staged-os", answer("staged-os", StagedOs(path=NEWOS, present=False, verdict=StagedVerdict.REARMABLE))
-    )
-    with pytest.raises(GuestProtocolError):
-        apply.gate_staged(make_guest(runner), Report(vmid=1))
+@pytest.mark.parametrize(
+    ("present", "verdict"), [(False, StagedVerdict.REARMABLE), (True, StagedVerdict.RERUN)], ids=["absent", "present"]
+)
+def test_gate_staged_present_flag_contradicting_the_verdict_is_a_protocol_error(
+    present: bool, verdict: StagedVerdict
+) -> None:
+    runner = FakeRunner().on("staged-os", answer("staged-os", StagedOs(path=NEWOS, present=present, verdict=verdict)))
+    rep = Report(vmid=1)
+    with pytest.raises(GuestProtocolError) as caught:
+        apply.gate_staged(make_guest(runner), rep)
+    # The verdict is named by its value, never as the enum member.
+    assert str(caught.value) == f"staged-os: present={present} contradicts verdict {verdict.value!r}"
+    assert rep.steps == []
 
 
 # --- restore-wu -----------------------------------------------------------------------------
@@ -198,8 +205,27 @@ def test_restore_wu_still_disabled_refuses_naming_the_services() -> None:
 
 def test_restore_wu_unknown_refuses_rather_than_reading_as_restored() -> None:
     runner = FakeRunner().on("restore-wu", answer("restore-wu", restore_report("UNKNOWN"), ok=False))
-    with pytest.raises(ApplyError, match="could not be verified"):
-        apply.restore_windows_update(make_guest(runner), Report(vmid=1))
+    rep = Report(vmid=1)
+    with pytest.raises(ApplyError) as caught:
+        apply.restore_windows_update(make_guest(runner), rep)
+    assert str(caught.value) == "Windows Update state could not be verified: UNKNOWN"
+    step = _wire(rep.steps)[0]
+    assert (step["ok"], step["verdict"], step["still_disabled"]) == (False, "UNKNOWN", [])
+
+
+def test_restore_wu_finished_search_without_a_pending_count_is_a_protocol_error() -> None:
+    found = SearchProbe(status=SearchStatus.OK, pending=None, titles=(), error=None, timeout_s=180.0)
+    runner = FakeRunner().on("restore-wu", answer("restore-wu", restore_report("RESTORED", search=found)))
+    rep = Report(vmid=1)
+    with pytest.raises(
+        GuestProtocolError,
+        match=(
+            r"^guest tool restore-wu: the answer breaks the contract: "
+            r"data\.search: search status OK carries pending=None$"
+        ),
+    ):
+        apply.restore_windows_update(make_guest(runner), rep)
+    assert rep.steps == []
 
 
 def test_restore_wu_without_an_answer_refuses() -> None:
@@ -400,7 +426,12 @@ def test_a_changed_winrepair_lock_after_the_upgrade_is_reported_and_still_lifts_
     changed = answer(
         "lock-dirs",
         LockDirsReport(
-            tool=TOOL_PATH, tool_present=True, tool_sha256=None, directories=(), verdict="FAILED", reason=reason
+            tool=TOOL_PATH,
+            tool_present=True,
+            tool_sha256=None,
+            directories=(),
+            verdict=LockDirsVerdict.FAILED,
+            reason=reason,
         ),
         ok=False,
     )
@@ -421,8 +452,8 @@ def test_an_absent_winrepair_dir_after_the_upgrade_is_reported_absent_not_create
         tool=TOOL_PATH,
         tool_present=False,
         tool_sha256=None,
-        directories=(DirectoryLock(path="C:\\winrepair", action="ABSENT"),),
-        verdict="OK",
+        directories=(DirectoryLock(path="C:\\winrepair", action=DirectoryAction.ABSENT),),
+        verdict=LockDirsVerdict.OK,
         reason=None,
     )
     runner.replies["lock-dirs"] = [lock_dirs_reply, answer("lock-dirs", gone)]
@@ -547,7 +578,7 @@ def test_run_apply_maps_an_unexpected_error_to_internal(receipts: FileReceiptSto
 
 # Media carrying the build the guest already ran: a rollback ends on that same build, so the build
 # alone cannot tell an upgrade that applied from one that never landed.
-SAME_BUILD = RECEIPT.model_copy(update={"build_before": (26200, 8973)})
+SAME_BUILD = RECEIPT.model_copy(update={"build_before": BuildPair(build=26200, ubr=8973)})
 UNCHANGED = BuildReport(current_build="26200", ubr=8973, build="26200.8973", install_date=BUILD_BEFORE.install_date)
 
 

@@ -177,9 +177,14 @@ def test_a_refusal_without_json_prints_the_verdict_line(tmp_path: Path) -> None:
     assert (run.exit_code, run.stdout) == (1, "vm 1: ERROR\n")
 
 
+#: A state answer missing every field but one, as a tool out of step with the driver sends it; built
+#: by hand because no guest model can build it.
+BROKEN_STATE = Reply(0, '{"ok": true, "command": "state", "data": {"present": true}, "skipped": []}\r\n')
+
+
 @NEEDS_A_POSIX_STATE_DIR
 def test_a_driver_tool_mismatch_exits_2_internal_with_json(tmp_path: Path) -> None:
-    runner = agent_runner(FakePve(), state=answer("state", {"present": True}))
+    runner = agent_runner(FakePve(), state=BROKEN_STATE)
     run = run_cli(["repair", "--vmid", "1", "--json"], cli_config(tmp_path), runner)
     envelope = json_envelope(run.stdout)
     assert (run.exit_code, envelope["ok"], envelope["verdict"]) == (2, False, "INTERNAL")
@@ -188,7 +193,7 @@ def test_a_driver_tool_mismatch_exits_2_internal_with_json(tmp_path: Path) -> No
 
 @NEEDS_A_POSIX_STATE_DIR
 def test_a_driver_tool_mismatch_without_json_leaves_stdout_empty(tmp_path: Path) -> None:
-    runner = agent_runner(FakePve(), state=answer("state", {"present": True}))
+    runner = agent_runner(FakePve(), state=BROKEN_STATE)
     run = run_cli(["repair", "--vmid", "1"], cli_config(tmp_path), runner)
     assert (run.exit_code, run.stdout) == (2, "")
     assert "[FAIL] internal" in run.stderr

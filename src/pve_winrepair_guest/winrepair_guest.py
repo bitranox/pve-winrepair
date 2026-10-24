@@ -33,6 +33,8 @@ from pve_winrepair_guest.envelope import Command, ExitCode, build, exit_code, in
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    from pve_winrepair_guest.envelope import Envelope
+
 __all__ = ["UsageError", "default_commands", "main"]
 
 
@@ -85,7 +87,8 @@ def _command_name(argv: Sequence[str], commands: Sequence[Command]) -> str:
     return next((token for token in argv if token in known), "")
 
 
-def _emit(stdout: TextIO, envelope: dict[str, object], code: ExitCode) -> int:
+def _emit(stdout: TextIO, envelope: Envelope, code: ExitCode) -> int:
+    """Print the envelope as one line and return the exit code."""
     stdout.write(render(envelope) + "\n")
     stdout.flush()
     return int(code)

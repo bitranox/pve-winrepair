@@ -11,7 +11,7 @@ import json
 import subprocess
 from datetime import datetime, timezone
 from ipaddress import IPv4Address
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from guest_fakes import (
@@ -63,11 +63,12 @@ from pve_winrepair.domain.envelope import (
     InternalErrorAnswer,
     InternalErrorData,
 )
-from pve_winrepair.domain.receipt import RepairReceipt
+from pve_winrepair.domain.guest_answers import StateVerdict
+from pve_winrepair.domain.receipt import BuildPair, RepairReceipt
 from pve_winrepair.domain.report import Report, RunExit, RunResult, RunVerdict, Step, StepName
 from pve_winrepair.domain.settings import GuestSettings, RepairSettings
 from pve_winrepair_guest.probes import NicMacReport, SetupReport
-from pve_winrepair_guest.upgrade import LaunchReport, LockDirsReport, TaskCleanup
+from pve_winrepair_guest.upgrade import LaunchReport, LockDirsReport, LockDirsVerdict, TaskCleanup, TaskCleanupAction
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -193,20 +194,39 @@ def test_quiesce_ok_flag_contradicting_the_verdict_is_a_protocol_error() -> None
         repair.quiesce_windows_update(make_guest(runner), Report(vmid=1))
 
 
+def _edited(reply: Reply, edit: Callable[[dict[str, Any]], None]) -> Reply:
+    """``reply`` with ``edit`` applied to its envelope's payload: a value the guest's own models cannot build."""
+    envelope = json.loads(reply.stdout)
+    edit(envelope["data"])
+    return Reply(reply.returncode, json.dumps(envelope) + "\r\n", reply.stderr)
+
+
+def _garbage(command: str) -> Reply:
+    """An exit-0 envelope for ``command`` whose payload misses every field but one: no guest model builds it."""
+    envelope: dict[str, object] = {"ok": True, "command": command, "data": {"present": True}, "skipped": []}
+    return Reply(0, json.dumps(envelope) + "\r\n")
+
+
+def _with_verdict(reply: Reply, verdict: str) -> Reply:
+    """``reply`` with its payload's ``verdict`` replaced."""
+    return _edited(reply, lambda data: data.update(verdict=verdict))
+
+
 # --- drives / stage root --------------------------------------------------------------------
 
 
 def test_stage_root_prefers_a_non_system_drive_with_room() -> None:
     runner = FakeRunner().on("drives", answer("drives", drive_report(C=40.0, D=200.0)))
     rep = Report(vmid=1)
-    assert repair.pick_stage_root(make_guest(runner), rep, None, repair=REPAIR) == "D:\\upgrade"
+    assert repair.pick_stage_root(make_guest(runner), rep, None, repair=REPAIR) is DriveLetter.DRIVE_D
     assert _step(rep, "stage_root")["drives"] == {"C": 40.0, "D": 200.0}
+    assert _step(rep, "stage_root")["root"] == "D:\\upgrade"
 
 
 def test_stage_root_gates_on_exact_bytes_not_the_rounded_figure() -> None:
     # 14.96 GiB rounds to 15.0 in free_gb but is below the 15 GB floor.
     runner = FakeRunner().on("drives", answer("drives", drive_report(C=40.0, D=14.96)))
-    assert repair.pick_stage_root(make_guest(runner), Report(vmid=1), None, repair=REPAIR) == "C:\\upgrade"
+    assert repair.pick_stage_root(make_guest(runner), Report(vmid=1), None, repair=REPAIR) is DriveLetter.DRIVE_C
 
 
 def test_stage_root_refuses_a_full_system_drive() -> None:
@@ -233,6 +253,16 @@ def test_stage_root_gates_on_the_configured_stage_floor() -> None:
     floors = RepairSettings(stage_free_gb=250.0)
     with pytest.raises(RepairError, match=r"^D: has only 200.0 GB free, need 250.0$"):
         repair.pick_stage_root(make_guest(runner), Report(vmid=1), DriveLetter.DRIVE_D, repair=floors)
+
+
+def test_a_drive_without_a_letter_is_a_protocol_error() -> None:
+    reply = _edited(answer("drives", drive_report(C=80.0)), lambda data: data["drives"][0].update(letter="1"))
+    runner = FakeRunner().on("drives", reply)
+    with pytest.raises(
+        GuestProtocolError,
+        match=r"^guest tool drives: the answer breaks the contract: data\.drives\.0\.letter: Input should be 'A'",
+    ):
+        repair.pick_stage_root(make_guest(runner), Report(vmid=1), None, repair=REPAIR)
 
 
 def test_drives_unreadable_refuses_naming_the_guest_error() -> None:
@@ -309,7 +339,7 @@ def test_live_run_check_refuses_when_it_cannot_ask() -> None:
 def test_prepare_pass_reports_the_image_and_the_waiver() -> None:
     runner = FakeRunner().on("prepare", answer("prepare", prepare_report("PASS")))
     rep = Report(vmid=1)
-    repair.prepare(make_guest(runner), rep, "D:\\upgrade")
+    repair.prepare(make_guest(runner), rep, DriveLetter.DRIVE_D)
     step = _step(rep, "prepare")
     assert step["ok"] is True
     assert (step["image_spbuild"], step["running"], step["waiver_readback"], step["tpm_present"]) == (
@@ -325,25 +355,34 @@ def test_prepare_fail_refuses_with_the_guest_reason() -> None:
     reply = answer("prepare", prepare_report("FAIL", "image 26200.8973 older than running 26200.9711"), ok=False)
     runner = FakeRunner().on("prepare", reply)
     with pytest.raises(RepairError, match=r"guest gate refused: image 26200\.8973 older than running 26200\.9711"):
-        repair.prepare(make_guest(runner), Report(vmid=1), "D:\\upgrade")
+        repair.prepare(make_guest(runner), Report(vmid=1), DriveLetter.DRIVE_D)
+
+
+def test_prepare_passing_with_no_image_is_a_protocol_error() -> None:
+    reply = _edited(answer("prepare", prepare_report("PASS")), lambda data: data.update(image=None))
+    with pytest.raises(
+        GuestProtocolError,
+        match=r"^guest tool prepare: the answer breaks the contract: data: gate PASS carries no image$",
+    ):
+        repair.prepare(make_guest(FakeRunner().on("prepare", reply)), Report(vmid=1), DriveLetter.DRIVE_D)
 
 
 def test_prepare_reports_an_absent_tpm_without_refusing() -> None:
     runner = FakeRunner().on("prepare", answer("prepare", prepare_report("PASS", tpm=False)))
     rep = Report(vmid=1)
-    repair.prepare(make_guest(runner), rep, "D:\\upgrade")
+    repair.prepare(make_guest(runner), rep, DriveLetter.DRIVE_D)
     assert _step(rep, "prepare")["ok"] is True
     assert "no TPM" in str(_step(rep, "prepare")["warnings"])
 
 
 # --- launch ---------------------------------------------------------------------------------
 
-REMOVED = TaskCleanup(action="REMOVE", ended=True, disabled=False, deleted=True, error=None)
+REMOVED = TaskCleanup(action=TaskCleanupAction.REMOVE, ended=True, disabled=False, deleted=True, error=None)
 
 
 def test_launch_points_the_system_task_at_the_pushed_tool() -> None:
     runner = FakeRunner().on("launch", answer("launch", launch_report("OK")))
-    repair.launch(make_guest(runner), Report(vmid=1), "D:\\upgrade")
+    repair.launch(make_guest(runner), Report(vmid=1), DriveLetter.DRIVE_D)
     argv = runner.calls[0]
     assert argv[argv.index("-File") + 1] == TOOL_PATH
     # The task's action runs the file named here, so it must be the content address just pushed.
@@ -353,7 +392,7 @@ def test_launch_points_the_system_task_at_the_pushed_tool() -> None:
 def test_launch_ok_records_the_step() -> None:
     runner = FakeRunner().on("launch", answer("launch", launch_report("OK")))
     rep = Report(vmid=1)
-    assert repair.launch(make_guest(runner), rep, "D:\\upgrade") is None
+    assert repair.launch(make_guest(runner), rep, DriveLetter.DRIVE_D) is None
     step = _step(rep, "launch")
     assert (step["ok"], step["verdict"], step["setuphost"], step["task_cleanup"]) == (True, "OK", 1, "DISARM")
 
@@ -391,15 +430,17 @@ def test_launch_ok_records_the_step() -> None:
 def test_launch_without_a_running_setup_refuses(report: LaunchReport, fragment: str) -> None:
     runner = FakeRunner().on("launch", answer("launch", report, ok=False))
     with pytest.raises(RepairError, match=fragment):
-        repair.launch(make_guest(runner), Report(vmid=1), "D:\\upgrade")
+        repair.launch(make_guest(runner), Report(vmid=1), DriveLetter.DRIVE_D)
 
 
 def test_launch_task_left_after_disarm_keeps_polling() -> None:
-    left = TaskCleanup(action="DISARM", ended=None, disabled=True, deleted=False, error="delete: access denied")
+    left = TaskCleanup(
+        action=TaskCleanupAction.DISARM, ended=None, disabled=True, deleted=False, error="delete: access denied"
+    )
     report = launch_report("TASK_LEFT", "OK; the task \\OVMRepairUpgrade could not be disarmed: x", cleanup=left)
     runner = FakeRunner().on("launch", answer("launch", report, ok=False))
     rep = Report(vmid=1)
-    repair.launch(make_guest(runner), rep, "D:\\upgrade")  # no raise: setup IS running
+    repair.launch(make_guest(runner), rep, DriveLetter.DRIVE_D)  # no raise: setup IS running
     step = _step(rep, "launch")
     assert (step["ok"], step["verdict"]) == (False, "TASK_LEFT")
     assert "schtasks" in str(step["note"])
@@ -407,12 +448,14 @@ def test_launch_task_left_after_disarm_keeps_polling() -> None:
 
 def test_launch_task_left_after_disarm_does_not_claim_setup_is_running() -> None:
     # _settle can find SetupHost gone (SUSPECT) after a DISARM, which _louder turns into TASK_LEFT.
-    left = TaskCleanup(action="DISARM", ended=None, disabled=True, deleted=False, error="delete: access denied")
+    left = TaskCleanup(
+        action=TaskCleanupAction.DISARM, ended=None, disabled=True, deleted=False, error="delete: access denied"
+    )
     reason = "SUSPECT: setup already gone, read the state verdict; the task could not be disarmed: x"
     report = launch_report("TASK_LEFT", reason, setuphost=0, cleanup=left)
     runner = FakeRunner().on("launch", answer("launch", report, ok=False))
     rep = Report(vmid=1)
-    repair.launch(make_guest(runner), rep, "D:\\upgrade")
+    repair.launch(make_guest(runner), rep, DriveLetter.DRIVE_D)
     note = str(_step(rep, "launch")["note"])
     assert "is running" not in note
     assert reason in note
@@ -420,7 +463,7 @@ def test_launch_task_left_after_disarm_does_not_claim_setup_is_running() -> None
 
 def test_launch_task_left_after_remove_refuses_with_the_manual_cleanup() -> None:
     left = TaskCleanup(
-        action="REMOVE",
+        action=TaskCleanupAction.REMOVE,
         ended=False,
         disabled=True,
         deleted=False,
@@ -429,19 +472,22 @@ def test_launch_task_left_after_remove_refuses_with_the_manual_cleanup() -> None
     report = launch_report("TASK_LEFT", "NO_START: no 'launching' line", wait="TIMEOUT", setuphost=None, cleanup=left)
     runner = FakeRunner().on("launch", answer("launch", report, ok=False))
     with pytest.raises(RepairError, match=r"TASK_LEFT.*schtasks /End"):
-        repair.launch(make_guest(runner), Report(vmid=1), "D:\\upgrade")
+        repair.launch(make_guest(runner), Report(vmid=1), DriveLetter.DRIVE_D)
 
 
 def test_launch_with_no_answer_refuses_and_warns_against_a_relaunch() -> None:
     runner = FakeRunner().on("launch", Reply(255, "", "Connection reset"))
     with pytest.raises(RepairError, match=r"outcome unknown.*do not relaunch"):
-        repair.launch(make_guest(runner), Report(vmid=1), "D:\\upgrade")
+        repair.launch(make_guest(runner), Report(vmid=1), DriveLetter.DRIVE_D)
 
 
 def test_launch_unknown_verdict_is_a_protocol_error() -> None:
-    runner = FakeRunner().on("launch", answer("launch", launch_report("MAYBE"), ok=False))
-    with pytest.raises(GuestProtocolError, match="MAYBE"):
-        repair.launch(make_guest(runner), Report(vmid=1), "D:\\upgrade")
+    reply = _with_verdict(answer("launch", launch_report("SUSPECT"), ok=False), "MAYBE")
+    runner = FakeRunner().on("launch", reply)
+    with pytest.raises(
+        GuestProtocolError, match=r"^guest tool launch: the answer breaks the contract: data\.verdict: "
+    ):
+        repair.launch(make_guest(runner), Report(vmid=1), DriveLetter.DRIVE_D)
 
 
 # --- poll -----------------------------------------------------------------------------------
@@ -463,6 +509,18 @@ def test_poll_returns_the_marker_verdict() -> None:
     assert verdict == "STATE=DONE-OK"
     assert (_step(rep, "poll")["ok"], _step(rep, "poll")["verdict"]) == (True, "STATE=DONE-OK")
     assert clock.slept == [300]
+
+
+def test_every_state_log_verdict_maps_to_the_run_verdict_of_its_marker() -> None:
+    for verdict in StateVerdict:
+        done = answer("state", state_log(f"{verdict.marker} setup exit=0x00000000"))
+        assert repair.read_marker(make_guest(FakeRunner().on("state", done))) is RunVerdict(verdict.marker)
+
+
+def test_a_state_log_verdict_the_driver_does_not_know_is_a_protocol_error() -> None:
+    reply = _with_verdict(answer("state", state_log("STATE=DONE-OK setup exit=0x00000000")), "DONE-MAYBE")
+    with pytest.raises(GuestProtocolError, match=r"^guest tool state: the answer breaks the contract: data\.verdict: "):
+        repair.read_marker(make_guest(FakeRunner().on("state", reply)))
 
 
 def test_poll_done_fail_is_not_ok() -> None:
@@ -515,7 +573,7 @@ def test_poll_deadline_is_timeout() -> None:
 
 
 def test_poll_garbage_state_raises_rather_than_waiting() -> None:
-    runner = FakeRunner().on("state", answer("state", {"present": True})).on("setup-alive", ALIVE)
+    runner = FakeRunner().on("state", _garbage("state")).on("setup-alive", ALIVE)
     with pytest.raises(GuestProtocolError):
         _poll(runner)
 
@@ -558,7 +616,7 @@ def test_stage_media_copies_every_media_entry_into_the_root(tmp_path: Path) -> N
     (tmp_path / "sources").mkdir()
     runner = FakeRunner().on("scp", Reply(0))
     rep = Report(vmid=1)
-    repair.stage_media(make_guest(runner), rep, "D:\\upgrade", media=tmp_path)
+    repair.stage_media(make_guest(runner), rep, DriveLetter.DRIVE_D, media=tmp_path)
     # lock-dirs created and locked the root before this; the transfer is the only call.
     assert len(runner.calls) == 1
     scp = runner.calls[0]
@@ -570,23 +628,18 @@ def test_stage_media_copies_every_media_entry_into_the_root(tmp_path: Path) -> N
     assert "-r" in scp
 
 
-def test_stage_media_refuses_a_root_that_is_not_a_drive_path(tmp_path: Path) -> None:
-    with pytest.raises(RepairError, match="stage root"):
-        repair.stage_media(make_guest(FakeRunner()), Report(vmid=1), "D:\\up&grade", media=tmp_path)
-
-
 def test_stage_media_transfer_timeout_refuses_as_a_failed_transfer(tmp_path: Path) -> None:
     (tmp_path / "setup.exe").write_bytes(b"MZ")
     runner = FakeRunner().on("scp", subprocess.TimeoutExpired(["scp"], 5400))
     with pytest.raises(RepairError, match="media transfer failed rc=255"):
-        repair.stage_media(make_guest(runner), Report(vmid=1), "D:\\upgrade", media=tmp_path)
+        repair.stage_media(make_guest(runner), Report(vmid=1), DriveLetter.DRIVE_D, media=tmp_path)
 
 
 def test_stage_media_failed_copy_refuses(tmp_path: Path) -> None:
     (tmp_path / "setup.exe").write_bytes(b"MZ")
     runner = FakeRunner().on("scp", Reply(1, "", "No space left"))
     with pytest.raises(RepairError, match="media transfer failed"):
-        repair.stage_media(make_guest(runner), Report(vmid=1), "D:\\upgrade", media=tmp_path)
+        repair.stage_media(make_guest(runner), Report(vmid=1), DriveLetter.DRIVE_D, media=tmp_path)
 
 
 # --- orchestration: the live-run guard runs before anything can stop the guest -----------------
@@ -687,8 +740,13 @@ def test_guest_ip_without_a_subnet_refuses_several_candidates_naming_them_and_th
 
 @pytest.mark.parametrize(
     "stdout",
-    ['{"ip-addresses": []}', '[{"ip-addresses": "192.0.2.50"}]', '[{"ip-addresses": [{"ip-address": 7}]}]'],
-    ids=["not-a-list", "addresses-not-a-list", "address-not-text"],
+    [
+        '{"ip-addresses": []}',
+        '[{"ip-addresses": "192.0.2.50"}]',
+        '[{"ip-addresses": [{"ip-address": 7}]}]',
+        '[{"ip-addresses": [{"ip-address-type": "ipv5", "ip-address": "192.0.2.50"}]}]',
+    ],
+    ids=["not-a-list", "addresses-not-a-list", "address-not-text", "address-type-unknown"],
 )
 def test_an_agent_answer_that_is_not_the_interface_list_is_an_internal_error(tmp_path: Path, stdout: str) -> None:
     pve = FakePve()
@@ -699,6 +757,13 @@ def test_an_agent_answer_that_is_not_the_interface_list_is_an_internal_error(tmp
     result, steps = _run(agent_runner(pve, qm=qm), _media(tmp_path))
     assert (result.exit, result.verdict, steps[-1]["step"]) == (RunExit.INTERNAL, "INTERNAL", "internal")
     assert "validation error for tuple[_AgentInterface, ...]" in str(steps[-1]["message"])
+
+
+def test_guest_ip_never_takes_an_address_without_a_type_for_ipv4() -> None:
+    untyped = Reply(0, json.dumps([{"name": "Ethernet", "ip-addresses": [{"ip-address": LAN_IP}]}]))
+    runner, clock = FakeRunner().on("qm", untyped), FakeClock()
+    with pytest.raises(RepairError, match="no LAN address from the guest agent on 1 after 1 tries"):
+        repair.guest_ip(make_node(runner, clock), 1, GUEST.network(), tries=1)
 
 
 def test_guest_ip_with_no_address_in_the_subnet_retries_then_refuses() -> None:
@@ -938,7 +1003,7 @@ def test_a_wait_whose_reads_never_recover_names_the_last_failure(tmp_path: Path)
 
 
 def test_main_driver_tool_mismatch_is_exit_2_internal(tmp_path: Path) -> None:
-    runner = agent_runner(FakePve(), state=answer("state", {"present": True}))
+    runner = agent_runner(FakePve(), state=_garbage("state"))
     result, steps = _run(runner, _media(tmp_path))
     assert (result.exit, result.verdict, steps[-1]["step"]) == (RunExit.INTERNAL, "INTERNAL", "internal")
 
@@ -959,7 +1024,7 @@ def test_main_agentless_guest_that_never_answers_ssh_is_refused_untouched(tmp_pa
 def test_lock_dirs_step_locks_the_stage_root_with_the_pushed_tool() -> None:
     runner = FakeRunner().on("lock-dirs", lock_dirs_reply)
     rep = Report(vmid=1)
-    repair.lock_dirs(make_guest(runner), rep, "D:\\upgrade")
+    repair.lock_dirs(make_guest(runner), rep, DriveLetter.DRIVE_D)
     assert runner.calls[0][-6:] == ["lock-dirs", "--tool", TOOL_PATH, "--stage-root", "D:\\upgrade", "--json"]
     step = _step(rep, "lock_dirs")
     assert step["ok"] is True
@@ -969,17 +1034,22 @@ def test_lock_dirs_step_locks_the_stage_root_with_the_pushed_tool() -> None:
 def test_lock_dirs_refusal_stops_the_run_naming_the_guest_reason() -> None:
     reason = "D:\\upgrade held files before it was locked: remove it (rd /s /q D:\\upgrade) and rerun"
     refused = LockDirsReport(
-        tool=TOOL_PATH, tool_present=True, tool_sha256=None, directories=(), verdict="FAILED", reason=reason
+        tool=TOOL_PATH,
+        tool_present=True,
+        tool_sha256=None,
+        directories=(),
+        verdict=LockDirsVerdict.FAILED,
+        reason=reason,
     )
     runner = FakeRunner().on("lock-dirs", answer("lock-dirs", refused, ok=False))
     with pytest.raises(RepairError, match=r"not staging.*rd /s /q D:\\upgrade"):
-        repair.lock_dirs(make_guest(runner), Report(vmid=1), "D:\\upgrade")
+        repair.lock_dirs(make_guest(runner), Report(vmid=1), DriveLetter.DRIVE_D)
 
 
 def test_lock_dirs_without_an_answer_stops_the_run() -> None:
     runner = FakeRunner().on("lock-dirs", Reply(255, "", "Connection reset"))
     with pytest.raises(RepairError, match="lock-dirs returned no verdict"):
-        repair.lock_dirs(make_guest(runner), Report(vmid=1), "D:\\upgrade")
+        repair.lock_dirs(make_guest(runner), Report(vmid=1), DriveLetter.DRIVE_D)
 
 
 def _media_scp(cmd: list[str]) -> bool:
@@ -1011,7 +1081,7 @@ def test_main_lock_dirs_refusal_copies_no_media_and_says_wu_is_held(tmp_path: Pa
         tool_present=True,
         tool_sha256=None,
         directories=(),
-        verdict="FAILED",
+        verdict=LockDirsVerdict.FAILED,
         reason="D:\\upgrade is owned by S-1-5-21-9",
     )
 
@@ -1036,7 +1106,7 @@ OLD_RECEIPT = RepairReceipt(
     vmid=1,
     image_build=26200,
     image_spbuild=7462,
-    build_before=(26100, 1),
+    build_before=BuildPair(build=26100, ubr=1),
     install_date_before=1,
     written_at=datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc),
 )
@@ -1086,7 +1156,7 @@ def test_repair_writes_the_receipt_after_prepare_and_before_launch(tmp_path: Pat
         vmid=1,
         image_build=IMAGE.build,
         image_spbuild=IMAGE.spbuild,
-        build_before=(26200, 7462),
+        build_before=BuildPair(build=26200, ubr=7462),
         install_date_before=INSTALL_DATE,
         written_at=written_at,
     )

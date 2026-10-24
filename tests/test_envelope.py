@@ -40,7 +40,6 @@ from pve_winrepair.adapters.guest_ssh import Guest
 from pve_winrepair.domain import guest_answers as answers
 from pve_winrepair.domain.envelope import (
     STDERR_TAIL_LINES,
-    Fields,
     GuestInternalError,
     GuestNoAnswerError,
     GuestProtocolError,
@@ -49,11 +48,10 @@ from pve_winrepair.domain.envelope import (
     UnsafeArgumentError,
     describe_validation_error,
     guest_stderr,
-    state_marker,
 )
 from pve_winrepair.domain.guest_answers import GatedPayload, GuestCommand, ProbePayload
 from pve_winrepair.domain.settings import SshSettings
-from pve_winrepair_guest.envelope import Outcome, build, render
+from pve_winrepair_guest.envelope import Outcome, Report, build, render
 from pve_winrepair_guest.probes import (
     Container,
     LpDefectReport,
@@ -63,9 +61,10 @@ from pve_winrepair_guest.probes import (
     SetupReport,
     StagedOs,
     StagedVerdict,
+    StateVerdict,
     TaskReport,
 )
-from pve_winrepair_guest.upgrade import UpgradeRunReport
+from pve_winrepair_guest.upgrade import TreeWait, UpgradeRunReport
 from pve_winrepair_guest.winrepair_guest import default_commands
 
 SSH = SshSettings(key="/keys/test.key", user=USER)
@@ -80,7 +79,7 @@ def _build(runner: FakeRunner) -> answers.BuildAnswer:
     return _guest(runner).ask(BUILD, answers.BuildAnswer, timeout=60).data
 
 
-def _envelope(command: str, data: object, *, ok: bool = True) -> str:
+def _envelope(command: str, data: Report, *, ok: bool = True) -> str:
     """The guest's envelope line for ``data``, as a string to edit for a broken-contract case."""
     return render(build(command, Outcome(ok=ok, data=data)))
 
@@ -390,14 +389,14 @@ UPGRADE_RUN = UpgradeRunReport(
     exit_code=0,
     exit_hex="0x00000000",
     seconds=3725.0,
-    tree_wait="job",
+    tree_wait=TreeWait.JOB,
     newos_staged=True,
-    verdict="DONE-OK",
+    verdict=StateVerdict.DONE_OK,
     reason=None,
 )
 
 #: One real reply per subcommand, built from the guest's own models, and the host model it validates into.
-CONTRACT: dict[GuestCommand, tuple[object, type[ProbePayload | GatedPayload]]] = {
+CONTRACT: dict[GuestCommand, tuple[Report | None, type[ProbePayload | GatedPayload]]] = {
     GuestCommand.DETECT_LP_DEFECT: (_lp_report(LpVerdict.AFFECTED), answers.DetectLpDefectAnswer),
     GuestCommand.DRIVES: (drive_report(C=60.0, D=200.0), answers.DrivesAnswer),
     GuestCommand.VERIFY_RUNNERS: (RUNNERS, answers.VerifyRunnersAnswer),
@@ -466,92 +465,47 @@ def test_a_problem_without_a_location_is_named_by_the_root() -> None:
     assert describe_validation_error(caught.value, root="doc").startswith("doc: ")
 
 
-# --- TEMPORARY(data-arch): the name-keyed read path, removed once repair.py/apply.py read typed answers
-
-
-def test_the_name_keyed_path_refuses_an_unsafe_subcommand_before_ssh() -> None:
-    runner = FakeRunner()
-    with pytest.raises(UnsafeArgumentError):
-        _guest(runner).tool("build&calc", timeout=60)
-    assert runner.calls == []
-
-
-def test_the_name_keyed_path_reads_fields_and_its_exit_code() -> None:
-    runner = FakeRunner().on("build", answer("build", BUILD_BEFORE))
-    env = _guest(runner).tool("build", timeout=60)
-    assert (env.ok, env.command, env.exit_code) == (True, "build", 0)
-    assert env.data.text("current_build") == "26200"
-    assert env.data.integer("ubr") == 7462
-
-
-def test_the_name_keyed_probe_treats_a_refusal_as_a_protocol_breach() -> None:
-    staged = StagedOs(path="x", present=False, verdict=StagedVerdict.RERUN)
-    runner = FakeRunner().on("staged-os", answer("staged-os", staged, ok=False))
-    with pytest.raises(GuestProtocolError, match="refused"):
-        _guest(runner).probe("staged-os", timeout=60)
-
-
-def test_the_name_keyed_path_raises_internal_errors_typed() -> None:
-    runner = FakeRunner().on("build", crashed("build", OSError("denied")))
-    with pytest.raises(GuestInternalError) as caught:
-        _guest(runner).tool("build", timeout=60)
-    assert caught.value.answer.data.error_type == "OSError"
-
-
-def _fields(data: object) -> Fields:
-    runner = FakeRunner().on("build", answer("build", data))
-    return _guest(runner).probe("build", timeout=60)
+# --- strict field types: what the name-keyed getters used to enforce ------------------------
 
 
 def test_a_missing_field_is_a_protocol_error_not_a_default() -> None:
-    with pytest.raises(GuestProtocolError, match="schtasks_exit"):
-        _fields({"registered": True}).integer("schtasks_exit")
+    data = BUILD_BEFORE.model_dump(mode="json")
+    del data["install_date"]
+    runner = FakeRunner().on("build", answer("build", data))
+    with pytest.raises(GuestProtocolError, match=r"data\.install_date: Field required"):
+        _guest(runner).ask(GuestCommand.BUILD, answers.BuildAnswer, timeout=60)
 
 
 @pytest.mark.parametrize(
-    ("data", "getter"),
+    ("field", "value"),
     [
-        ({"x": True}, "integer"),
-        ({"x": 1}, "flag"),
-        ({"x": 1}, "text"),
-        ({"x": "1"}, "number"),
-        ({"x": None}, "text"),
-        ({"x": [1]}, "section"),
+        ("ubr", True),  # a JSON true is never a count, although bool is an int in Python
+        ("ubr", "7462"),
+        ("ubr", 7462.0),
+        ("current_build", 26200),
+        ("current_build", None),
+        ("install_date", [1]),
     ],
+    ids=str,
 )
-def test_a_mistyped_field_is_a_protocol_error(data: object, getter: str) -> None:
-    with pytest.raises(GuestProtocolError, match="'x'"):
-        getattr(_fields(data), getter)("x")
+def test_a_mistyped_field_is_a_protocol_error(field: str, value: object) -> None:
+    runner = FakeRunner().on("build", answer("build", BUILD_BEFORE.model_dump(mode="json") | {field: value}))
+    with pytest.raises(GuestProtocolError, match=rf"data\.{field}: "):
+        _guest(runner).ask(GuestCommand.BUILD, answers.BuildAnswer, timeout=60)
 
 
-def test_optional_getters_accept_null_and_nested_sections_read() -> None:
-    fields = _fields({"a": None, "b": {"c": ["x", "y"], "d": [{"e": 1.5}]}, "n": 3})
-    assert fields.text_or_none("a") is None
-    assert fields.integer_or_none("a") is None
-    assert fields.flag_or_none("a") is None
-    assert fields.section("b").texts("c") == ("x", "y")
-    assert fields.section("b").sections("d")[0].number("e") == 1.5
-    assert fields.number("n") == 3.0
+@pytest.mark.parametrize("value", [1, "true", None], ids=str)
+def test_a_flag_that_is_not_a_json_boolean_is_a_protocol_error(value: object) -> None:
+    runner = FakeRunner().on("setup-alive", answer("setup-alive", {"count": 1, "alive": value}))
+    with pytest.raises(GuestProtocolError, match=r"data\.alive: "):
+        _guest(runner).ask(GuestCommand.SETUP_ALIVE, answers.SetupAliveAnswer, timeout=60)
 
 
-def test_gate_returns_the_field_and_checks_it_agrees_with_ok() -> None:
-    runner = FakeRunner().on("restore-wu", answer("restore-wu", {"verdict": "RESTORED"}, ok=False))
-    env = _guest(runner).tool("restore-wu", timeout=60)
-    with pytest.raises(GuestProtocolError, match="RESTORED"):
-        env.gate("verdict", "RESTORED")
-
-
-@pytest.mark.parametrize(
-    ("verdict", "marker"), [(None, None), ("DONE-OK", "STATE=DONE-OK"), ("DONE-FAIL", "STATE=DONE-FAIL")]
-)
-def test_state_marker_maps_the_verdict_to_its_marker_line(verdict: str | None, marker: str | None) -> None:
-    fields = Fields({"verdict": verdict}, "state.data")
-    assert state_marker(fields) == marker
-
-
-def test_state_marker_refuses_an_unknown_verdict() -> None:
-    with pytest.raises(GuestProtocolError, match="DONE-MAYBE"):
-        state_marker(Fields({"verdict": "DONE-MAYBE"}, "state.data"))
+def test_a_search_that_did_not_answer_carries_no_pending_count() -> None:
+    """The converse of an OK search's required count: a TIMEOUT or FAILED one must not carry one."""
+    timed_out: dict[str, object] = {"status": "TIMEOUT", "pending": 3, "titles": [], "error": None, "timeout_s": 180.0}
+    with pytest.raises(ValidationError, match="search status TIMEOUT carries pending=3"):
+        answers.UpdateSearch.model_validate_json(json.dumps(timed_out))
 
 
 def test_the_tool_path_is_the_content_address() -> None:

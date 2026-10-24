@@ -10,23 +10,24 @@ moves or removes a module, a CLI option or a public name.
 ## Related Files
 
 ### Domain Layer
-- `src/pve_winrepair/domain/acl.py`  -  Who may write a directory, read from its SDDL security descriptor (`parse_sddl`, `write_problems`, `trusted_writers`, `TRUSTED_WELL_KNOWN`; the alias `LA` counts as the ssh user only when its SID ends in -500); the node's check of the ssh user's profile before a copy of the tool goes there
+- `src/pve_winrepair/domain/acl.py`  -  Who may write a directory, read from its SDDL security descriptor (`parse_sddl` into `SddlAce` with its `AceKind` and `AceFlag` set, `write_problems`, `trusted_writers`, `TRUSTED_WELL_KNOWN`; the alias `LA` counts as the ssh user only when its SID ends in -500); the node's check of the ssh user's profile before a copy of the tool goes there
 - `src/pve_winrepair/domain/addresses.py`  -  `lan_address` picks the guest's LAN address out of what its agent reports (the first one in `[guest] subnet`; without a subnet the only candidate, several refused with `AmbiguousAddressError`); `vm_macs` reads the MACs of the `netN` lines of `qm config`, `normalise_mac` puts a MAC in `AA:BB:CC:DD:EE:FF` form
-- `src/pve_winrepair/domain/enums.py`  -  Type-safe enums (`OutputFormat`, `DeployTarget`)
-- `src/pve_winrepair/domain/envelope.py`  -  The guest tool's answer contract: `Envelope`, the typed `Fields`, `parse_envelope`, the error types (`GuestNoAnswerError`, `GuestInternalError`, `GuestProtocolError`, `GuestPushError`, `UnsafeArgumentError`), `check_argument`, the state markers and `RunState`, `READ_FAILURES` and `WU_HELD_HINT`; starts no process
+- `src/pve_winrepair/domain/enums.py`  -  Type-safe enums (`OutputFormat`, `DeployTarget`, `DriveLetter`)
+- `src/pve_winrepair/domain/envelope.py`  -  The guest tool's answer contract: `parse_answer` validates the one envelope line once, in strict JSON mode, into a `GuestAnswer[T]` (with `SkippedItem`s; exit 2 as `InternalErrorAnswer`) and checks `ok` against the payload's verdict; `describe_validation_error`; the error types (`GuestNoAnswerError`, `GuestInternalError`, `GuestProtocolError`, `GuestPushError`, `UnsafeArgumentError`), `check_argument`, `RunState`, `READ_FAILURES` and `WU_HELD_HINT`; starts no process
+- `src/pve_winrepair/domain/guest_answers.py`  -  One frozen model, closed to unknown fields, per guest subcommand's payload (`BuildAnswer`, `PrepareAnswer`, `LaunchAnswer`, ...), their verdict and status enums (`StateVerdict`, `LaunchVerdict`, `PrepareGate`, ...) and `GuestCommand`, the subcommand names
 - `src/pve_winrepair/domain/errors.py`  -  Domain exceptions (`ConfigurationError`)
 - `src/pve_winrepair/domain/guest_tool.py`  -  `PackedTool` (the node's packed tool, its content address and sha256) and `Pushed` (what a push left on the guest)
-- `src/pve_winrepair/domain/receipt.py`  -  `RepairReceipt`, the image build a repair's prepare step measured with the guest's `build_before` and `install_date_before` (all required; `same_build`), `GuestBuild` (CurrentBuild, UBR, InstallDate), and `ReceiptError`
-- `src/pve_winrepair/domain/report.py`  -  `Report` collects a run's steps and hands each to `on_step`; `RunExit`, `RunResult`, `Step`; flags a run that leaves Windows Update held
-- `src/pve_winrepair/domain/settings.py`  -  Node CLI settings models (`SshSettings`, `GuestSettings`, `RepairSettings`, `NodeSettings`, `Settings`); see Settings below
+- `src/pve_winrepair/domain/receipt.py`  -  `RepairReceipt`, the image build a repair's prepare step measured with the guest's `build_before` and `install_date_before` (all required; `same_build`), `GuestBuild` (CurrentBuild, UBR, InstallDate; `from_answer`), `BuildPair` (`build_before`, stored as the array `[build, ubr]`), and `ReceiptError`
+- `src/pve_winrepair/domain/report.py`  -  `Report` collects a run's steps and hands each to `on_step`; `RunExit`, `RunResult`, `RunVerdict`, the `Step` model with its `StepName`; flags a run that leaves Windows Update held
+- `src/pve_winrepair/domain/settings.py`  -  Node CLI settings models (`SshSettings`, `GuestSettings`, `RepairSettings`, `NodeSettings`, `Settings`) and the `SnapshotName` type; see Settings below
 
 ### Application Layer
-- `src/pve_winrepair/application/ports.py`  -  Protocol definitions the adapters satisfy: the configuration and logging callables, `LoadSettings`, `GuestPort`, `NodePort`, `ReceiptStore`, `MakeNode`, `MakeReceipts`
+- `src/pve_winrepair/application/ports.py`  -  Protocol definitions the adapters satisfy: the configuration and logging callables, `LoadSettings`, `GuestPort` (`ask` runs one subcommand and returns its typed answer), `NodePort`, `ReceiptStore`, `MakeNode`, `MakeReceipts`
 - `src/pve_winrepair/application/guest_state.py`  -  `read_run_state`, the live-run gate both use cases read before they stop, relaunch or restage a guest; `read_guest_build`, the guest's build and InstallDate
 - `src/pve_winrepair/application/guest_identity.py`  -  `check_guest_is_vm`: with `--ip`, a MAC of the VM's `qm config` must be among the guest's `nic-macs` (membership, both sides normalised); `GuestMismatchError`
 - `src/pve_winrepair/application/repair.py`  -  `run_repair`: live-run check (with `--ip`: the MAC check first), Windows Update hold, vTPM, snapshot, push, MAC check again with `--ip`, stage root, locked staging, media copy, WIM gate, build before, receipt, launch, poll (a `--stage-only` run ends on a `staged` step flagged `wu_held`); `RepairRequest`, `RepairError`
 - `src/pve_winrepair/application/apply.py`  -  `run_apply`: receipt, MAC check, run gate, staged-OS gate, clean stop and start, build check against the receipt (same-build media: InstallDate must change) from a verified profile copy, Windows Update release; `ApplyRequest`, `ApplyError`
-- `src/pve_winrepair/application/vm.py`  -  `vm_status` and the bounded `wait_status` over `qm status`; `VmStatusTimeoutError`
+- `src/pve_winrepair/application/vm.py`  -  `vm_status` reads `qm status` into a `VmStatus` (anything else is `UnknownVmStatusError`); the bounded `wait_status` polls through a failed read and ends with `VmStatusTimeoutError`; both errors are `VmStatusError`s
 
 ### Adapters Layer
 - `src/pve_winrepair/adapters/config/loader.py`  -  Configuration loading with LRU caching; `NOT_SENSITIVE` names the keys `config` shows unredacted
@@ -34,7 +35,7 @@ moves or removes a module, a CLI option or a public name.
 - `src/pve_winrepair/adapters/config/display.py`  -  Configuration display (TOML/JSON output, redaction)
 - `src/pve_winrepair/adapters/config/overrides.py`  -  CLI `--set` override parsing and deep-merge
 - `src/pve_winrepair/adapters/config/settings.py`  -  `load_settings` validates the `[ssh] [guest] [repair] [node]` sections into `Settings`; `SettingsError` carries one `<section>.<field>: <reason>` line per problem
-- `src/pve_winrepair/adapters/guest_ssh.py`  -  The guest tool over ssh: `Guest` checks the ssh user's profile, pushes the packed tool to its content address (`push_tool`) or stages a verified profile copy (`stage_tool`), runs one subcommand and hands the answer to `parse_envelope`; `ssh_options` turns `SshSettings` into ssh's `-o` options; `TOOL_DIR` is the packed tool shipped in `adapters/guest_tool/`
+- `src/pve_winrepair/adapters/guest_ssh.py`  -  The guest tool over ssh: `Guest` checks the ssh user's profile, pushes the packed tool to its content address (`push_tool`) or stages a verified profile copy (`stage_tool`), runs one subcommand (`ask`) and hands the answer to `parse_answer`; `ssh_options` turns `SshSettings` into ssh's `-o` options; `TOOL_DIR` is the packed tool shipped in `adapters/guest_tool/`
 - `src/pve_winrepair/adapters/guest_tool/winrepair_guest.ps1`  -  The packed guest tool, a committed artefact (`make custom pack` writes it)
 - `src/pve_winrepair/adapters/node.py`  -  `Node`, the PVE node a run uses: one runner for `qm` and every guest, the clock and sleep; `run` is the production runner
 - `src/pve_winrepair/adapters/receipts.py`  -  `FileReceiptStore`: one receipt per VM at `<state_dir>/receipt-<vmid>.json`, replaced atomically, 0600 in a 0700 directory
@@ -48,7 +49,7 @@ moves or removes a module, a CLI option or a public name.
   - `config_load.py`  -  Configuration load for the CLI; records a load failure, `require_config` refuses with exit 78, `check_logging` checks the logging settings of a configuration reloaded by `config --profile`, refusing them as the root does
   - `root.py`  -  Root command group
   - `main.py`  -  Entry point
-  - `param_types.py`  -  Click parameter types of the run options: `PositiveFiniteFloat` (`--hours`, `--apply-minutes`), `StorageId` (`--tpm-storage`), `Ipv4Address` (`--ip`)
+  - `param_types.py`  -  Click parameter types of the run options: `PositiveFiniteFloat` (`--hours`, `--apply-minutes`), `StorageId` (`--tpm-storage`), `Ipv4Address` (`--ip`, an `IPv4Address`), `WindowsDrive` (`--stage-root`, a `DriveLetter`)
   - `typed_click.py`  -  Strictly typed wrappers for rich_click's `option`, `version_option` and `get_current_context`
   - `commands/__init__.py`  -  Re-exports every command (`cli_repair`, `cli_apply`, `cli_guest_tool`, `cli_config`, ...)
   - `commands/info.py`  -  info command
@@ -56,7 +57,7 @@ moves or removes a module, a CLI option or a public name.
   - `commands/repair.py`  -  `repair --vmid N [--stage-only] [--snapshot-name S] [--hours H] [--ip IP] [--stage-root X:] [--tpm-storage S] [--json]`; `--snapshot-name` defaults to `[repair] snapshot_name` and is validated by its rule
   - `commands/apply.py`  -  `apply --vmid N --ip IP [--apply-minutes M] [--json]`
   - `commands/guest_tool.py`  -  `guest-tool path` (the packed tool) and `guest-tool sha256` (`<sha256>  <content address>`); neither reads the configuration
-  - `commands/runs.py`  -  What `repair` and `apply` share: settings (exit 78), the checks before any call (`[ssh] key` set, `[node] state_dir` a directory or creatable as one; exit 1), steps and progress lines on stderr, the `--json` envelope `{ok, command, vmid, verdict, steps}` or `vm <vmid>: <verdict>` on stdout; exit 0 OK, 1 refused, 2 internal
+  - `commands/runs.py`  -  What `repair` and `apply` share: settings (exit 78), the checks before any call (`[ssh] key` set, `[node] state_dir` a directory or creatable as one; exit 1), steps and progress lines on stderr, the `--json` envelope `{ok, command, vmid, verdict, steps}` (a `RunEnvelope` for a `RunCommand`) or `vm <vmid>: <verdict>` on stdout; exit 0 OK, 1 refused, 2 internal
 
 ### Adapters Layer (In-Memory / Testing)
 - `src/pve_winrepair/adapters/memory/__init__.py`  -  Public facade + Protocol conformance assertions
@@ -80,9 +81,13 @@ moves or removes a module, a CLI option or a public name.
 - `src/pve_winrepair/adapters/logging/__init__.py`  -  Re-exports the logging setup
 
 ### Guest Tool (`src/pve_winrepair_guest/`, runs on the Windows guest)
+
+Every payload a subcommand emits is a frozen `envelope.Report` model whose verdicts and statuses
+are str enums; each subcommand parses its argparse namespace into one args model.
+
 - `src/pve_winrepair_guest/__init__.py`  -  Empty on purpose: the packer executes every parent `__init__.py` on the guest
 - `src/pve_winrepair_guest/winrepair_guest.py`  -  The entry script: one subcommand per run (`default_commands`), one JSON envelope on stdout, exit 0 ok, 1 refused, 2 internal error
-- `src/pve_winrepair_guest/envelope.py`  -  The tool's output contract: the envelope, `Outcome`, `Skip` and the exit code they imply
+- `src/pve_winrepair_guest/envelope.py`  -  The tool's output contract: `Report`, the frozen base of every payload; the `Envelope` model and its one-line ASCII `render`; `Outcome`, `Skip`, `InternalError` and the exit code they imply
 - `src/pve_winrepair_guest/probes.py`  -  The read-only probes: `detect-lp-defect`, `drives`, `verify-runners`, `build`, `staged-os`, `servicing-active`, `setup-alive`, `state`, `nic-macs`
 - `src/pve_winrepair_guest/wu.py`  -  `quiesce-wu` and `restore-wu`, and the bounded Windows Update search probe (pwshpy `get_windows_update`)
 - `src/pve_winrepair_guest/lockdown.py`  -  `lock-dirs` and the protected DACL that keeps non-admins away from what the SYSTEM task executes
@@ -363,15 +368,15 @@ Raises `ValueError` with descriptive message on invalid input.
 `adapters/config/overrides.py` parses and applies `--set SECTION.KEY=VALUE`. Public names
 (`__all__`):
 
-| Name              | Kind     | Purpose                                                                                 |
-|-------------------|----------|-----------------------------------------------------------------------------------------|
-| `parse_override`  | function | Split one `SECTION.KEY[.SUBKEY...]=VALUE` string into a `ConfigOverride`                |
-| `coerce_value`    | function | Read a raw value as JSON (bool, number, null, array, object), falling back to the text  |
-| `nest_overrides`  | function | Parse all `--set` values into the nested mapping they override, refusing contradictions |
-| `apply_overrides` | function | Deep-merge the overrides into a `Config`, recording their provenance as `CLI_LAYER`     |
-| `ConfigOverride`  | class    | One parsed override: section, key path and value                                        |
-| `CoercedValue`    | type     | Union of the types `coerce_value` can return                                            |
-| `CLI_LAYER`       | constant | Provenance layer name (`"cli"`) for a value that came from `--set`                      |
+| Name              | Kind     | Purpose                                                                                   |
+|-------------------|----------|-------------------------------------------------------------------------------------------|
+| `parse_override`  | function | Split one `SECTION.KEY[.SUBKEY...]=VALUE` string into a `ConfigOverride` (a frozen model) |
+| `coerce_value`    | function | Read a raw value as JSON (bool, number, null, array, object), falling back to the text    |
+| `nest_overrides`  | function | Parse all `--set` values into the nested mapping they override, refusing contradictions   |
+| `apply_overrides` | function | Deep-merge the overrides into a `Config`, recording their provenance as `CLI_LAYER`       |
+| `ConfigOverride`  | class    | One parsed override: section, key path and value                                          |
+| `CoercedValue`    | type     | Union of the types `coerce_value` can return                                              |
+| `CLI_LAYER`       | constant | Provenance layer name (`"cli"`) for a value that came from `--set`                        |
 
 ---
 

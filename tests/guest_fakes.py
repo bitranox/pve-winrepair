@@ -29,9 +29,9 @@ from pve_winrepair.adapters.cli.main import main
 from pve_winrepair.adapters.guest_ssh import Guest
 from pve_winrepair.adapters.node import Node
 from pve_winrepair.composition import AppServices, build_production, build_testing
-from pve_winrepair.domain.receipt import RepairReceipt
+from pve_winrepair.domain.receipt import BuildPair, RepairReceipt
 from pve_winrepair.domain.settings import SshSettings
-from pve_winrepair_guest.envelope import Outcome, build, internal_error, render
+from pve_winrepair_guest.envelope import Outcome, Report, build, internal_error, render
 from pve_winrepair_guest.probes import (
     BuildInfo,
     BuildReport,
@@ -46,12 +46,18 @@ from pve_winrepair_guest.probes import (
     state_verdict,
 )
 from pve_winrepair_guest.upgrade import (
+    DirectoryAction,
     DirectoryLock,
     LaunchReport,
+    LaunchVerdict,
     LaunchWait,
+    LaunchWaitStatus,
     LockDirsReport,
+    LockDirsVerdict,
+    PrepareGate,
     PrepareReport,
     TaskCleanup,
+    TaskCleanupAction,
     WimImage,
 )
 from pve_winrepair_guest.wu import (
@@ -114,15 +120,15 @@ def make_node(runner: Runner, clock: FakeClock | None = None) -> Node:
 
 def locked(*, present: bool, stage_root: str | None = None) -> LockDirsReport:
     r"""lock-dirs' answer for a guest whose ``C:\winrepair`` (and stage root) it locked or found locked."""
-    dirs = (DirectoryLock(path="C:\\winrepair", action="ALREADY_LOCKED"),)
+    dirs = (DirectoryLock(path="C:\\winrepair", action=DirectoryAction.ALREADY_LOCKED),)
     if stage_root is not None:
-        dirs += (DirectoryLock(path=stage_root, action="CREATED"),)
+        dirs += (DirectoryLock(path=stage_root, action=DirectoryAction.CREATED),)
     return LockDirsReport(
         tool=TOOL_PATH,
         tool_present=present,
         tool_sha256="ab" * 32 if present else None,
         directories=dirs,
-        verdict="OK",
+        verdict=LockDirsVerdict.OK,
         reason=None,
     )
 
@@ -136,9 +142,18 @@ class Reply:
     stderr: str = ""
 
 
-def answer(command: str, data: object, *, ok: bool = True) -> Reply:
-    """The tool's envelope for ``data``: exit 0 when ``ok``, else exit 1 (refused)."""
-    return Reply(0 if ok else 1, render(build(command, Outcome(ok=ok, data=data))) + "\r\n")
+def answer(command: str, data: Report | Mapping[str, object], *, ok: bool = True) -> Reply:
+    """The tool's envelope for ``data``: exit 0 when ``ok``, else exit 1 (refused).
+
+    ``data`` is one of the guest's own reports, or a hand-typed payload for an answer that breaks
+    the contract (a missing field, a renamed one), which no guest model can be made to carry.
+    """
+    if isinstance(data, Report):
+        line = render(build(command, Outcome(ok=ok, data=data)))
+    else:
+        # The envelope's own layout, as render writes it: json.dumps with its default separators.
+        line = json.dumps({"ok": ok, "command": command, "data": dict(data), "skipped": []}, ensure_ascii=True)
+    return Reply(0 if ok else 1, line + "\r\n")
 
 
 #: What nic-macs reports on the guest that is the fake VM: its NIC (lower case here, so both sides
@@ -366,7 +381,8 @@ def drive_report(**free_gib: float) -> DriveReport:
     """drives' answer: one fixed drive per keyword, with that many GiB free."""
     return DriveReport(
         drives=tuple(
-            Drive(letter=letter, free_bytes=int(gib * GIB), size_bytes=int(gib * GIB) * 2, free_gb=round(gib, 1))
+            # float(): an int keyword (C=60) must reach the wire as 60.0, as a real drive reports it.
+            Drive(letter=letter, free_bytes=int(gib * GIB), size_bytes=int(gib * GIB) * 2, free_gb=round(float(gib), 1))
             for letter, gib in sorted(free_gib.items())
         )
     )
@@ -396,13 +412,13 @@ BUILD_BEFORE = BuildReport(current_build="26200", ubr=7462, build="26200.7462", 
 
 def prepare_report(gate: str, reason: str | None = None, *, tpm: bool | None = True) -> PrepareReport:
     """prepare's answer for :data:`IMAGE` staged on ``D:\\upgrade``: ``gate`` PASS or FAIL with ``reason``."""
-    passed = gate == "PASS"
+    passed = PrepareGate(gate) is PrepareGate.PASSED
     return PrepareReport(
         stage_root="D:\\upgrade",
         readonly_cleared=12,
         readonly_failed=0,
         wim="D:\\upgrade\\sources\\install.wim",
-        gate=gate,
+        gate=PrepareGate(gate),
         reason=reason,
         image=IMAGE,
         running=RUNNING_BUILD,
@@ -412,7 +428,7 @@ def prepare_report(gate: str, reason: str | None = None, *, tpm: bool | None = T
     )
 
 
-DISARMED = TaskCleanup(action="DISARM", ended=None, disabled=False, deleted=True, error=None)
+DISARMED = TaskCleanup(action=TaskCleanupAction.DISARM, ended=None, disabled=False, deleted=True, error=None)
 
 
 def launch_report(
@@ -423,17 +439,17 @@ def launch_report(
     setuphost: int | None = 1,
     cleanup: TaskCleanup = DISARMED,
 ) -> LaunchReport:
-    """launch's answer with ``verdict``: the SYSTEM task points at the pushed tool."""
+    """launch's answer with ``verdict`` and ``wait`` (their value texts): the SYSTEM task points at the pushed tool."""
     return LaunchReport(
         task="OVMRepairUpgrade",
         command=f"powershell -File {TOOL_PATH} upgrade-run",
         stale_log_removed=False,
         registered=True,
-        wait=None if wait is None else LaunchWait(status=wait, waited_s=42.0, last_error=None),
+        wait=None if wait is None else LaunchWait(status=LaunchWaitStatus(wait), waited_s=42.0, last_error=None),
         setuphost=setuphost,
         state=state_log("launching: setup.exe"),
         task_cleanup=cleanup,
-        verdict=verdict,
+        verdict=LaunchVerdict(verdict),
         reason=reason,
     )
 
@@ -514,7 +530,7 @@ RECEIPT = RepairReceipt(
     vmid=1,
     image_build=IMAGE.build,
     image_spbuild=IMAGE.spbuild,
-    build_before=(26200, 7462),
+    build_before=BuildPair(build=26200, ubr=7462),
     install_date_before=INSTALL_DATE,
     written_at=datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc),
 )

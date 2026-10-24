@@ -12,28 +12,30 @@ because a feature module that imported the entry script would load a second copy
 own name, next to the one running as ``__main__``.
 
 Contents:
-    * :class:`Outcome`, :class:`Skip` - what a command returns.
+    * :class:`Report` - the base of every payload; :class:`Skip`, :class:`InternalError`.
+    * :class:`Outcome` - what a command returns.
+    * :class:`Envelope` - the one line a run prints.
     * :class:`Command` - one registered subcommand.
     * :class:`ExitCode` - the three exit codes.
-    * :func:`build`, :func:`internal_error`, :func:`render`, :func:`exit_code`, :func:`jsonable`.
+    * :func:`build`, :func:`internal_error`, :func:`render`, :func:`exit_code`.
 """
 
 from __future__ import annotations
 
-import dataclasses
 import enum
 import json
-from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, SerializeAsAny
 
 if TYPE_CHECKING:
     import argparse
+    from collections.abc import Callable
 
 __all__ = [
     "Command",
+    "Envelope",
     "ExitCode",
     "InternalError",
     "Outcome",
@@ -42,7 +44,6 @@ __all__ = [
     "build",
     "exit_code",
     "internal_error",
-    "jsonable",
     "render",
 ]
 
@@ -92,18 +93,37 @@ class InternalError(Report):
 
 @dataclass(frozen=True)
 class Outcome:
-    """A command's result before it is wrapped into an envelope.
+    """A command's result before it is wrapped into an envelope (never serialised itself).
 
     Attributes:
         ok: True when the command answered its question; False when its gate said no or it
             could not decide (exit 1). Internal errors are exceptions, not an Outcome.
-        data: The command's payload: a mapping or a dataclass instance (made JSON-safe).
+        data: The command's payload.
         skipped: What the command could not check.
     """
 
     ok: bool
-    data: object
+    data: Report
     skipped: tuple[Skip, ...] = field(default=())
+
+
+class Envelope(BaseModel):
+    """The one line a run prints: the outcome, named by its command (frozen, closed like a Report).
+
+    Attributes:
+        ok: The outcome's ``ok``.
+        command: The subcommand, or "" when the command line named none the tool knows.
+        data: The command's payload, serialised as the subclass it is.
+        skipped: What the command could not check.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    ok: bool
+    command: str
+    # SerializeAsAny: a field declared as the bare Report base would dump every payload as {}.
+    data: SerializeAsAny[Report]
+    skipped: tuple[Skip, ...]
 
 
 def _no_arguments(_parser: argparse.ArgumentParser) -> None:
@@ -112,7 +132,7 @@ def _no_arguments(_parser: argparse.ArgumentParser) -> None:
 
 @dataclass(frozen=True)
 class Command:
-    """One subcommand of the guest tool.
+    """One subcommand of the guest tool (a table entry holding callables, never serialised).
 
     Attributes:
         name: The subcommand name (``detect-lp-defect``).
@@ -127,72 +147,47 @@ class Command:
     configure: Callable[[argparse.ArgumentParser], None] = _no_arguments
 
 
-def jsonable(value: object) -> object:
-    """Convert reports, dataclasses, enums, tuples and mappings into plain JSON types.
+def build(command: str, outcome: Outcome) -> Envelope:
+    """Wrap an outcome into its envelope.
 
     Example:
-        >>> jsonable({"a": (1, Skip(item="x", reason="y"))})
-        {'a': [1, {'item': 'x', 'reason': 'y'}]}
+        >>> build("build", Outcome(ok=True, data=Skip(item="x", reason="y"))).model_dump(mode="json")
+        {'ok': True, 'command': 'build', 'data': {'item': 'x', 'reason': 'y'}, 'skipped': []}
     """
-    if isinstance(value, BaseModel):
-        return value.model_dump(mode="json")
-    if dataclasses.is_dataclass(value) and not isinstance(value, type):
-        return {f.name: jsonable(getattr(value, f.name)) for f in dataclasses.fields(value)}
-    if isinstance(value, enum.Enum):
-        # .value, never str(): an f-string of a str-Enum flips between value and NAME at 3.11.
-        return jsonable(value.value)
-    # isinstance narrows an ``object`` to Mapping[Unknown]; the casts restate what JSON allows.
-    if isinstance(value, Mapping):
-        return {str(k): jsonable(v) for k, v in cast("Mapping[object, object]", value).items()}
-    if isinstance(value, (list, tuple)):
-        return [jsonable(item) for item in cast("Sequence[object]", value)]
-    return value
+    return Envelope(ok=outcome.ok, command=command, data=outcome.data, skipped=outcome.skipped)
 
 
-def build(command: str, outcome: Outcome) -> dict[str, object]:
-    """Wrap an outcome into the envelope mapping.
-
-    Example:
-        >>> build("build", Outcome(ok=True, data={"ubr": 8973}))
-        {'ok': True, 'command': 'build', 'data': {'ubr': 8973}, 'skipped': []}
-    """
-    return {
-        "ok": outcome.ok,
-        "command": command,
-        "data": jsonable(outcome.data),
-        "skipped": jsonable(outcome.skipped),
-    }
-
-
-def internal_error(command: str, error: BaseException) -> dict[str, object]:
+def internal_error(command: str, error: BaseException) -> Envelope:
     """Build the envelope for an internal error: ok=false, the error text and its type.
 
     Example:
-        >>> internal_error("build", OSError("denied"))["data"]
-        {'error': 'denied', 'error_type': 'OSError'}
+        >>> internal_error("build", OSError("denied")).data
+        InternalError(error='denied', error_type='OSError')
     """
     data = InternalError(error=str(error) or type(error).__name__, error_type=type(error).__name__)
     return build(command, Outcome(ok=False, data=data))
 
 
-def render(envelope: Mapping[str, object]) -> str:
-    """Serialize an envelope to one ASCII line.
+def render(envelope: Envelope) -> str:
+    r"""Serialize an envelope to one ASCII line.
 
     ASCII on purpose: the guest's stdout is a cp1252 console pipe under Windows, where a
     non-ASCII character in a German event message would raise UnicodeEncodeError mid-write.
+    ``json.dumps`` rather than ``model_dump_json``: the host parsers and every recorded answer
+    read its ``", "`` and ``": "`` separators, which ``model_dump_json`` writes without spaces.
 
     Example:
-        >>> render({"ok": True})
-        '{"ok": true}'
+        >>> render(build("x", Outcome(ok=True, data=Skip(item="Gr\u00fc\u00dfe", reason="r"))))
+        '{"ok": true, "command": "x", "data": {"item": "Gr\\u00fc\\u00dfe", "reason": "r"}, "skipped": []}'
     """
-    return json.dumps(envelope, ensure_ascii=True)
+    return json.dumps(envelope.model_dump(mode="json"), ensure_ascii=True)
 
 
 def exit_code(outcome: Outcome) -> ExitCode:
     """Map an outcome to its exit code (0 ok, 1 refused).
 
     Example:
-        >>> exit_code(Outcome(ok=False, data={})).value
+        >>> exit_code(Outcome(ok=False, data=Skip(item="x", reason="y"))).value
         1
     """
     return ExitCode.OK if outcome.ok else ExitCode.REFUSED

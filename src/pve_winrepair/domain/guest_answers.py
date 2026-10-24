@@ -26,7 +26,9 @@ from abc import abstractmethod
 from enum import Enum, IntEnum
 from typing import NamedTuple
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, model_validator
+
+from pve_winrepair.domain.enums import DriveLetter
 
 __all__ = [
     "BuildAnswer",
@@ -346,7 +348,7 @@ class DetectLpDefectAnswer(GatedPayload):
 class DriveSpace(GuestPayload):
     """One fixed drive with a letter: free and total bytes, and free GiB rounded to one place."""
 
-    letter: str
+    letter: DriveLetter
     free_bytes: int
     size_bytes: int
     free_gb: float
@@ -501,6 +503,13 @@ class UpdateSearch(GuestPayload):
     error: str | None
     timeout_s: float
 
+    @model_validator(mode="after")
+    def _pending_only_when_found(self) -> UpdateSearch:
+        """The guest counts pending updates exactly when the search answered; anything else breaks the contract."""
+        if (self.status is SearchStatus.OK) != (self.pending is not None):
+            raise ValueError(f"search status {self.status.value} carries pending={self.pending!r}")
+        return self
+
 
 class RestoreWuAnswer(GatedPayload):
     """restore-wu: the start modes written back, the verified state, and the search probe."""
@@ -545,6 +554,25 @@ class PrepareAnswer(GatedPayload):
     waiver_readback: int | None
     tpm_present: bool | None
     drives: tuple[DriveSpace, ...]
+
+    @model_validator(mode="after")
+    def _image_when_passed(self) -> PrepareAnswer:
+        """A WIM gate can only pass on an image it read, so a PASS without one breaks the contract."""
+        if self.gate is PrepareGate.PASSED and self.image is None:
+            raise ValueError("gate PASS carries no image")
+        return self
+
+    @property
+    def passed_image(self) -> WimImage:
+        """The image a passed gate read; only meaningful once the gate is PASS.
+
+        Raises:
+            RuntimeError: Read on a gate that did not pass (a caller bug: validation guarantees an
+                image on every PASS).
+        """
+        if self.image is None:
+            raise RuntimeError(f"prepare: no image on a {self.gate.value} gate")
+        return self.image
 
     def ok_gate(self) -> Gate:
         """ok when the gate is PASS."""
