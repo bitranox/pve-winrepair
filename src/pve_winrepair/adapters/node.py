@@ -3,7 +3,7 @@
 :class:`Node` is the one bundle the drivers take, and the tests' seam: a fake runner and clock passed
 here observe every node and guest call in order. :func:`run` is the production runner.
 
-The VM's own configuration and snapshot list are parsed here, where ``qm`` answers
+The VM's own configuration, its snapshot list and a snapshot's outcome are parsed here, where ``qm`` answers
 (:mod:`pve_winrepair.domain.vm_config`), so no driver reads ``qm`` text; a guest's address becomes
 text only here too, where ssh needs it as an argument.
 """
@@ -15,7 +15,13 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from pve_winrepair.adapters.guest_ssh import TOOL_DIR, Guest, run
-from pve_winrepair.domain.vm_config import VmConfigRead, parse_snapshot_names, parse_vm_config
+from pve_winrepair.domain.vm_config import (
+    SnapshotResult,
+    VmConfigRead,
+    parse_snapshot_names,
+    parse_snapshot_result,
+    parse_vm_config,
+)
 
 if TYPE_CHECKING:
     # qm runs through the runner; this module only names the finished process's type.
@@ -58,6 +64,11 @@ class Node:
     def snapshots(self, vmid: int) -> frozenset[str]:
         """The names ``qm listsnapshot <vmid>`` lists, without PVE's ``current`` marker."""
         return parse_snapshot_names(self.qm("listsnapshot", str(vmid), timeout=60).stdout)
+
+    def snapshot(self, vmid: int, name: str, description: str) -> SnapshotResult:
+        """``qm snapshot <vmid> <name> --description <description>``: exit code, stderr, and whether it froze the fs."""
+        proc = self.qm("snapshot", str(vmid), name, "--description", description, timeout=900)
+        return parse_snapshot_result(proc.returncode, proc.stdout, proc.stderr)
 
     def guest(self, ip: IPv4Address) -> Guest:
         """The guest at ``ip``, reached with this node's ssh settings, tool dir and runner."""

@@ -10,7 +10,7 @@ from guest_fakes import GUEST_IP, USER, FakeRunner, Reply
 from pve_winrepair.adapters.guest_ssh import ssh_options
 from pve_winrepair.adapters.node import Node
 from pve_winrepair.domain.settings import SshSettings
-from pve_winrepair.domain.vm_config import VmConfig, VmConfigRead, parse_vm_config
+from pve_winrepair.domain.vm_config import SnapshotResult, VmConfig, VmConfigRead, parse_vm_config
 
 if TYPE_CHECKING:
     from pve_winrepair.application.ports import NodePort
@@ -62,3 +62,30 @@ def test_the_snapshots_are_one_qm_listsnapshot_call_parsed() -> None:
     runner = FakeRunner().on("qm", Reply(0, tree))
     assert Node(ssh=SSH, runner=runner).snapshots(100) == frozenset({"pre_winrepair"})
     assert (runner.calls, runner.timeouts) == ([["qm", "listsnapshot", "100"]], [60])
+
+
+def test_a_snapshot_is_one_qm_snapshot_call_with_its_description() -> None:
+    runner = FakeRunner().on("qm", Reply(0))
+    result = Node(ssh=SSH, runner=runner).snapshot(100, "pre_winrepair", "before an in-place repair upgrade")
+    assert result == SnapshotResult(returncode=0, stderr="", fs_frozen=False)
+    assert runner.calls == [
+        ["qm", "snapshot", "100", "pre_winrepair", "--description", "before an in-place repair upgrade"]
+    ]
+    assert runner.timeouts == [900]
+
+
+def test_a_snapshot_whose_output_announces_the_freeze_reports_fs_frozen() -> None:
+    # PVE's AbstractConfig prints this line on stdout only when it fsfreezes the guest first.
+    runner = FakeRunner().on("qm", Reply(0, "freeze guest filesystem\nsnapshotting 'drive-scsi0' (local-zfs:x)\n"))
+    assert Node(ssh=SSH, runner=runner).snapshot(100, "s1", "d").fs_frozen is True
+
+
+def test_a_freeze_line_on_stderr_counts_too() -> None:
+    runner = FakeRunner().on("qm", Reply(0, "", "freeze guest filesystem\n"))
+    assert Node(ssh=SSH, runner=runner).snapshot(100, "s1", "d").fs_frozen is True
+
+
+def test_a_failed_snapshot_keeps_its_exit_code_and_stderr() -> None:
+    runner = FakeRunner().on("qm", Reply(255, "", "snapshot feature is not available\n"))
+    result = Node(ssh=SSH, runner=runner).snapshot(100, "s1", "d")
+    assert result == SnapshotResult(returncode=255, stderr="snapshot feature is not available\n", fs_frozen=False)

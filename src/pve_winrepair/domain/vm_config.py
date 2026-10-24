@@ -8,6 +8,8 @@ line, and reading that quote would put a vTPM on a pool this node cannot see or 
 the VM does not have.
 
 ``qm listsnapshot`` prints the snapshot tree; :func:`parse_snapshot_names` reads its names.
+``qm snapshot`` says whether PVE froze the guest filesystem first; :func:`parse_snapshot_result`
+reads that, with the exit code and the stderr a refusal quotes, into a :class:`SnapshotResult`.
 """
 
 from __future__ import annotations
@@ -19,7 +21,16 @@ from pydantic import BaseModel, ConfigDict
 
 from pve_winrepair.domain.addresses import normalise_mac
 
-__all__ = ["DiskMedia", "VmConfig", "VmConfigRead", "VmDisk", "parse_snapshot_names", "parse_vm_config"]
+__all__ = [
+    "DiskMedia",
+    "SnapshotResult",
+    "VmConfig",
+    "VmConfigRead",
+    "VmDisk",
+    "parse_snapshot_names",
+    "parse_snapshot_result",
+    "parse_vm_config",
+]
 
 # A disk of the VM: ``scsi0: local-zfs:vm-1-disk-0,size=64G``. The storage is the text before the
 # volume's first colon; an entry without one (``ide2: none,media=cdrom``) names no storage.
@@ -33,6 +44,10 @@ _NET_LINE = re.compile(r"net[0-9]+:[ \t]*(\S+)")
 _SNAPSHOT_LINE = re.compile(r"[\s`|+\\>-]*->\s*(\S+)")
 # PVE's you-are-here marker in that tree, not a snapshot.
 _CURRENT = "current"
+# The line PVE's AbstractConfig::snapshot_create prints only when it fsfreezes the guest before
+# snapshotting (pve-manager 9.2, AbstractConfig.pm). Its absence is reported, never assumed away:
+# a snapshot that silently skipped the freeze is the dangerous one.
+_FS_FREEZE = "freeze guest filesystem"
 
 
 class DiskMedia(str, Enum):
@@ -95,6 +110,22 @@ class VmConfigRead(BaseModel):
     config: VmConfig
 
 
+class SnapshotResult(BaseModel):
+    """One ``qm snapshot`` call: how it exited, its stderr for a refusal, and whether PVE froze the guest fs.
+
+    Attributes:
+        returncode: ``qm snapshot``'s exit code.
+        stderr: Its stderr, the text a refusal quotes.
+        fs_frozen: Its output says PVE froze the guest filesystem before the snapshot.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    returncode: int
+    stderr: str
+    fs_frozen: bool
+
+
 def _disk(line: str) -> VmDisk | None:
     """The disk ``line`` names, or None when it is no disk entry with a storage."""
     match = _DISK_LINE.match(line)
@@ -154,3 +185,15 @@ def parse_snapshot_names(text: str) -> frozenset[str]:
     """
     names = {match.group(1) for match in map(_SNAPSHOT_LINE.match, text.splitlines()) if match is not None}
     return frozenset(names - {_CURRENT})
+
+
+def parse_snapshot_result(returncode: int, stdout: str, stderr: str) -> SnapshotResult:
+    """A finished ``qm snapshot`` call as a :class:`SnapshotResult`.
+
+    Example:
+        >>> parse_snapshot_result(0, "freeze guest filesystem\\nsnapshotting 'drive-scsi0'\\n", "").fs_frozen
+        True
+        >>> parse_snapshot_result(0, "snapshotting 'drive-scsi0'\\n", "").fs_frozen
+        False
+    """
+    return SnapshotResult(returncode=returncode, stderr=stderr, fs_frozen=_FS_FREEZE in stdout + stderr)

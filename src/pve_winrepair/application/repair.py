@@ -348,16 +348,9 @@ def snapshot_offline(node: NodePort, vmid: int, name: str, rep: Report) -> None:
         return
     if vm_status(node, vmid) is not VmStatus.STOPPED:
         raise RepairError("refusing an agentless snapshot of a running guest - stop it first")
-    proc = node.qm(
-        "snapshot",
-        str(vmid),
-        name,
-        "--description",
-        "before an in-place repair upgrade (offline)",
-        timeout=900,
-    )
-    if proc.returncode != 0:
-        raise RepairError(f"snapshot failed: {proc.stderr.strip()}")
+    result = node.snapshot(vmid, name, "before an in-place repair upgrade (offline)")
+    if result.returncode != 0:
+        raise RepairError(f"snapshot failed: {result.stderr.strip()}")
     rep.add(StepName.SNAPSHOT, ok=True, name=name, note="created offline (guest powered off)")
 
 
@@ -379,20 +372,12 @@ def snapshot(node: NodePort, vmid: int, name: str, rep: Report) -> None:
     if name in node.snapshots(vmid):
         rep.add(StepName.SNAPSHOT, ok=True, name=name, note="exists")
         return
-    proc = node.qm(
-        "snapshot",
-        str(vmid),
-        name,
-        "--description",
-        "before an in-place repair upgrade",
-        timeout=900,
-    )
-    if proc.returncode != 0:
-        raise RepairError(f"snapshot failed: {proc.stderr.strip()}")
-    # PVE prints this only when it actually froze the guest fs. Report it either way rather
-    # than assume: a snapshot that silently skipped the freeze is the dangerous one.
-    froze = "freeze guest filesystem" in (proc.stdout + proc.stderr)
-    rep.add(StepName.SNAPSHOT, ok=True, name=name, note="created", fs_frozen=froze)
+    result = node.snapshot(vmid, name, "before an in-place repair upgrade")
+    if result.returncode != 0:
+        raise RepairError(f"snapshot failed: {result.stderr.strip()}")
+    # Reported either way rather than assumed: a snapshot that silently skipped the freeze is the
+    # dangerous one.
+    rep.add(StepName.SNAPSHOT, ok=True, name=name, note="created", fs_frozen=result.fs_frozen)
 
 
 def wait_agent(node: NodePort, vmid: int, minutes: float = 5.0) -> bool:

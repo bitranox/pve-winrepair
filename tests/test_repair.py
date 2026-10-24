@@ -843,6 +843,16 @@ def test_main_runs_the_whole_agent_path_to_done_ok(tmp_path: Path) -> None:
     ]  # fmt: skip
 
 
+def test_the_snapshot_step_reports_whether_pve_froze_the_guest_filesystem(tmp_path: Path) -> None:
+    frozen = FakePve(snapshot_output="freeze guest filesystem\nsnapshotting 'drive-scsi0' (local-zfs:vm-1-disk-0)\n")
+    (tmp_path / "frozen").mkdir()
+    (tmp_path / "plain").mkdir()
+    _, frozen_steps = _run(agent_runner(frozen), _media(tmp_path / "frozen"))
+    _, plain_steps = _run(agent_runner(FakePve()), _media(tmp_path / "plain"))
+    assert [s["fs_frozen"] for s in frozen_steps if s["step"] == "snapshot"] == [True]
+    assert [s["fs_frozen"] for s in plain_steps if s["step"] == "snapshot"] == [False]
+
+
 def test_an_unconfigured_media_dir_is_refused_before_any_call(tmp_path: Path) -> None:
     runner = FakeRunner()
     result = run_repair(

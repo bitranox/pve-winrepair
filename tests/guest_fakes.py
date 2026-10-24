@@ -313,9 +313,10 @@ class FakePve:
     ``qm status`` keeps reporting ``status`` - for a wait that must give up.
     """
 
-    def __init__(self, status: str = "running", *, stuck: bool = False) -> None:
+    def __init__(self, status: str = "running", *, stuck: bool = False, snapshot_output: str = "") -> None:
         self.status = status
         self.stuck = stuck
+        self.snapshot_output = snapshot_output
         self.config = (
             "scsi0: local-zfs:vm-1-disk-0,size=64G\n"
             "tpmstate0: local-zfs:vm-1-disk-1,size=4M\n"
@@ -337,7 +338,9 @@ class FakePve:
         }
         if verb in answers:
             return Reply(0, answers[verb])
-        if verb in ("agent", "snapshot", "set"):
+        if verb == "snapshot":
+            return Reply(0, self.snapshot_output)
+        if verb in ("agent", "set"):
             return Reply(0)
         raise AssertionError(f"unexpected qm call: {cmd}")
 

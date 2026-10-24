@@ -32,7 +32,7 @@ if TYPE_CHECKING:
     from ..domain.guest_tool import PackedTool, Pushed
     from ..domain.receipt import RepairReceipt
     from ..domain.settings import Settings, SshSettings
-    from ..domain.vm_config import VmConfigRead
+    from ..domain.vm_config import SnapshotResult, VmConfigRead
 
 
 class GetConfig(Protocol):
@@ -183,6 +183,10 @@ class NodePort(Protocol):
 
     def snapshots(self, vmid: int) -> frozenset[str]:
         """The snapshot names of ``vmid`` (``qm listsnapshot``), without PVE's ``current`` marker."""
+        ...
+
+    def snapshot(self, vmid: int, name: str, description: str) -> SnapshotResult:
+        """Snapshot ``vmid`` as ``name`` (``qm snapshot``): exit code, stderr, and whether PVE froze the guest fs."""
         ...
 
     def guest(self, ip: IPv4Address) -> GuestPort:
