@@ -423,9 +423,12 @@ loads and means "not configured". Override one key per run with
 
 ### `[node]`  -  `NodeSettings`
 
-| Field       | Type   | Default                    | Rule                                                                           |
-|-------------|--------|----------------------------|--------------------------------------------------------------------------------|
-| `state_dir` | `Path` | `"/var/lib/pve-winrepair"` | where receipts are kept; an absolute POSIX path ("", relative and `~` refused) |
+| Field       | Type   | Default                    | Rule                                                                                                                                                            |
+|-------------|--------|----------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `state_dir` | `Path` | `"/var/lib/pve-winrepair"` | where receipts are kept; an absolute POSIX path ("", relative and `~` refused)                                                                                  |
+| `host`      | `str`  | `""`                       | the PVE node to drive over ssh, a DNS name or IPv4 address (`NODE_HOST_PATTERN`: letter or digit first, no space, `;` or `@`); empty = this machine is the node |
+| `ssh_user`  | `str`  | `"root"`                   | `[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}` (never a leading `-`)                                                                                                        |
+| `ssh_key`   | `str`  | `""`                       | private key this machine logs in to the node with, passed to ssh as written; empty = not configured                                                             |
 
 ---
 

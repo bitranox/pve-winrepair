@@ -20,6 +20,11 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
 
 #: A Windows account name as the guest's sshd takes it: no domain part, no spaces.
 _USER_PATTERN: Final[str] = r"^[A-Za-z0-9_.-]{1,64}$"
+#: A node host as ssh takes it: a DNS name or an IPv4 address. A letter or digit first, so ssh can never
+#: read it as an option; no space, ';' or '@', so it can never become a second word or carry a user.
+NODE_HOST_PATTERN: Final[str] = r"^$|^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$"
+#: The node's login user: like _USER_PATTERN, but never starting with '-' (ssh would read "-x@host" as an option).
+_NODE_USER_PATTERN: Final[str] = r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$"
 #: A Proxmox snapshot name: a letter first, 2 to 40 characters (PVE's CONFIGID_RE needs at least two).
 _SNAPSHOT_PATTERN: Final[str] = r"^[A-Za-z][A-Za-z0-9_-]{1,39}$"
 #: A scheduled task name as ``verify-runners --task`` accepts it.
@@ -143,9 +148,12 @@ class RepairSettings(BaseModel):
 
 
 class NodeSettings(BaseModel):
-    """Where the node keeps its own state (repair receipts).
+    """Where the node keeps its own state (repair receipts), and how the tool reaches the node.
 
     ``state_dir`` must be an absolute POSIX path; "", a relative path and a leading "~" are refused.
+    ``host`` is the PVE node to drive over ssh, a DNS name or an IPv4 address; "" means this machine is the node.
+    ``ssh_user`` is the account the tool logs in to the node as; it never starts with "-".
+    ``ssh_key`` is the private key file this machine logs in to the node with; "" means not configured.
 
     Example:
         >>> NodeSettings().state_dir.name
@@ -155,6 +163,10 @@ class NodeSettings(BaseModel):
     model_config = _SECTION_CONFIG
 
     state_dir: Path = Path("/var/lib/pve-winrepair")
+    host: str = Field(default="", pattern=NODE_HOST_PATTERN)
+    ssh_user: str = Field(default="root", pattern=_NODE_USER_PATTERN)
+    # Kept as written, like [ssh] key: ssh reads the path itself on the machine running the tool.
+    ssh_key: str = ""
 
     @field_validator("state_dir", mode="before")
     @classmethod
@@ -187,6 +199,7 @@ class Settings(BaseModel):
 
 
 __all__ = [
+    "NODE_HOST_PATTERN",
     "GuestSettings",
     "NodeSettings",
     "RepairSettings",

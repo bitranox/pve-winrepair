@@ -349,6 +349,39 @@ def test_an_empty_state_dir_from_the_environment_is_refused(
     assert _refusal(config) == _STATE_DIR_REASON
 
 
+# --- node link: host, ssh_user, ssh_key --------------------------------------------------------
+
+
+@pytest.mark.os_agnostic
+def test_node_link_settings_default_to_this_machine(config_factory: Callable[[dict[str, Any]], Config]) -> None:
+    node = load_settings(config_factory({})).node
+    assert (node.host, node.ssh_user, node.ssh_key) == ("", "root", "")
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("host", ["pve1", "pve1.example.net", "192.0.2.10"])
+def test_a_node_host_name_or_address_is_accepted(config_factory: Callable[[dict[str, Any]], Config], host: str) -> None:
+    assert load_settings(config_factory({"node": {"host": host}})).node.host == host
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("host", ["-oProxyCommand=x", "pve 1", "pve1;id", "root@pve1"])
+def test_a_node_host_that_ssh_could_read_as_an_option_or_a_second_word_is_refused(
+    config_factory: Callable[[dict[str, Any]], Config], host: str
+) -> None:
+    with pytest.raises(SettingsError) as refused:
+        load_settings(config_factory({"node": {"host": host}}))
+    # The pattern reason, not "Extra inputs are not permitted": a model without the field refuses these too.
+    assert any(line.startswith("node.host: String should match pattern") for line in refused.value.lines)
+
+
+@pytest.mark.os_agnostic
+def test_a_node_ssh_user_starting_with_a_dash_is_refused(config_factory: Callable[[dict[str, Any]], Config]) -> None:
+    with pytest.raises(SettingsError) as refused:
+        load_settings(config_factory({"node": {"ssh_user": "-oX"}}))
+    assert any(line.startswith("node.ssh_user: String should match pattern") for line in refused.value.lines)
+
+
 # --- numbers: no booleans ----------------------------------------------------------------------
 
 

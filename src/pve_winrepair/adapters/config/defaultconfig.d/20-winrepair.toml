@@ -108,3 +108,22 @@ system_free_gb = 25.0
 # Default: "/var/lib/pve-winrepair"
 # Environment Variable: PVE_WINREPAIR___NODE__STATE_DIR=/var/lib/pve-winrepair
 state_dir = "/var/lib/pve-winrepair"
+
+# Purpose: The PVE node to drive over ssh; empty means this machine is the node
+# Type: string; a host name or IPv4 address (a letter or digit first; no space, ; or @)
+# Default: ""
+# Environment Variable: PVE_WINREPAIR___NODE__HOST=pve1
+host = ""
+
+# Purpose: Account this machine logs in as on the node
+# Type: string; letters, digits and _ . - only, 1 to 64 characters, not starting with -
+# Default: "root"
+# Environment Variable: PVE_WINREPAIR___NODE__SSH_USER=root
+ssh_user = "root"
+
+# Purpose: Private key file this machine logs in to the node with
+# Type: string (path); a leading ~ is passed to ssh as written, and ssh expands it
+# Default: "" (not configured)
+# Environment Variable: PVE_WINREPAIR___NODE__SSH_KEY=~/.ssh/id_pve_node
+# Note: not [ssh] key - that is the key for the guests; the node needs its own
+ssh_key = ""

@@ -117,6 +117,17 @@ No setting binds `--ip` to a VM: `repair --ip` and `apply` always require one of
 VM's `netN` lines in `qm config` to be among the guest's network adapters, and refuse the run
 otherwise.
 
+**`host`** (default `""`): the PVE node whose `qm` the tool drives over ssh. A host name or an IPv4
+address: a letter or digit first, and no space, `;` or `@`, so ssh can never read it as an option, a
+second word or a user. Empty means the machine running the tool is the node.
+
+**`ssh_user`** (default `"root"`): the account this machine logs in as on the node. Letters, digits,
+`_`, `.` and `-`, 1 to 64 characters, never starting with `-`.
+
+**`ssh_key`** (default `""`): the private key file this machine logs in to the node with, passed to
+ssh as written (ssh expands a leading `~`). It is not `[ssh] key`, which is the key for the guests;
+the node connection never shares that key or user.
+
 ---
 
 ## Configuration Layers
