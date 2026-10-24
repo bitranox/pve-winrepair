@@ -5,10 +5,11 @@ from __future__ import annotations
 from ipaddress import IPv4Address
 from typing import TYPE_CHECKING
 
-from guest_fakes import GUEST_IP, USER, FakeRunner, Reply
+from guest_fakes import GUEST_IP, USER, FakeRunner, Reply, route
 
 from pve_winrepair.adapters.guest_ssh import ssh_options
 from pve_winrepair.adapters.node import Node
+from pve_winrepair.domain.node_link import NodeLink
 from pve_winrepair.domain.settings import SshSettings
 from pve_winrepair.domain.vm_config import SnapshotResult, VmConfig, VmConfigRead, parse_vm_config
 
@@ -89,3 +90,38 @@ def test_a_failed_snapshot_keeps_its_exit_code_and_stderr() -> None:
     runner = FakeRunner().on("qm", Reply(255, "", "snapshot feature is not available\n"))
     result = Node(ssh=SSH, runner=runner).snapshot(100, "s1", "d")
     assert result == SnapshotResult(returncode=255, stderr="snapshot feature is not available\n", fs_frozen=False)
+
+
+LINK = NodeLink(host="pve1", user="root", key="/keys/node.key")
+
+
+def test_without_a_link_qm_runs_here_exactly_as_before() -> None:
+    runner = FakeRunner().on("qm", Reply(0, "status: running\n"))
+    Node(ssh=SSH, runner=runner).qm("status", "100", timeout=30)
+    assert runner.calls == [["qm", "status", "100"]]
+
+
+def test_with_a_link_qm_runs_on_the_node_as_one_quoted_command() -> None:
+    runner = FakeRunner().on("qm", Reply(0))
+    Node(ssh=SSH, link=LINK, runner=runner).snapshot(100, "s1", "before an in-place repair upgrade")
+    assert runner.calls == [
+        LINK.ssh_argv(["qm", "snapshot", "100", "s1", "--description", "before an in-place repair upgrade"])
+    ]
+    assert runner.timeouts == [900]
+
+
+def test_with_a_link_the_parsed_reads_go_to_the_node_too() -> None:
+    runner = FakeRunner().on("qm", Reply(0, "scsi0: local-zfs:vm-1-disk-0,size=64G\n"))
+    read = Node(ssh=SSH, link=LINK, runner=runner).vm_config(100)
+    assert read.config.disks[0].storage == "local-zfs"
+    assert runner.calls == [LINK.ssh_argv(["qm", "config", "100"])]
+
+
+def test_with_a_link_the_guest_is_reached_through_the_node() -> None:
+    runner = FakeRunner().on("hostname", Reply(0))
+    Node(ssh=SSH, link=LINK, runner=runner).guest(IPv4Address(GUEST_IP)).ssh("hostname", timeout=5.0)
+    assert runner.calls == [["ssh", "-o", f"ProxyCommand={LINK.proxy_command()}", *_ssh("hostname")[1:]]]
+
+
+def test_the_fakes_route_a_remote_qm_call_as_qm() -> None:
+    assert route(LINK.ssh_argv(["qm", "status", "1"])) == "qm"

@@ -120,7 +120,7 @@ def cli_repair(
             finish(ctx, refused(vmid, refusal, wu_held=False), command=RunCommand.REPAIR, vmid=vmid, as_json=as_json)
         result = run_repair(
             request,
-            cli_ctx.services.make_node(settings.ssh),
+            cli_ctx.services.make_node(settings.ssh, None),
             repair=settings.repair,
             guest=settings.guest,
             receipts=cli_ctx.services.make_receipts(settings.node.state_dir),

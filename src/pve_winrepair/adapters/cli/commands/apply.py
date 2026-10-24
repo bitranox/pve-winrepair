@@ -65,7 +65,7 @@ def cli_apply(ctx: click.Context, *, vmid: int, ip: IPv4Address, apply_minutes: 
             finish(ctx, refused(vmid, refusal, wu_held=True), command=RunCommand.APPLY, vmid=vmid, as_json=as_json)
         result = run_apply(
             ApplyRequest(vmid=vmid, ip=ip, apply_minutes=apply_minutes),
-            cli_ctx.services.make_node(settings.ssh),
+            cli_ctx.services.make_node(settings.ssh, None),
             receipts=cli_ctx.services.make_receipts(settings.node.state_dir),
             on_step=echo_step,
         )

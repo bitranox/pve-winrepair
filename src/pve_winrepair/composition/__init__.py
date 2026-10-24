@@ -41,6 +41,7 @@ if TYPE_CHECKING:
         MakeNode,
         MakeReceipts,
     )
+    from ..domain.node_link import NodeLink
     from ..domain.settings import SshSettings
 
     _assert_get_config: GetConfig = get_config
@@ -89,9 +90,9 @@ def _refuse_to_run(cmd: Sequence[str], _timeout: float) -> NoReturn:
     raise RuntimeError(f"build_testing runs no command ({cmd[0]}): pass make_node to build_testing")
 
 
-def _refusing_node(ssh: SshSettings) -> Node:
+def _refusing_node(ssh: SshSettings, link: NodeLink | None) -> Node:
     """A node on :func:`_refuse_to_run`, so an unprepared test never reaches a real ``qm`` or ssh."""
-    return Node(ssh=ssh, runner=_refuse_to_run)
+    return Node(ssh=ssh, link=link, runner=_refuse_to_run)
 
 
 def build_testing(*, make_node: MakeNode | None = None, make_receipts: MakeReceipts | None = None) -> AppServices:

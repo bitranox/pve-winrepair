@@ -30,6 +30,7 @@ if TYPE_CHECKING:
     from ..domain.envelope import GuestAnswer, PayloadT
     from ..domain.guest_answers import GuestCommand
     from ..domain.guest_tool import PackedTool, Pushed
+    from ..domain.node_link import NodeLink
     from ..domain.receipt import RepairReceipt
     from ..domain.settings import Settings, SshSettings
     from ..domain.vm_config import SnapshotResult, VmConfigRead
@@ -106,9 +107,9 @@ class LoadSettings(Protocol):
 
 
 class MakeNode(Protocol):
-    """The PVE node this command runs on, reaching its guests with the given ``[ssh]`` settings."""
+    """The PVE node a command drives: this machine (no link), or a remote node over ssh; guests use ``[ssh]``."""
 
-    def __call__(self, ssh: SshSettings, /) -> NodePort: ...
+    def __call__(self, ssh: SshSettings, link: NodeLink | None, /) -> NodePort: ...
 
 
 class MakeReceipts(Protocol):

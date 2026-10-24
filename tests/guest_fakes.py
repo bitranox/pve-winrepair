@@ -13,6 +13,7 @@ import dataclasses
 import hashlib
 import json
 import os
+import shlex
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -29,6 +30,7 @@ from pve_winrepair.adapters.cli.main import main
 from pve_winrepair.adapters.guest_ssh import Guest
 from pve_winrepair.adapters.node import Node
 from pve_winrepair.composition import AppServices, build_production, build_testing
+from pve_winrepair.domain.node_link import NodeLink
 from pve_winrepair.domain.receipt import BuildPair, RepairReceipt
 from pve_winrepair.domain.settings import SshSettings
 from pve_winrepair_guest.envelope import Outcome, Report, build, internal_error, render
@@ -85,6 +87,9 @@ USER = "admin"
 #: The guest key the fakes' ssh and scp name; never read, the runner is fake.
 KEY = "/keys/test.key"
 SSH = SshSettings(key=KEY, user=USER)
+#: A remote PVE node the fakes reach over ssh: its login is ``root@``, never :data:`USER`, so
+#: :func:`route` tells a node call from a guest call by that token.
+NODE_LINK = NodeLink(host="pve1", user="root", key="/keys/node.key")
 GUEST_IP = "192.0.2.10"
 LAN_IP = "192.0.2.50"
 # What would stop, restart or reconfigure the VM, or take a snapshot of it.
@@ -112,10 +117,13 @@ def make_guest(runner: Runner, tool_dir: Path | None = None) -> Guest:
     return Guest(GUEST_IP, ssh_settings=SSH, tool_dir=tool_dir or TOOL_DIR, runner=runner)
 
 
-def make_node(runner: Runner, clock: FakeClock | None = None) -> Node:
-    """A node reaching its guests with :data:`SSH` through ``runner``; ``clock`` (default: a fresh one) waits."""
+def make_node(runner: Runner, clock: FakeClock | None = None, *, link: NodeLink | None = None) -> Node:
+    """A node reaching its guests with :data:`SSH` through ``runner``; ``clock`` (default: a fresh one) waits.
+
+    ``link``: a remote node (:data:`NODE_LINK`) whose ``qm`` and guest calls go over ssh; default: this machine.
+    """
     clock = clock or FakeClock()
-    return Node(ssh=SSH, runner=runner, clock=clock.time, sleep=clock.sleep, tool_dir=TOOL_DIR)
+    return Node(ssh=SSH, link=link, runner=runner, clock=clock.time, sleep=clock.sleep, tool_dir=TOOL_DIR)
 
 
 def locked(*, present: bool, stage_root: str | None = None) -> LockDirsReport:
@@ -169,6 +177,9 @@ def crashed(command: str, error: BaseException) -> Reply:
 
 def route(cmd: Sequence[str]) -> str:
     """The key a call is answered under: ``qm``, ``scp``, the tool subcommand, or the raw remote verb."""
+    if cmd[0] == "ssh" and cmd[-2].startswith(f"{NODE_LINK.user}@"):
+        # qm on a remote node: the last word is the quoted command (NodeLink.ssh_argv).
+        return route(shlex.split(cmd[-1]))
     if cmd[0] in ("qm", "scp"):
         return cmd[0]
     at = next(i for i, token in enumerate(cmd) if token.startswith(f"{USER}@"))
@@ -324,6 +335,8 @@ class FakePve:
         )
 
     def __call__(self, cmd: list[str]) -> Reply:
+        if cmd[0] == "ssh":
+            cmd = shlex.split(cmd[-1])  # qm on a remote node (NodeLink.ssh_argv)
         verb = cmd[1]
         if verb in ("shutdown", "start"):
             if not self.stuck:
@@ -593,8 +606,8 @@ def run_cli(
     def get_config(**_kwargs: object) -> Config:
         return loaded
 
-    def make_node(ssh: SshSettings) -> Node:
-        return Node(ssh=ssh, runner=runner, clock=clock.time, sleep=clock.sleep, tool_dir=TOOL_DIR)
+    def make_node(ssh: SshSettings, link: NodeLink | None) -> Node:
+        return Node(ssh=ssh, link=link, runner=runner, clock=clock.time, sleep=clock.sleep, tool_dir=TOOL_DIR)
 
     def services() -> AppServices:
         testing = dataclasses.replace(build_testing(make_node=make_node), get_config=get_config)

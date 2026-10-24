@@ -1,7 +1,9 @@
 """The PVE node a driver runs on: how it runs ``qm`` and ssh, waits, and reaches a guest.
 
 :class:`Node` is the one bundle the drivers take, and the tests' seam: a fake runner and clock passed
-here observe every node and guest call in order. :func:`run` is the production runner.
+here observe every node and guest call in order. :func:`run` is the production runner. A node with a
+:class:`~pve_winrepair.domain.node_link.NodeLink` is a remote one: ``qm`` runs there over ssh and
+every guest call is routed through it.
 
 The VM's own configuration, its snapshot list and a snapshot's outcome are parsed here, where ``qm`` answers
 (:mod:`pve_winrepair.domain.vm_config`), so no driver reads ``qm`` text; a guest's address becomes
@@ -31,6 +33,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from pve_winrepair.domain.envelope import Runner
+    from pve_winrepair.domain.node_link import NodeLink
     from pve_winrepair.domain.settings import SshSettings
 
 __all__ = ["Node", "run"]
@@ -45,14 +48,17 @@ class Node:
     """
 
     ssh: SshSettings
+    # None: this machine is the node, and every argv is exactly what it was before remote nodes existed.
+    link: NodeLink | None = None
     runner: Runner = run
     clock: Callable[[], float] = time.time
     sleep: Callable[[float], None] = time.sleep
     tool_dir: Path = TOOL_DIR
 
     def qm(self, *args: str, timeout: int = 600) -> subprocess.CompletedProcess[str]:
-        """Run ``qm`` on this node."""
-        return self.runner(["qm", *args], timeout)
+        """Run ``qm`` on this node: here, or over ssh on the linked node."""
+        argv = ["qm", *args] if self.link is None else self.link.ssh_argv(["qm", *args])
+        return self.runner(argv, timeout)
 
     def vm_config(self, vmid: int) -> VmConfigRead:
         """``qm config <vmid>``: its exit code, the output a refusal quotes, and its stdout parsed."""
@@ -71,5 +77,6 @@ class Node:
         return parse_snapshot_result(proc.returncode, proc.stdout, proc.stderr)
 
     def guest(self, ip: IPv4Address) -> Guest:
-        """The guest at ``ip``, reached with this node's ssh settings, tool dir and runner."""
-        return Guest(str(ip), ssh_settings=self.ssh, tool_dir=self.tool_dir, runner=self.runner)
+        """The guest at ``ip``, reached with this node's ssh settings and tool dir, through the linked node if any."""
+        runner = self.runner if self.link is None else self.link.jumped(self.runner)
+        return Guest(str(ip), ssh_settings=self.ssh, tool_dir=self.tool_dir, runner=runner)
