@@ -17,7 +17,7 @@ moves or removes a module, a CLI option or a public name.
 - `src/pve_winrepair/domain/guest_answers.py`  -  One frozen model, closed to unknown fields, per guest subcommand's payload (`BuildAnswer`, `PrepareAnswer`, `LaunchAnswer`, ...), their verdict and status enums (`StateVerdict`, `LaunchVerdict`, `PrepareGate`, ...) and `GuestCommand`, the subcommand names
 - `src/pve_winrepair/domain/errors.py`  -  Domain exceptions (`ConfigurationError`)
 - `src/pve_winrepair/domain/guest_tool.py`  -  `PackedTool` (the node's packed tool, its content address and sha256) and `Pushed` (what a push left on the guest)
-- `src/pve_winrepair/domain/node_link.py`  -  `NodeLink` (host, ssh user, key) reaches a PVE node this machine does not run on: `ssh_argv` sends a remote command to the node as one `shlex`-quoted word with a strict host-key check, `proxy_command` is the `ProxyCommand` that carries a guest connection through the node with the node key, and `jumped` wraps a `Runner` so every ssh and scp goes through it; starts no process
+- `src/pve_winrepair/domain/node_link.py`  -  `NodeLink` (host, ssh user, key, known_hosts file) reaches a PVE node this machine does not run on: `ssh_argv` sends a remote command to the node as one `shlex`-quoted word with a strict host-key check against that file, `proxy_command` is the `ProxyCommand` that carries a guest connection through the node with the node key, and `jumped` wraps a `Runner` so every ssh and scp goes through it; starts no process
 - `src/pve_winrepair/domain/receipt.py`  -  `RepairReceipt`, the image build a repair's prepare step measured with the guest's `build_before` and `install_date_before` (all required; `same_build`), `GuestBuild` (CurrentBuild, UBR, InstallDate; `from_answer`), `BuildPair` (`build_before`, stored as the array `[build, ubr]`), and `ReceiptError`
 - `src/pve_winrepair/domain/report.py`  -  `Report` collects a run's steps and hands each to `on_step`; `RunExit`, `RunResult`, `RunVerdict`, the `Step` model with its `StepName`; flags a run that leaves Windows Update held
 - `src/pve_winrepair/domain/settings.py`  -  Node CLI settings models (`SshSettings`, `GuestSettings`, `RepairSettings`, `NodeSettings`, `Settings`) and the `SnapshotName` type; see Settings below
@@ -426,12 +426,13 @@ loads and means "not configured". Override one key per run with
 
 ### `[node]`  -  `NodeSettings`
 
-| Field       | Type   | Default                    | Rule                                                                                                                                                            |
-|-------------|--------|----------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `state_dir` | `Path` | `"/var/lib/pve-winrepair"` | where receipts are kept; an absolute POSIX path ("", relative and `~` refused)                                                                                  |
-| `host`      | `str`  | `""`                       | the PVE node to drive over ssh, a DNS name or IPv4 address (`NODE_HOST_PATTERN`: letter or digit first, no space, `;` or `@`); empty = this machine is the node |
-| `ssh_user`  | `str`  | `"root"`                   | `[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}` (never a leading `-`)                                                                                                        |
-| `ssh_key`   | `str`  | `""`                       | private key this machine logs in to the node with, passed to ssh as written; empty = not configured                                                             |
+| Field              | Type   | Default                    | Rule                                                                                                                                                            |
+|--------------------|--------|----------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `state_dir`        | `Path` | `"/var/lib/pve-winrepair"` | where receipts are kept; an absolute POSIX path ("", relative and `~` refused)                                                                                  |
+| `host`             | `str`  | `""`                       | the PVE node to drive over ssh, a DNS name or IPv4 address (`NODE_HOST_PATTERN`: letter or digit first, no space, `;` or `@`); empty = this machine is the node |
+| `ssh_user`         | `str`  | `"root"`                   | `[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}` (never a leading `-`)                                                                                                        |
+| `ssh_key`          | `str`  | `""`                       | private key this machine logs in to the node with, passed to ssh as written; empty = not configured                                                             |
+| `known_hosts_file` | `str`  | `"~/.ssh/known_hosts"`     | the known_hosts file the node's host key is checked against (strictly), passed to ssh as written; a leading `~` is expanded by ssh                              |
 
 ---
 

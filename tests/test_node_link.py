@@ -6,18 +6,16 @@ import shlex
 import subprocess  # nosec B404
 from typing import TYPE_CHECKING
 
-from guest_fakes import GUEST_IP, KEY, USER, FakeRunner, Reply
+from guest_fakes import GUEST_IP, KEY, NODE_LINK, USER, FakeRunner, Reply
 
 from pve_winrepair.domain.node_link import NodeLink
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-LINK = NodeLink(host="pve1", user="root", key="/keys/node.key")
-
 
 def test_a_remote_command_is_one_quoted_word_after_the_target() -> None:
-    argv = LINK.ssh_argv(["qm", "snapshot", "100", "s1", "--description", "before an in-place repair upgrade"])
+    argv = NODE_LINK.ssh_argv(["qm", "snapshot", "100", "s1", "--description", "before an in-place repair upgrade"])
     assert argv[:3] == ["ssh", "-i", "/keys/node.key"]
     assert argv[-2] == "root@pve1"
     # The node's shell splits this back into exactly the words given (measured: unquoted, it splits the description).
@@ -33,34 +31,44 @@ def test_a_remote_command_is_one_quoted_word_after_the_target() -> None:
 
 def test_quotes_and_empty_words_survive_the_node_shell() -> None:
     words = ["qm", "set", "100", "--description", "it's", ""]
-    assert shlex.split(LINK.ssh_argv(words)[-1]) == words
+    assert shlex.split(NODE_LINK.ssh_argv(words)[-1]) == words
 
 
 def test_the_node_connection_is_strict_about_its_host_key_and_never_prompts() -> None:
-    argv = LINK.ssh_argv(["true"])
+    argv = NODE_LINK.ssh_argv(["true"])
     options = {argv[i + 1] for i, token in enumerate(argv) if token == "-o"}
     assert {"BatchMode=yes", "StrictHostKeyChecking=yes", "IdentitiesOnly=yes"} <= options
 
 
+def test_the_node_ssh_checks_the_node_against_the_configured_known_hosts() -> None:
+    argv = NODE_LINK.ssh_argv(["qm", "status", "1"])
+    after_opts = argv.index("ServerAliveInterval=30") + 1  # the last of _NODE_OPTS
+    assert argv[after_opts:] == ["-o", "UserKnownHostsFile=/keys/known_hosts_node", "root@pve1", "qm status 1"]
+
+
+def test_the_proxy_command_checks_the_node_against_the_same_file() -> None:
+    assert NODE_LINK.proxy_command().endswith("-o UserKnownHostsFile=/keys/known_hosts_node -W %h:%p root@pve1")
+
+
 def test_the_proxy_command_reaches_the_guest_through_the_node_with_the_node_key() -> None:
-    words = shlex.split(LINK.proxy_command())
+    words = shlex.split(NODE_LINK.proxy_command())
     assert words[:3] == ["ssh", "-i", "/keys/node.key"]
     assert words[-3:] == ["-W", "%h:%p", "root@pve1"]
 
 
 def test_a_node_key_path_with_a_space_stays_one_word_in_the_proxy_command() -> None:
-    link = NodeLink(host="pve1", user="root", key="/home/a b/node.key")
+    link = NodeLink(host="pve1", user="root", key="/home/a b/node.key", known_hosts="/keys/known_hosts_node")
     assert shlex.split(link.proxy_command())[2] == "/home/a b/node.key"
 
 
 def test_the_jumped_runner_adds_the_proxy_to_ssh_and_scp_only() -> None:
     inner = FakeRunner().on("hostname", Reply(0)).on("scp", Reply(0))
-    jumped = LINK.jumped(inner)
+    jumped = NODE_LINK.jumped(inner)
     # The fake routes an ssh call by the token naming its own guest user, so the argv uses its constants.
     jumped(["ssh", "-i", KEY, f"{USER}@{GUEST_IP}", "hostname"], 5.0)
     jumped(["scp", "-q", "-i", KEY, "a", f"{USER}@{GUEST_IP}:C:\\x\\"], 5.0)
     for call in inner.calls:
-        assert call[1:3] == ["-o", f"ProxyCommand={LINK.proxy_command()}"]
+        assert call[1:3] == ["-o", f"ProxyCommand={NODE_LINK.proxy_command()}"]
     assert inner.timeouts == [5.0, 5.0]
 
 
@@ -71,5 +79,5 @@ def test_the_jumped_runner_passes_anything_else_through_unchanged() -> None:
         seen.append(list(cmd))
         return subprocess.CompletedProcess(list(cmd), 0, "", "")
 
-    LINK.jumped(inner)(["qm", "status", "100"], 30)
+    NODE_LINK.jumped(inner)(["qm", "status", "100"], 30)
     assert seen == [["qm", "status", "100"]]

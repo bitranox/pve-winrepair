@@ -130,6 +130,12 @@ run is refused before any call.
 ssh as written (ssh expands a leading `~`). It is not `[ssh] key`, which is the key for the guests;
 the node connection never shares that key or user.
 
+**`known_hosts_file`** (default `"~/.ssh/known_hosts"`): the known_hosts file the remote node's host
+key is checked against, passed to ssh as written (ssh expands a leading `~`). The check is strict:
+a node whose key is missing from the file, or has changed, is refused before any call, so add the
+node's key there first. It is not `[ssh] known_hosts_file`, which holds the guests' keys; the jump
+through the node to a guest checks the node against this file too.
+
 ---
 
 ## Configuration Layers

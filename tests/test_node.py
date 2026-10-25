@@ -7,11 +7,10 @@ from ipaddress import IPv4Address
 from typing import TYPE_CHECKING
 
 import pytest
-from guest_fakes import GUEST_IP, USER, FakeRunner, Reply, route
+from guest_fakes import GUEST_IP, NODE_LINK, USER, FakeRunner, Reply, route
 
 from pve_winrepair.adapters.guest_ssh import ssh_options
 from pve_winrepair.adapters.node import Node
-from pve_winrepair.domain.node_link import NodeLink
 from pve_winrepair.domain.settings import SshSettings
 from pve_winrepair.domain.vm_config import SnapshotResult, VmConfig, VmConfigRead, parse_vm_config
 
@@ -94,9 +93,6 @@ def test_a_failed_snapshot_keeps_its_exit_code_and_stderr() -> None:
     assert result == SnapshotResult(returncode=255, stderr="snapshot feature is not available\n", fs_frozen=False)
 
 
-LINK = NodeLink(host="pve1", user="root", key="/keys/node.key")
-
-
 def test_without_a_link_qm_runs_here_exactly_as_before() -> None:
     runner = FakeRunner().on("qm", Reply(0, "status: running\n"))
     Node(ssh=SSH, runner=runner).qm("status", "100", timeout=30)
@@ -105,32 +101,32 @@ def test_without_a_link_qm_runs_here_exactly_as_before() -> None:
 
 def test_with_a_link_qm_runs_on_the_node_as_one_quoted_command() -> None:
     runner = FakeRunner().on("qm", Reply(0))
-    Node(ssh=SSH, link=LINK, runner=runner).snapshot(100, "s1", "before an in-place repair upgrade")
+    Node(ssh=SSH, link=NODE_LINK, runner=runner).snapshot(100, "s1", "before an in-place repair upgrade")
     assert runner.calls == [
-        LINK.ssh_argv(["qm", "snapshot", "100", "s1", "--description", "before an in-place repair upgrade"])
+        NODE_LINK.ssh_argv(["qm", "snapshot", "100", "s1", "--description", "before an in-place repair upgrade"])
     ]
     assert runner.timeouts == [900]
 
 
 def test_with_a_link_the_parsed_reads_go_to_the_node_too() -> None:
     runner = FakeRunner().on("qm", Reply(0, "scsi0: local-zfs:vm-1-disk-0,size=64G\n"))
-    read = Node(ssh=SSH, link=LINK, runner=runner).vm_config(100)
+    read = Node(ssh=SSH, link=NODE_LINK, runner=runner).vm_config(100)
     assert read.config.disks[0].storage == "local-zfs"
-    assert runner.calls == [LINK.ssh_argv(["qm", "config", "100"])]
+    assert runner.calls == [NODE_LINK.ssh_argv(["qm", "config", "100"])]
 
 
 def test_with_a_link_the_guest_is_reached_through_the_node() -> None:
     runner = FakeRunner().on("hostname", Reply(0))
-    Node(ssh=SSH, link=LINK, runner=runner).guest(IPv4Address(GUEST_IP)).ssh("hostname", timeout=5.0)
-    assert runner.calls == [["ssh", "-o", f"ProxyCommand={LINK.proxy_command()}", *_ssh("hostname")[1:]]]
+    Node(ssh=SSH, link=NODE_LINK, runner=runner).guest(IPv4Address(GUEST_IP)).ssh("hostname", timeout=5.0)
+    assert runner.calls == [["ssh", "-o", f"ProxyCommand={NODE_LINK.proxy_command()}", *_ssh("hostname")[1:]]]
 
 
 def test_the_fakes_route_a_remote_qm_call_as_qm() -> None:
-    assert route(LINK.ssh_argv(["qm", "status", "1"])) == "qm"
+    assert route(NODE_LINK.ssh_argv(["qm", "status", "1"])) == "qm"
 
 
 def test_the_fakes_route_a_remote_call_by_its_first_word() -> None:
-    assert route(LINK.ssh_argv(["command", "-v", "qm"])) == "command"
+    assert route(NODE_LINK.ssh_argv(["command", "-v", "qm"])) == "command"
 
 
 def test_no_link_needs_no_preflight_call() -> None:
@@ -141,8 +137,8 @@ def test_no_link_needs_no_preflight_call() -> None:
 
 def test_a_usable_node_answers_the_preflight() -> None:
     runner = FakeRunner().on("command", Reply(0, "/usr/sbin/qm\n"))
-    assert Node(ssh=SSH, link=LINK, runner=runner).check_link() is None
-    assert runner.calls == [LINK.ssh_argv(["command", "-v", "qm"])]
+    assert Node(ssh=SSH, link=NODE_LINK, runner=runner).check_link() is None
+    assert runner.calls == [NODE_LINK.ssh_argv(["command", "-v", "qm"])]
 
 
 @pytest.mark.parametrize(
@@ -155,7 +151,7 @@ def test_a_usable_node_answers_the_preflight() -> None:
 )
 def test_a_link_failure_is_reported_in_ssh_s_own_words(stderr: str) -> None:
     runner = FakeRunner().on("command", Reply(255, "", stderr + "\n"))
-    assert Node(ssh=SSH, link=LINK, runner=runner).check_link() == f"node root@pve1 is not usable: {stderr}"
+    assert Node(ssh=SSH, link=NODE_LINK, runner=runner).check_link() == f"node root@pve1 is not usable: {stderr}"
 
 
 def test_ssh_s_last_line_is_the_reason_after_its_warnings() -> None:
@@ -164,26 +160,26 @@ def test_ssh_s_last_line_is_the_reason_after_its_warnings() -> None:
         "root@pve1: Permission denied (publickey).\n"
     )
     runner = FakeRunner().on("command", Reply(255, "", stderr))
-    assert Node(ssh=SSH, link=LINK, runner=runner).check_link() == (
+    assert Node(ssh=SSH, link=NODE_LINK, runner=runner).check_link() == (
         "node root@pve1 is not usable: root@pve1: Permission denied (publickey)."
     )
 
 
 def test_an_ssh_that_cannot_start_is_reported() -> None:
     runner = FakeRunner().on("command", FileNotFoundError(2, "No such file or directory", "ssh"))
-    reason = Node(ssh=SSH, link=LINK, runner=runner).check_link()
+    reason = Node(ssh=SSH, link=NODE_LINK, runner=runner).check_link()
     assert reason == "node root@pve1 is not usable: ssh could not start ([Errno 2] No such file or directory: 'ssh')"
 
 
 def test_a_host_without_qm_is_no_pve_node() -> None:
     runner = FakeRunner().on("command", Reply(1))
     assert (
-        Node(ssh=SSH, link=LINK, runner=runner).check_link()
+        Node(ssh=SSH, link=NODE_LINK, runner=runner).check_link()
         == "node root@pve1 is not usable: no qm there (not a PVE node?)"
     )
 
 
 def test_a_preflight_that_times_out_is_reported() -> None:
     runner = FakeRunner().on("command", subprocess.TimeoutExpired(["ssh"], 30))
-    reason = Node(ssh=SSH, link=LINK, runner=runner).check_link()
+    reason = Node(ssh=SSH, link=NODE_LINK, runner=runner).check_link()
     assert reason is not None and reason.startswith("node root@pve1 is not usable: no answer within 30 s")

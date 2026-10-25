@@ -515,7 +515,12 @@ def test_a_state_dir_below_an_unsearchable_directory_is_refused_naming_it(tmp_pa
 @NEEDS_A_POSIX_STATE_DIR
 def test_an_unusable_remote_node_is_refused_before_any_vm_call(tmp_path: Path) -> None:
     config = cli_config(tmp_path)
-    config["node"] = {**config["node"], "host": "pve1", "ssh_key": "/keys/node.key"}
+    config["node"] = {
+        **config["node"],
+        "host": "pve1",
+        "ssh_key": "/keys/node.key",
+        "known_hosts_file": NODE_LINK.known_hosts,
+    }
     runner = FakeRunner().on("command", Reply(255, "", "Host key verification failed.\n"))
     run = run_cli(["repair", "--vmid", "1", "--json"], config, runner)
     assert run.exit_code == 1
@@ -526,7 +531,12 @@ def test_an_unusable_remote_node_is_refused_before_any_vm_call(tmp_path: Path) -
 @NEEDS_A_POSIX_STATE_DIR
 def test_the_node_option_names_the_node_the_run_drives(tmp_path: Path) -> None:
     config = cli_config(tmp_path)
-    config["node"] = {**config["node"], "host": "pve9", "ssh_key": "/keys/node.key"}
+    config["node"] = {
+        **config["node"],
+        "host": "pve9",
+        "ssh_key": "/keys/node.key",
+        "known_hosts_file": NODE_LINK.known_hosts,
+    }
     runner = FakeRunner().on("command", Reply(255, "", "Host key verification failed.\n"))
     run = run_cli(["repair", "--vmid", "1", "--json", "--node", "pve1"], config, runner)
     assert run.exit_code == 1
@@ -540,12 +550,21 @@ def test_no_node_host_anywhere_means_this_machine() -> None:
 
 def test_the_node_host_setting_builds_the_link_with_the_node_user_and_key() -> None:
     settings = Settings(node=NodeSettings(host="pve1", ssh_user="admin1", ssh_key="/k"))
-    assert resolve_link(settings, None) == NodeLink(host="pve1", user="admin1", key="/k")
+    assert resolve_link(settings, None) == NodeLink(
+        host="pve1", user="admin1", key="/k", known_hosts="~/.ssh/known_hosts"
+    )
 
 
 def test_the_node_option_overrides_the_setting() -> None:
     settings = Settings(node=NodeSettings(host="pve1", ssh_key="/k"))
-    assert resolve_link(settings, "pve2") == NodeLink(host="pve2", user="root", key="/k")
+    assert resolve_link(settings, "pve2") == NodeLink(
+        host="pve2", user="root", key="/k", known_hosts="~/.ssh/known_hosts"
+    )
+
+
+def test_the_link_takes_the_node_known_hosts_setting() -> None:
+    settings = Settings(node=NodeSettings(host="pve1", ssh_key="/k", known_hosts_file="/kh"))
+    assert resolve_link(settings, None) == NodeLink(host="pve1", user="root", key="/k", known_hosts="/kh")
 
 
 def test_a_node_without_a_node_key_is_refused_by_name() -> None:
@@ -564,7 +583,7 @@ def test_a_node_option_ssh_could_read_as_an_option_is_a_usage_error(tmp_path: Pa
 @NEEDS_A_POSIX_STATE_DIR
 def test_repair_with_the_node_option_runs_every_qm_call_on_that_node(tmp_path: Path) -> None:
     config = cli_config(tmp_path)
-    config["node"] = {**config["node"], "ssh_key": NODE_LINK.key}
+    config["node"] = {**config["node"], "ssh_key": NODE_LINK.key, "known_hosts_file": NODE_LINK.known_hosts}
     runner = agent_runner(FakePve()).on("command", Reply(0, "/usr/sbin/qm\n", ""))
     run = run_cli(["repair", "--vmid", "1", "--json", "--node", NODE_LINK.host], config, runner)
     assert (run.exit_code, json_envelope(run.stdout)["verdict"]) == (0, "STATE=DONE-OK")
@@ -577,7 +596,7 @@ def test_repair_with_the_node_option_runs_every_qm_call_on_that_node(tmp_path: P
 @NEEDS_A_POSIX_STATE_DIR
 def test_a_bad_snapshot_name_is_refused_before_the_remote_node_is_called(tmp_path: Path) -> None:
     config = cli_config(tmp_path)
-    config["node"] = {**config["node"], "ssh_key": NODE_LINK.key}
+    config["node"] = {**config["node"], "ssh_key": NODE_LINK.key, "known_hosts_file": NODE_LINK.known_hosts}
     runner = FakeRunner()
     run = run_cli(["repair", "--vmid", "1", "--snapshot-name", "1x", "--node", NODE_LINK.host], config, runner)
     assert run.exit_code == 1

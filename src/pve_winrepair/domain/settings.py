@@ -154,6 +154,7 @@ class NodeSettings(BaseModel):
     ``host`` is the PVE node to drive over ssh, a DNS name or an IPv4 address; "" means this machine is the node.
     ``ssh_user`` is the account the tool logs in to the node as; it never starts with "-".
     ``ssh_key`` is the private key file this machine logs in to the node with; "" means not configured.
+    ``known_hosts_file`` is the known_hosts file the node's host key is checked against, passed to ssh as written.
 
     Example:
         >>> NodeSettings().state_dir.name
@@ -167,6 +168,8 @@ class NodeSettings(BaseModel):
     ssh_user: str = Field(default="root", pattern=_NODE_USER_PATTERN)
     # Kept as written, like [ssh] key: ssh reads the path itself on the machine running the tool.
     ssh_key: str = ""
+    # Passed as written, like [ssh] known_hosts_file: ssh expands a leading "~" on the machine running the tool.
+    known_hosts_file: str = "~/.ssh/known_hosts"
 
     @field_validator("state_dir", mode="before")
     @classmethod

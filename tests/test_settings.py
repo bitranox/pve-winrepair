@@ -359,6 +359,11 @@ def test_node_link_settings_default_to_this_machine(config_factory: Callable[[di
 
 
 @pytest.mark.os_agnostic
+def test_the_node_known_hosts_file_defaults_to_the_users_own() -> None:
+    assert NodeSettings().known_hosts_file == "~/.ssh/known_hosts"
+
+
+@pytest.mark.os_agnostic
 @pytest.mark.parametrize("host", ["pve1", "pve1.example.net", "192.0.2.10"])
 def test_a_node_host_name_or_address_is_accepted(config_factory: Callable[[dict[str, Any]], Config], host: str) -> None:
     assert load_settings(config_factory({"node": {"host": host}})).node.host == host

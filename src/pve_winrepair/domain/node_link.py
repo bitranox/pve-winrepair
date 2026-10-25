@@ -36,11 +36,13 @@ _JUMPED = frozenset({"ssh", "scp"})
 
 @dataclass(frozen=True)
 class NodeLink:
-    """The ssh connection to a remote PVE node: its host, the login user, and this machine's key for it."""
+    """The ssh connection to a remote PVE node: host, login user, this machine's key, the known_hosts file."""
 
     host: str
     user: str
     key: str
+    # Required, never defaulted: the node's host key is checked strictly, against this file.
+    known_hosts: str
 
     @property
     def target(self) -> str:
@@ -49,11 +51,15 @@ class NodeLink:
 
     def ssh_argv(self, remote: Sequence[str]) -> list[str]:
         """ssh to the node running ``remote`` there, as one quoted word the node's shell splits back exactly."""
-        return ["ssh", "-i", self.key, *_NODE_OPTS, self.target, shlex.join(remote)]
+        return ["ssh", "-i", self.key, *self._options(), self.target, shlex.join(remote)]
 
     def proxy_command(self) -> str:
         """The ``ProxyCommand`` that carries a guest connection through the node, logging in with the node key."""
-        return shlex.join(["ssh", "-i", self.key, *_NODE_OPTS, "-W", "%h:%p", self.target])
+        return shlex.join(["ssh", "-i", self.key, *self._options(), "-W", "%h:%p", self.target])
+
+    def _options(self) -> tuple[str, ...]:
+        # One place for both commands: the node connection and the jump check the same host key file.
+        return (*_NODE_OPTS, "-o", f"UserKnownHostsFile={self.known_hosts}")
 
     def jumped(self, runner: Runner) -> Runner:
         """``runner`` with every ssh and scp routed through the node; any other argv passes unchanged."""

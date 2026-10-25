@@ -134,7 +134,8 @@ def resolve_link(settings: Settings, node_host: str | None) -> NodeLink | None:
     """The link to the node ``--node`` or ``[node] host`` names; None when neither does (this machine is the node).
 
     Args:
-        settings: The loaded settings; ``[node] ssh_user`` and ``ssh_key`` log in to the node.
+        settings: The loaded settings; ``[node] ssh_user`` and ``ssh_key`` log in to the node, whose host key
+            is checked against ``[node] known_hosts_file``.
         node_host: ``--node``, which overrides ``[node] host``; None when the option was not given.
 
     Raises:
@@ -147,7 +148,12 @@ def resolve_link(settings: Settings, node_host: str | None) -> NodeLink | None:
         raise PreflightError(
             "[node] ssh_key is not configured: set it to the private key this machine logs in to the node with"
         )
-    return NodeLink(host=host, user=settings.node.ssh_user, key=settings.node.ssh_key)
+    return NodeLink(
+        host=host,
+        user=settings.node.ssh_user,
+        key=settings.node.ssh_key,
+        known_hosts=settings.node.known_hosts_file,
+    )
 
 
 def check_link(node: NodePort) -> None:

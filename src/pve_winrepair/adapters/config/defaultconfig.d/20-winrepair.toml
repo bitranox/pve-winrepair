@@ -127,3 +127,9 @@ ssh_user = "root"
 # Environment Variable: PVE_WINREPAIR___NODE__SSH_KEY=~/.ssh/id_pve_node
 # Note: not [ssh] key - that is the key for the guests; the node needs its own
 ssh_key = ""
+
+# Purpose: The known_hosts file the remote node's host key is checked against (strictly)
+# Type: string; a path as ssh takes it (a leading ~ is expanded by ssh)
+# Default: "~/.ssh/known_hosts"
+# Environment Variable: PVE_WINREPAIR___NODE__KNOWN_HOSTS_FILE=~/.ssh/known_hosts_nodes
+known_hosts_file = "~/.ssh/known_hosts"

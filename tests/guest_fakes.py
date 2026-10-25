@@ -89,7 +89,7 @@ KEY = "/keys/test.key"
 SSH = SshSettings(key=KEY, user=USER)
 #: A remote PVE node the fakes reach over ssh: its login is ``root@``, never :data:`USER`, so
 #: :func:`route` tells a node call from a guest call by that token.
-NODE_LINK = NodeLink(host="pve1", user="root", key="/keys/node.key")
+NODE_LINK = NodeLink(host="pve1", user="root", key="/keys/node.key", known_hosts="/keys/known_hosts_node")
 GUEST_IP = "192.0.2.10"
 LAN_IP = "192.0.2.50"
 # What would stop, restart or reconfigure the VM, or take a snapshot of it.
