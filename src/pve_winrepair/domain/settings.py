@@ -2,8 +2,8 @@
 
 Each section is a frozen model that refuses an unknown key. Text fields accept a number and keep its
 digits, because lib_layered_config hands an unquoted digit-only ``.env`` or environment value over as
-an int. An empty ``ssh.key`` or ``repair.media_dir`` validates: it means "not configured", and the
-commands that need the value refuse to run without it.
+an int. An empty ``ssh.key``, ``repair.media_dir`` or ``repair.local_media_dir`` validates: it means
+"not configured", and the commands that need the value refuse to run without it.
 
 ``guest.runner_tasks`` and ``guest.expected_runners`` are not read by any node command; they hold the
 values an operator passes to the guest tool's ``verify-runners --task NAME --expected N``, and are
@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Annotated, Final
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
 
+from pve_winrepair.domain.enums import MediaChoice
 from pve_winrepair.domain.ssh_paths import jump_key_problem, known_hosts_problem
 
 if TYPE_CHECKING:
@@ -165,19 +166,33 @@ class GuestSettings(BaseModel):
 class RepairSettings(BaseModel):
     """Where the installation media live and what a repair needs on the guest.
 
+    ``media_dir`` is the media directory on the node, ``local_media_dir`` this machine's copy;
+    ``media_source`` names which of the two a repair takes (a :class:`MediaChoice`).
+    ``stage_timeout_minutes`` bounds the media copy to the guest, 1 to 1440 minutes.
+
     Example:
         >>> RepairSettings().snapshot_name
         'pre_winrepair'
+        >>> RepairSettings().media_source.value, RepairSettings().stage_timeout_minutes
+        ('node', 90)
     """
 
     model_config = _SECTION_CONFIG
 
+    # The media directory on the node.
     media_dir: str = ""
+    # This machine's copy, for --media local; media_dir is the node's (the same machine when no link is set).
+    local_media_dir: str = ""
+    media_source: MediaChoice = MediaChoice.NODE
+    # 90 minutes is the transfer limit repair always had (5400 s); a slow workstation link may need more.
+    stage_timeout_minutes: int = Field(default=90, gt=0, le=1440)
     snapshot_name: SnapshotName = "pre_winrepair"
     stage_free_gb: float = Field(default=15.0, gt=0, allow_inf_nan=False)
     system_free_gb: float = Field(default=25.0, gt=0, allow_inf_nan=False)
 
-    _free_space_is_not_a_boolean = field_validator("stage_free_gb", "system_free_gb", mode="before")(_refuse_a_boolean)
+    _numbers_are_not_booleans = field_validator(
+        "stage_timeout_minutes", "stage_free_gb", "system_free_gb", mode="before"
+    )(_refuse_a_boolean)
 
 
 def default_state_dir(os_name: str = os.name, environ: Mapping[str, str] = os.environ) -> str:

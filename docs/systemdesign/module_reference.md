@@ -12,7 +12,7 @@ moves or removes a module, a CLI option or a public name.
 ### Domain Layer
 - `src/pve_winrepair/domain/acl.py`  -  Who may write a directory, read from its SDDL security descriptor (`parse_sddl` into `SddlAce` with its `AceKind` and `AceFlag` set, `write_problems`, `trusted_writers`, `TRUSTED_WELL_KNOWN`; the alias `LA` counts as the ssh user only when its SID ends in -500); the node's check of the ssh user's profile before a copy of the tool goes there
 - `src/pve_winrepair/domain/addresses.py`  -  `lan_address` picks the guest's LAN address out of what its agent reports (the first one in `[guest] subnet`; without a subnet the only candidate, several refused with `AmbiguousAddressError`); `normalise_mac` puts a MAC in `AA:BB:CC:DD:EE:FF` form, and `MacAddress` is that form as a boundary model's field type (a value that is no MAC is refused)
-- `src/pve_winrepair/domain/enums.py`  -  Type-safe enums (`OutputFormat`, `DeployTarget`, `DriveLetter`)
+- `src/pve_winrepair/domain/enums.py`  -  Type-safe enums (`OutputFormat`, `DeployTarget`, `DriveLetter`, `MediaChoice`)
 - `src/pve_winrepair/domain/envelope.py`  -  The guest tool's answer contract: `parse_answer` validates the one envelope line once, in strict JSON mode, into a `GuestAnswer[T]` (with `SkippedItem`s; exit 2 as `InternalErrorAnswer`) and checks `ok` against the payload's verdict; `describe_validation_error`; the error types (`GuestNoAnswerError`, `GuestInternalError`, `GuestProtocolError`, `GuestPushError`, `UnsafeArgumentError`), `check_argument`, `RunState`, `READ_FAILURES` and `WU_HELD_HINT`; starts no process
 - `src/pve_winrepair/domain/guest_answers.py`  -  One frozen model, closed to unknown fields, per guest subcommand's payload (`BuildAnswer`, `PrepareAnswer`, `LaunchAnswer`, ...), their verdict and status enums (`StateVerdict`, `LaunchVerdict`, `PrepareGate`, ...) and `GuestCommand`, the subcommand names
 - `src/pve_winrepair/domain/errors.py`  -  Domain exceptions (`ConfigurationError`)
@@ -397,8 +397,8 @@ because lib_layered_config reads an unquoted digit-only `.env` or environment va
 `Config` (an absent section takes its defaults) and raises `SettingsError(ValueError)` with one
 `<section>.<field>: <reason>` line per problem, never echoing the refused value. The shipped defaults
 are `adapters/config/defaultconfig.d/20-winrepair.toml` (the defaults layer, keys active; the copy
-`config-deploy` writes has them commented out); an empty `ssh.key` or `repair.media_dir`
-loads and means "not configured". Override one key per run with
+`config-deploy` writes has them commented out); an empty `ssh.key`, `repair.media_dir` or
+`repair.local_media_dir` loads and means "not configured". Override one key per run with
 `PVE_WINREPAIR___<SECTION>__<KEY>`, e.g. `PVE_WINREPAIR___SSH__KEY=<path>`.
 
 ### `[ssh]`  -  `SshSettings`
@@ -420,12 +420,15 @@ loads and means "not configured". Override one key per run with
 
 ### `[repair]`  -  `RepairSettings`
 
-| Field            | Type    | Default           | Rule                                                                |
-|------------------|---------|-------------------|---------------------------------------------------------------------|
-| `media_dir`      | `str`   | `""`              | directory of the installation media; empty = not configured         |
-| `snapshot_name`  | `str`   | `"pre_winrepair"` | `[A-Za-z][A-Za-z0-9_-]{1,39}`                                       |
-| `stage_free_gb`  | `float` | `15.0`            | finite, greater than 0, never true/false (GiB on the staging drive) |
-| `system_free_gb` | `float` | `25.0`            | finite, greater than 0, never true/false (GiB on C:)                |
+| Field                   | Type          | Default           | Rule                                                                           |
+|-------------------------|---------------|-------------------|--------------------------------------------------------------------------------|
+| `media_dir`             | `str`         | `""`              | directory of the installation media on the node; empty = not configured        |
+| `local_media_dir`       | `str`         | `""`              | this machine's copy of the installation media; empty = not configured          |
+| `media_source`          | `MediaChoice` | `"node"`          | `"node"` (`media_dir`) or `"local"` (`local_media_dir`); anything else refused |
+| `stage_timeout_minutes` | `int`         | `90`              | 1 to 1440, never true/false (minutes the media copy to the guest may take)     |
+| `snapshot_name`         | `str`         | `"pre_winrepair"` | `[A-Za-z][A-Za-z0-9_-]{1,39}`                                                  |
+| `stage_free_gb`         | `float`       | `15.0`            | finite, greater than 0, never true/false (GiB on the staging drive)            |
+| `system_free_gb`        | `float`       | `25.0`            | finite, greater than 0, never true/false (GiB on C:)                           |
 
 ### `[node]`  -  `NodeSettings`
 

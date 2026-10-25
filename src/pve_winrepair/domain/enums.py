@@ -1,4 +1,4 @@
-"""Type-safe domain enums for output formats, deployment targets and guest drive letters."""
+"""Type-safe domain enums for output formats, deployment targets, guest drive letters and the media source."""
 
 from __future__ import annotations
 
@@ -107,8 +107,25 @@ class DriveLetter(str, Enum):
         return f"{self.value}:\\upgrade"
 
 
+class MediaChoice(str, Enum):
+    """Where a repair takes its installation media from.
+
+    ``NODE`` is the node's ``[repair] media_dir``, ``LOCAL`` this machine's ``[repair] local_media_dir``.
+
+    Example:
+        >>> MediaChoice("local").value
+        'local'
+        >>> MediaChoice.NODE == "node"
+        True
+    """
+
+    NODE = "node"
+    LOCAL = "local"
+
+
 __all__ = [
     "DeployTarget",
     "DriveLetter",
+    "MediaChoice",
     "OutputFormat",
 ]

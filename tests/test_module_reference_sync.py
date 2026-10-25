@@ -10,6 +10,7 @@ without this test going red.
 from __future__ import annotations
 
 import re
+from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -34,7 +35,11 @@ _SECTION_MODELS: dict[str, type[BaseModel]] = {
 
 
 def _toml_literal(value: object) -> str:
-    """The default as the shipped TOML spells it: a tuple is an array, a path a string, None "" (TOML has no null)."""
+    """The default as the shipped TOML spells it: a tuple is an array, a path or enum a string, None "" (no null)."""
+    if isinstance(value, Enum):
+        # The member's value, before the str branch: a str-Enum member's f-string is its value on 3.10
+        # but "Class.MEMBER" on 3.11+.
+        value = value.value
     if value is None:
         return '""'
     if isinstance(value, bool):

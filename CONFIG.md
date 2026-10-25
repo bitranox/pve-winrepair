@@ -88,7 +88,21 @@ is fine). They are validated with the same rules that verb applies (task names o
 
 **`media_dir`** (default `""`): the directory on the node with the Windows installation media,
 unpacked as on the ISO, so that `setup.exe` and `sources/install.wim` sit at its top level.
-Required by `repair`. Everything in it is copied to the guest's staging directory.
+Required by `repair` when `media_source` is `"node"`. Everything in it is copied to the guest's
+staging directory.
+
+**`media_source`** (default `"node"`): where a repair takes the installation media from. `"node"`
+is `media_dir` on the node; `"local"` is `local_media_dir` on the machine running the tool. Any
+other value, upper case included, is refused. With no `[node] host` the node is the machine running
+the tool, so both name a directory on the same machine.
+
+**`local_media_dir`** (default `""`): this machine's copy of the installation media, laid out like
+`media_dir` (`setup.exe` and `sources/install.wim` at its top level). Required when `media_source`
+is `"local"`; empty means not configured.
+
+**`stage_timeout_minutes`** (default `90`): how long copying the media to the guest may take, a whole
+number of minutes from 1 to 1440 (one day), never `true`/`false`. A slow link from a workstation to
+the guest may need more than the default.
 
 **`snapshot_name`** (default `"pre_winrepair"`): the Proxmox snapshot `repair` takes. A letter first,
 then letters, digits, `_` and `-`, 2 to 40 characters. `--snapshot-name` overrides it for one run

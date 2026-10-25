@@ -78,7 +78,31 @@ expected_runners = 0
 # Type: string (path); required by `repair`
 # Default: "" (not configured)
 # Environment Variable: PVE_WINREPAIR___REPAIR__MEDIA_DIR=/srv/media
+# Note: read when media_source = "node"
 media_dir = ""
+
+# Purpose: Where a repair takes the installation media from: "node" is media_dir on the
+#          node, "local" is local_media_dir on the machine running the tool
+# Type: string; "node" or "local" (lower case)
+# Default: "node"
+# Environment Variable: PVE_WINREPAIR___REPAIR__MEDIA_SOURCE=local
+# Note: with no [node] host the node is the machine running the tool, so both name a
+#       directory on the same machine
+media_source = "node"
+
+# Purpose: This machine's copy of the installation media, laid out like media_dir
+#          (setup.exe and sources\install.wim at its top level)
+# Type: string (path on the machine running the tool); required with media_source = "local"
+# Default: "" (not configured)
+# Environment Variable: PVE_WINREPAIR___REPAIR__LOCAL_MEDIA_DIR=/home/op/winmedia/win11
+local_media_dir = ""
+
+# Purpose: How long copying the media to the guest may take, in minutes
+# Type: integer, 1 to 1440 (true/false is refused)
+# Default: 90
+# Environment Variable: PVE_WINREPAIR___REPAIR__STAGE_TIMEOUT_MINUTES=180
+# Note: a slow link from a workstation to the guest may need more
+stage_timeout_minutes = 90
 
 # Purpose: Name of the Proxmox snapshot taken before a repair
 # Type: string; a letter first, then letters, digits, _ and -, 2 to 40 characters

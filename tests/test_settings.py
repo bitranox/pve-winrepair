@@ -21,6 +21,7 @@ from pve_winrepair.adapters.cli.main import main
 from pve_winrepair.adapters.config.loader import get_config
 from pve_winrepair.adapters.config.settings import SettingsError, load_settings
 from pve_winrepair.composition import build_production
+from pve_winrepair.domain.enums import MediaChoice
 from pve_winrepair.domain.settings import (
     GuestSettings,
     NodeSettings,
@@ -78,7 +79,13 @@ def test_the_model_defaults_are_the_documented_ones() -> None:
     assert settings.guest.runner_tasks == ()
     assert settings.guest.expected_runners == 0
     assert settings.repair == RepairSettings(
-        media_dir="", snapshot_name="pre_winrepair", stage_free_gb=15.0, system_free_gb=25.0
+        media_dir="",
+        local_media_dir="",
+        media_source=MediaChoice.NODE,
+        stage_timeout_minutes=90,
+        snapshot_name="pre_winrepair",
+        stage_free_gb=15.0,
+        system_free_gb=25.0,
     )
     assert settings.node.state_dir == Path(default_state_dir())
 
@@ -147,6 +154,11 @@ def test_a_section_that_is_not_a_table_is_refused_naming_the_section(
         ("repair", {"stage_free_gb": float("nan")}, "repair.stage_free_gb"),
         ("repair", {"system_free_gb": -1.0}, "repair.system_free_gb"),
         ("repair", {"system_free_gb": float("inf")}, "repair.system_free_gb"),
+        ("repair", {"media_source": "nas"}, "repair.media_source"),
+        ("repair", {"media_source": "NODE"}, "repair.media_source"),
+        ("repair", {"stage_timeout_minutes": 0}, "repair.stage_timeout_minutes"),
+        ("repair", {"stage_timeout_minutes": 1441}, "repair.stage_timeout_minutes"),
+        ("repair", {"stage_timeout_minutes": 90.5}, "repair.stage_timeout_minutes"),
     ],
     ids=lambda value: str(value)[:24],
 )
@@ -317,6 +329,49 @@ def test_a_snapshot_name_of_two_to_forty_characters_is_accepted(
     config_factory: Callable[[dict[str, Any]], Config], name: str
 ) -> None:
     assert load_settings(config_factory({"repair": {"snapshot_name": name}})).repair.snapshot_name == name
+
+
+# --- repair media: media_source, local_media_dir, stage_timeout_minutes -------------------------
+
+
+@pytest.mark.os_agnostic
+def test_the_media_settings_default_to_node_media_and_ninety_minutes() -> None:
+    repair = RepairSettings()
+    assert (repair.local_media_dir, repair.media_source, repair.stage_timeout_minutes) == ("", MediaChoice.NODE, 90)
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("value", [0, -5, 1441, True, "90 min"])
+def test_a_stage_timeout_outside_one_minute_to_a_day_is_refused(value: object) -> None:
+    # model_validate, not the constructor: the point is a value of the wrong type, which pyright refuses there.
+    with pytest.raises(ValidationError, match="stage_timeout_minutes"):
+        RepairSettings.model_validate({"stage_timeout_minutes": value})
+
+
+@pytest.mark.os_agnostic
+def test_an_unknown_media_source_is_refused() -> None:
+    with pytest.raises(ValidationError, match="media_source"):
+        RepairSettings.model_validate({"media_source": "nas"})
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("minutes", [1, 1440])
+def test_a_stage_timeout_of_one_minute_to_a_day_is_accepted(
+    config_factory: Callable[[dict[str, Any]], Config], minutes: int
+) -> None:
+    repair = load_settings(config_factory({"repair": {"stage_timeout_minutes": minutes}})).repair
+
+    assert repair.stage_timeout_minutes == minutes
+
+
+@pytest.mark.os_agnostic
+def test_local_media_from_a_file_load_as_written(config_factory: Callable[[dict[str, Any]], Config]) -> None:
+    config = config_factory({"repair": {"media_source": "local", "local_media_dir": "/home/op/win11"}})
+
+    repair = load_settings(config).repair
+
+    assert (repair.media_source, repair.local_media_dir) == (MediaChoice.LOCAL, "/home/op/win11")
+    assert repair.media_source.value == "local"
 
 
 # --- node.state_dir ----------------------------------------------------------------------------
@@ -502,7 +557,12 @@ def test_a_guest_known_hosts_file_keeps_ssh_tokens_and_a_node_key_may_hold_a_spa
 @pytest.mark.os_agnostic
 @pytest.mark.parametrize(
     ("section", "field"),
-    [("guest", "expected_runners"), ("repair", "stage_free_gb"), ("repair", "system_free_gb")],
+    [
+        ("guest", "expected_runners"),
+        ("repair", "stage_free_gb"),
+        ("repair", "system_free_gb"),
+        ("repair", "stage_timeout_minutes"),
+    ],
 )
 @pytest.mark.parametrize("flag", [True, False])
 def test_a_boolean_is_refused_for_a_number(
@@ -515,12 +575,18 @@ def test_a_boolean_is_refused_for_a_number(
 
 @pytest.mark.os_agnostic
 def test_a_number_written_as_text_is_accepted(config_factory: Callable[[dict[str, Any]], Config]) -> None:
-    config = config_factory({"guest": {"expected_runners": "4"}, "repair": {"stage_free_gb": "15.5"}})
+    config = config_factory(
+        {
+            "guest": {"expected_runners": "4"},
+            "repair": {"stage_free_gb": "15.5", "stage_timeout_minutes": "120"},
+        }
+    )
 
     settings = load_settings(config)
 
     assert settings.guest.expected_runners == 4
     assert settings.repair.stage_free_gb == 15.5
+    assert settings.repair.stage_timeout_minutes == 120
 
 
 @pytest.mark.os_agnostic
