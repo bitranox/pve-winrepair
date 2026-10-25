@@ -4,7 +4,8 @@ Each function port defines a ``__call__`` method whose signature exactly matches
 corresponding adapter function. :class:`GuestPort` and :class:`NodePort` describe the guest and
 the node the drivers reach (the ssh adapter's ``Guest`` and the node adapter's ``Node``); their data
 members are read-only properties, because those adapters are frozen dataclasses and a read-only
-field does not satisfy a plain (mutable) Protocol attribute.
+field does not satisfy a plain (mutable) Protocol attribute. :class:`MediaSource` is where a run's
+installation media are and how they reach the guest (the media adapter's ``LocalMedia``).
 
 System Role:
     Sits between domain and adapters.  Infrastructure types (``Config``)
@@ -161,6 +162,18 @@ class GuestPort(Protocol):
         ...
 
 
+class MediaSource(Protocol):
+    """The installation media of one run: where they are, and how they reach the guest's stage root."""
+
+    def check(self) -> str | None:
+        """Why the media cannot be used (missing, empty or unreachable), or None when they can."""
+        ...
+
+    def copy_into(self, guest: GuestPort, dest: str, *, timeout: float) -> CompletedProcess[str]:
+        """Copy every entry of the media directory into the guest directory ``dest``; the caller checks the result."""
+        ...
+
+
 class NodePort(Protocol):
     """The PVE node a driver runs on: how it runs ``qm``, reads a VM's configuration, waits, and reaches a guest."""
 
@@ -198,6 +211,10 @@ class NodePort(Protocol):
         """The guest at ``ip``."""
         ...
 
+    def media(self, directory: str, *, from_node: bool) -> MediaSource:
+        """The media in ``directory``: on the node when ``from_node`` and the node is remote, else on this machine."""
+        ...
+
 
 class ReceiptStore(Protocol):
     """Where a repair leaves the build its prepare step measured, one receipt per VM, for apply to verify.
@@ -233,6 +250,7 @@ __all__ = [
     "LoadSettings",
     "MakeNode",
     "MakeReceipts",
+    "MediaSource",
     "NodePort",
     "ReceiptStore",
 ]

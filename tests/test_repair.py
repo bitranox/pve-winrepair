@@ -54,10 +54,11 @@ from guest_fakes import (
 )
 from pydantic import ValidationError
 
+from pve_winrepair.adapters.media import LocalMedia
 from pve_winrepair.adapters.receipts import FileReceiptStore
 from pve_winrepair.application import repair
 from pve_winrepair.application.repair import RepairError, RepairRequest, run_repair
-from pve_winrepair.domain.enums import DriveLetter
+from pve_winrepair.domain.enums import DriveLetter, MediaChoice
 from pve_winrepair.domain.envelope import (
     WU_HELD_HINT,
     GuestInternalError,
@@ -80,7 +81,13 @@ if TYPE_CHECKING:
 
 
 def _repair_settings(media: Path) -> RepairSettings:
-    return RepairSettings(media_dir=str(media), snapshot_name="pre_kb_test", stage_free_gb=15.0, system_free_gb=25.0)
+    return RepairSettings(
+        media_dir=str(media),
+        local_media_dir=str(media),
+        snapshot_name="pre_kb_test",
+        stage_free_gb=15.0,
+        system_free_gb=25.0,
+    )
 
 
 # The free-space floors the stage-root tests gate on (media_dir is not read there).
@@ -620,7 +627,7 @@ def test_stage_media_copies_every_media_entry_into_the_root(tmp_path: Path) -> N
     (tmp_path / "sources").mkdir()
     runner = FakeRunner().on("scp", Reply(0))
     rep = Report(vmid=1)
-    repair.stage_media(make_guest(runner), rep, DriveLetter.DRIVE_D, media=tmp_path)
+    repair.stage_media(make_guest(runner), rep, DriveLetter.DRIVE_D, media=LocalMedia(tmp_path), timeout_minutes=90)
     # lock-dirs created and locked the root before this; the transfer is the only call.
     assert len(runner.calls) == 1
     scp = runner.calls[0]
@@ -636,14 +643,56 @@ def test_stage_media_transfer_timeout_refuses_as_a_failed_transfer(tmp_path: Pat
     (tmp_path / "setup.exe").write_bytes(b"MZ")
     runner = FakeRunner().on("scp", subprocess.TimeoutExpired(["scp"], 5400))
     with pytest.raises(RepairError, match="media transfer failed rc=255"):
-        repair.stage_media(make_guest(runner), Report(vmid=1), DriveLetter.DRIVE_D, media=tmp_path)
+        repair.stage_media(
+            make_guest(runner), Report(vmid=1), DriveLetter.DRIVE_D, media=LocalMedia(tmp_path), timeout_minutes=90
+        )
 
 
 def test_stage_media_failed_copy_refuses(tmp_path: Path) -> None:
     (tmp_path / "setup.exe").write_bytes(b"MZ")
     runner = FakeRunner().on("scp", Reply(1, "", "No space left"))
     with pytest.raises(RepairError, match="media transfer failed"):
-        repair.stage_media(make_guest(runner), Report(vmid=1), DriveLetter.DRIVE_D, media=tmp_path)
+        repair.stage_media(
+            make_guest(runner), Report(vmid=1), DriveLetter.DRIVE_D, media=LocalMedia(tmp_path), timeout_minutes=90
+        )
+
+
+def test_the_media_copy_times_out_after_the_configured_minutes(tmp_path: Path) -> None:
+    runner = FakeRunner().on("scp", Reply(255, "", "media transfer: timed out after 600 s"))
+    with pytest.raises(RepairError, match=r"\[repair\] stage_timeout_minutes = 10"):
+        repair.stage_media(
+            make_guest(runner),
+            Report(vmid=1),
+            DriveLetter.DRIVE_D,
+            media=LocalMedia(_media(tmp_path)),
+            timeout_minutes=10,
+        )
+    assert runner.timeouts == [600]
+
+
+def test_local_media_is_taken_from_local_media_dir(tmp_path: Path) -> None:
+    node = make_node(FakeRunner())
+    with pytest.raises(RepairError, match=r"^\[repair\] local_media_dir is not configured"):
+        repair.media_source(node, RepairSettings(media_dir=str(_media(tmp_path))), MediaChoice.LOCAL)
+
+
+def test_each_media_choice_reads_its_own_setting(tmp_path: Path) -> None:
+    (tmp_path / "node").mkdir()
+    (tmp_path / "local").mkdir()
+    node_dir, local_dir = _media(tmp_path / "node"), _media(tmp_path / "local")
+    settings = RepairSettings(media_dir=str(node_dir), local_media_dir=str(local_dir))
+    node = make_node(FakeRunner())
+    assert repair.media_source(node, settings, MediaChoice.NODE) == LocalMedia(node_dir)
+    assert repair.media_source(node, settings, MediaChoice.LOCAL) == LocalMedia(local_dir)
+
+
+def test_an_empty_media_dir_is_refused_naming_it(tmp_path: Path) -> None:
+    (tmp_path / "empty").mkdir()
+    with pytest.raises(RepairError) as refused:
+        repair.media_source(
+            make_node(FakeRunner()), RepairSettings(media_dir=str(tmp_path / "empty")), MediaChoice.NODE
+        )
+    assert str(refused.value) == f"media directory is empty: {tmp_path / 'empty'}"
 
 
 # --- orchestration: the live-run guard runs before anything can stop the guest -----------------
@@ -671,6 +720,7 @@ def _live_run_runner(pve: FakePve) -> FakeRunner:
 
 @pytest.mark.parametrize("ip", [GUEST_IP, None], ids=["agentless", "agent"])
 def test_a_rerun_over_a_live_run_refuses_before_anything_stops_the_guest(tmp_path: Path, ip: str | None) -> None:
+    (tmp_path / "setup.exe").write_bytes(b"MZ")
     pve = FakePve()
     runner, clock = _live_run_runner(pve), FakeClock()
     with pytest.raises(RepairError, match="SetupHost is running"):
@@ -842,13 +892,16 @@ def _media(tmp_path: Path) -> Path:
 @pytest.mark.parametrize("link", [None, NODE_LINK], ids=["this-node", "remote-node"])
 def test_main_runs_the_whole_agent_path_to_done_ok(tmp_path: Path, link: NodeLink | None) -> None:
     runner = agent_runner(FakePve())
-    result, steps = _run(runner, _media(tmp_path), link=link)
+    media = _media(tmp_path)
+    result, steps = _run(runner, media, link=link)
     assert (result.exit, result.verdict) == (RunExit.OK, "STATE=DONE-OK")
     assert [s["step"] for s in steps] == [
         "running", "push_tool", "no_live_run", "quiesce_wu", "servicing_idle", "vtpm", "running",
         "snapshot", "push_tool", "no_live_run", "stage_root", "lock_dirs", "stage_media", "quiesce_wu",
         "prepare", "build_before", "receipt", "launch", "poll",
     ]  # fmt: skip
+    copy = next(i for i, call in enumerate(runner.calls) if str(media / "setup.exe") in call)
+    assert runner.timeouts[copy] == 5400
     if link is not None:
         assert all(call[0] == "ssh" for call in runner.calls if route(call) == "qm")
         proxy = ["-o", f"ProxyCommand={link.proxy_command()}"]

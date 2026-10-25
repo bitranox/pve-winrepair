@@ -3,7 +3,8 @@
 :class:`Node` is the one bundle the drivers take, and the tests' seam: a fake runner and clock passed
 here observe every node and guest call in order. :func:`run` is the production runner. A node with a
 :class:`~pve_winrepair.domain.node_link.NodeLink` is a remote one: ``qm`` runs there over ssh and
-every guest call is routed through it.
+every guest call is routed through it. :meth:`Node.media` is the media a run stages
+(:mod:`pve_winrepair.adapters.media`).
 
 The VM's own configuration, its snapshot list and a snapshot's outcome are parsed here, where ``qm`` answers
 (:mod:`pve_winrepair.domain.vm_config`), so no driver reads ``qm`` text; a guest's address becomes
@@ -16,9 +17,11 @@ from __future__ import annotations
 import subprocess  # nosec B404
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from pve_winrepair.adapters.guest_ssh import TOOL_DIR, Guest, run
+from pve_winrepair.adapters.media import LocalMedia
 from pve_winrepair.domain.vm_config import (
     SnapshotResult,
     VmConfigRead,
@@ -30,8 +33,8 @@ from pve_winrepair.domain.vm_config import (
 if TYPE_CHECKING:
     from collections.abc import Callable
     from ipaddress import IPv4Address
-    from pathlib import Path
 
+    from pve_winrepair.application.ports import MediaSource
     from pve_winrepair.domain.envelope import Runner
     from pve_winrepair.domain.node_link import NodeLink
     from pve_winrepair.domain.settings import SshSettings
@@ -103,3 +106,7 @@ class Node:
         """The guest at ``ip``, reached with this node's ssh settings and tool dir, through the linked node if any."""
         runner = self.runner if self.link is None else self.link.jumped(self.runner)
         return Guest(str(ip), ssh_settings=self.ssh, tool_dir=self.tool_dir, runner=runner)
+
+    def media(self, directory: str, *, from_node: bool) -> MediaSource:
+        """The media in ``directory``; always on this machine until node-side media exist (Task 2.7)."""
+        return LocalMedia(Path(directory))

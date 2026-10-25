@@ -38,7 +38,6 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 from ipaddress import IPv4Address, IPv6Address, ip_address
-from pathlib import Path
 from typing import TYPE_CHECKING, Annotated
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, TypeAdapter
@@ -47,7 +46,7 @@ from pve_winrepair.application.guest_identity import GuestMismatchError, check_g
 from pve_winrepair.application.guest_state import read_guest_build, read_run_state
 from pve_winrepair.application.vm import VmStatus, VmStatusError, vm_status, wait_status
 from pve_winrepair.domain.addresses import AmbiguousAddressError, lan_address
-from pve_winrepair.domain.enums import DriveLetter
+from pve_winrepair.domain.enums import DriveLetter, MediaChoice
 from pve_winrepair.domain.envelope import PROBE_TIMEOUT, READ_FAILURES, GuestCallError
 from pve_winrepair.domain.guest_answers import (
     DrivesAnswer,
@@ -76,7 +75,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from ipaddress import IPv4Network
 
-    from pve_winrepair.application.ports import GuestPort, NodePort, ReceiptStore
+    from pve_winrepair.application.ports import GuestPort, MediaSource, NodePort, ReceiptStore
     from pve_winrepair.domain.settings import GuestSettings, RepairSettings
     from pve_winrepair.domain.vm_config import VmConfig
 
@@ -114,6 +113,7 @@ class RepairRequest:
         ip: The guest's address, for a guest with no QEMU agent; implies the offline snapshot.
         stage_root: The drive to stage the media on; default: measured.
         tpm_storage: The PVE storage for a new vTPM volume; default: the storage of the guest's disk.
+        media: Where the media come from: the node's ``[repair] media_dir`` or this machine's ``local_media_dir``.
     """
 
     vmid: int
@@ -123,6 +123,7 @@ class RepairRequest:
     ip: IPv4Address | None = None
     stage_root: DriveLetter | None = None
     tpm_storage: str | None = None
+    media: MediaChoice = MediaChoice.NODE
 
 
 class _AgentAddressType(str, Enum):
@@ -501,13 +502,16 @@ def lock_dirs(guest: GuestPort, rep: Report, drive: DriveLetter) -> None:
     rep.add(StepName.LOCK_DIRS, ok=True, directories=locked)
 
 
-def stage_media(guest: GuestPort, rep: Report, drive: DriveLetter, *, media: Path) -> None:
-    """Copy the media directory into the stage root on ``drive``; :func:`lock_dirs` created and locked it."""
+def stage_media(guest: GuestPort, rep: Report, drive: DriveLetter, *, media: MediaSource, timeout_minutes: int) -> None:
+    """Copy the media into the stage root on ``drive``; :func:`lock_dirs` created and locked it."""
     root = drive.stage_root
     started = time.time()
-    proc = guest.copy_to([str(p) for p in sorted(media.iterdir())], f"{root}\\", timeout=5400)
+    proc = media.copy_into(guest, f"{root}\\", timeout=timeout_minutes * 60)
     if proc.returncode != 0:
-        raise RepairError(f"media transfer failed rc={proc.returncode}: {proc.stderr.strip()[:400]}")
+        raise RepairError(
+            f"media transfer failed rc={proc.returncode}: {proc.stderr.strip()[:400]} "
+            f"(the copy may take [repair] stage_timeout_minutes = {timeout_minutes})"
+        )
     rep.add(StepName.STAGE_MEDIA, ok=True, seconds=round(time.time() - started), root=root)
 
 
@@ -873,19 +877,24 @@ def _agentless_running(node: NodePort, request: RepairRequest, ip: IPv4Address, 
     return guest
 
 
-def _media_dir(repair: RepairSettings) -> Path:
-    """The configured media directory; refused when ``[repair] media_dir`` is empty or missing.
+def media_source(node: NodePort, repair: RepairSettings, choice: MediaChoice) -> MediaSource:
+    """The media this run stages, checked before any VM call; refused when unconfigured, missing or empty.
 
-    An empty setting is refused by name, never read as a path: ``Path("")`` is the working
-    directory, which exists, so the run would stage whatever directory it was started from.
+    ``node`` decides where the directory is read: on a remote node for :attr:`MediaChoice.NODE`, on this
+    machine otherwise (and always on this machine when the tool runs on the node itself). An empty
+    setting is refused by name, never read as a path: ``Path("")`` is the working directory, which
+    exists, so the run would stage whatever directory it was started from.
     """
-    if not repair.media_dir:
-        raise RepairError(
-            "[repair] media_dir is not configured: set it to the directory holding the installation media"
-        )
-    media = Path(repair.media_dir)
-    if not media.is_dir():
-        raise RepairError(f"media directory missing: {media}")
+    local = choice is MediaChoice.LOCAL
+    setting, directory = (
+        ("[repair] local_media_dir", repair.local_media_dir) if local else ("[repair] media_dir", repair.media_dir)
+    )
+    if not directory:
+        raise RepairError(f"{setting} is not configured: set it to the directory holding the installation media")
+    media = node.media(directory, from_node=not local)
+    reason = media.check()
+    if reason is not None:
+        raise RepairError(reason)
     return media
 
 
@@ -904,7 +913,7 @@ def repair_sequence(
     run refused after that, or a stage-only run, leaves none for apply to trust; the new one is
     written once prepare has measured the image, before setup is launched.
     """
-    media = _media_dir(repair)
+    media = media_source(node, repair, request.media)
     network = guest.subnet
     if vm_status(node, request.vmid) is VmStatus.RUNNING:
         live = _clear_live_run(node, request, rep, network)
@@ -927,7 +936,7 @@ def repair_sequence(
     forget_receipt(receipts, request.vmid)
     drive = pick_stage_root(target, rep, request.stage_root, repair=repair)
     lock_dirs(target, rep, drive)
-    stage_media(target, rep, drive, media=media)
+    stage_media(target, rep, drive, media=media, timeout_minutes=repair.stage_timeout_minutes)
     # Idempotent, and it re-VERIFIES the hold across the vTPM reboot rather than assuming
     # the earlier pass survived it.
     quiesce_windows_update(target, rep)
@@ -977,7 +986,7 @@ def run_repair(
     Args:
         request: The guest and the operator's choices for this run.
         node: The PVE node the guest runs on.
-        repair: ``[repair]``: the media directory and the free-space floors.
+        repair: ``[repair]``: the media directories, the copy timeout and the free-space floors.
         guest: ``[guest]``: the subnet the guest's LAN address is picked from.
         receipts: Where the build prepare measured is recorded for apply (one receipt per VM).
         on_step: Called with each step as it is recorded (see :class:`Report`).
