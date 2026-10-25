@@ -103,12 +103,16 @@ system_free_gb = 25.0
 
 [node]
 
-# Purpose: Directory where the node keeps its state (repair receipts)
-# Type: string; an absolute path starting with / ("", a relative path and a leading ~
-#       are refused)
-# Default: "/var/lib/pve-winrepair"
+# Purpose: Directory where this machine keeps its state (repair receipts): the node, or
+#          the workstation that drives a node over ssh
+# Type: string; an absolute path on the machine running the tool ("", a relative path
+#       and a leading ~ are refused; on Windows a path needs its drive, C:\...)
+# Default: /var/lib/pve-winrepair on POSIX, %LOCALAPPDATA%\pve-winrepair on Windows
+#          (per OS, so not set here)
 # Environment Variable: PVE_WINREPAIR___NODE__STATE_DIR=/var/lib/pve-winrepair
-state_dir = "/var/lib/pve-winrepair"
+# Note: a non-root Linux or macOS workstation cannot create /var/lib/pve-winrepair; set it
+#       there, e.g. state_dir = "/home/op/.local/state/pve-winrepair"
+# state_dir = "/var/lib/pve-winrepair"
 
 # Purpose: The PVE node to drive over ssh; empty means this machine is the node
 # Type: string; a host name or IPv4 address (a letter or digit first; no space, ; or @)

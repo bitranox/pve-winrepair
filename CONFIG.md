@@ -24,7 +24,7 @@ media_dir = "/var/lib/vz/winmedia/win11"
 `pve-winrepair config` shows the merged result and, for each value, the layer and file it came from.
 `repair` and `apply` validate all four sections before they do anything: an unknown key or a refused
 value stops them with exit 78 and one `Error: <section>.<key>: <reason>` line per problem, for
-example `Error: node.state_dir: must be an absolute path on the node (starting with /)`.
+example `Error: node.state_dir: must be an absolute path on this machine`.
 
 ---
 
@@ -102,11 +102,15 @@ greater than 0.
 
 ### `[node]`
 
-**`state_dir`** (default `"/var/lib/pve-winrepair"`): where the node keeps its state, the repair
-receipts `receipt-<vmid>.json`. An absolute path; `""`, a relative path and a leading `~` are
-refused. Before anything else, `repair` and `apply` check that it is a directory, or that its
-nearest existing parent is one, so a receipt write cannot fail hours into a run on a path that is a
-file. A directory `pve-winrepair` creates gets mode 0700, each receipt 0600.
+**`state_dir`** (default per OS: `/var/lib/pve-winrepair` on POSIX, `%LOCALAPPDATA%\pve-winrepair`
+on Windows): where the machine running the tool keeps its state, the repair receipts
+`receipt-<vmid>.json`, whether that machine is the node or a workstation driving one. Absolute on
+the machine running the tool; `""`, a relative path and a leading `~` are refused, and on Windows a
+path needs its drive (`C:\...`). The shipped defaults leave it commented because the default differs
+per OS; a non-root Linux or macOS workstation sets it, since it cannot create `/var/lib`. Before
+anything else, `repair` and `apply` check that it is a directory, or that its nearest existing
+parent is one, so a receipt write cannot fail hours into a run on a path that is a file. A
+directory `pve-winrepair` creates gets mode 0700, each receipt 0600.
 
 A receipt holds the build of the staged image and, from the same moment, the build and the
 InstallDate the guest ran (`build_before`, `install_date_before`); every field is required, and

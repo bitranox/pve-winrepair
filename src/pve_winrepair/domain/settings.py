@@ -12,13 +12,17 @@ validated with the same rules that verb applies, so ``pve-winrepair config`` sho
 
 from __future__ import annotations
 
+import os
 from ipaddress import IPv4Network
-from pathlib import Path, PurePath, PurePosixPath
-from typing import Annotated, Final
+from pathlib import Path, PurePath
+from typing import TYPE_CHECKING, Annotated, Final
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
 
 from pve_winrepair.domain.ssh_paths import jump_key_problem, known_hosts_problem
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 #: A Windows account name as the guest's sshd takes it: no domain part, no spaces.
 _USER_PATTERN: Final[str] = r"^[A-Za-z0-9_.-]{1,64}$"
@@ -176,10 +180,36 @@ class RepairSettings(BaseModel):
     _free_space_is_not_a_boolean = field_validator("stage_free_gb", "system_free_gb", mode="before")(_refuse_a_boolean)
 
 
-class NodeSettings(BaseModel):
-    """Where the node keeps its own state (repair receipts), and how the tool reaches the node.
+def default_state_dir(os_name: str = os.name, environ: Mapping[str, str] = os.environ) -> str:
+    r"""Where receipts live when ``[node] state_dir`` is not set, per OS.
 
-    ``state_dir`` must be an absolute POSIX path; "", a relative path and a leading "~" are refused.
+    /var/lib/pve-winrepair on POSIX, %LOCALAPPDATA%\pve-winrepair on Windows, and
+    "" on Windows when LOCALAPPDATA is unset, so the validator refuses it by name instead of a guess.
+
+    Args:
+        os_name: The ``os.name`` to answer for: ``"nt"`` is Windows, anything else POSIX.
+        environ: The environment LOCALAPPDATA is read from on Windows.
+
+    Returns:
+        The default state directory for that OS, as text.
+
+    Example:
+        >>> default_state_dir("posix", {})
+        '/var/lib/pve-winrepair'
+        >>> default_state_dir("nt", {"LOCALAPPDATA": r"C:\Users\op\AppData\Local"})
+        'C:\\Users\\op\\AppData\\Local\\pve-winrepair'
+    """
+    if os_name != "nt":
+        return "/var/lib/pve-winrepair"
+    local = environ.get("LOCALAPPDATA", "")
+    return f"{local}\\pve-winrepair" if local else ""
+
+
+class NodeSettings(BaseModel):
+    """Where this machine keeps its state (repair receipts), and how the tool reaches the node.
+
+    ``state_dir`` must be an absolute path on the machine running the tool (default: :func:`default_state_dir`);
+    "", a relative path and a leading "~" are refused.
     ``host`` is the PVE node to drive over ssh, a DNS name or an IPv4 address; "" means this machine is the node.
     ``ssh_user`` is the account the tool logs in to the node as; it never starts with "-".
     ``ssh_key`` is the private key file this machine logs in to the node with; "" means not configured.
@@ -194,7 +224,8 @@ class NodeSettings(BaseModel):
 
     model_config = _SECTION_CONFIG
 
-    state_dir: Path = Path("/var/lib/pve-winrepair")
+    # validate_default: the Windows default is "" when LOCALAPPDATA is unset, and must be refused like a typed "".
+    state_dir: Path = Field(default_factory=lambda: Path(default_state_dir()), validate_default=True)
     host: str = Field(default="", pattern=NODE_HOST_PATTERN)
     ssh_user: str = Field(default="root", pattern=_NODE_USER_PATTERN)
     # Kept as written, like [ssh] key: ssh reads the path itself on the machine running the tool. A
@@ -206,15 +237,18 @@ class NodeSettings(BaseModel):
 
     @field_validator("state_dir", mode="before")
     @classmethod
-    def _state_dir_is_an_absolute_posix_path(cls, value: object) -> object:
+    def _state_dir_is_absolute_here(cls, value: object) -> object:
         # Checked before pydantic builds the Path: "" would become Path("."), so receipts would land in
         # whatever cwd a run starts from and a later run elsewhere could not find them. A relative path
-        # and a leading "~" (never expanded here) fail the same way. PurePosixPath keeps the check the
-        # same on every OS: the directory is on a Proxmox node, whatever machine validates the file.
-        text = value.as_posix() if isinstance(value, PurePath) else value
-        if isinstance(text, str | int) and not PurePosixPath(str(text)).is_absolute():
+        # and a leading "~" (never expanded here) fail the same way. Absolute on THIS OS: receipts live on
+        # the machine running the tool, the node or a workstation (C1 decision), and a POSIX path on
+        # Windows lacks its drive. Path("") is Path("."), which is relative, so the unset Windows default
+        # and a typed "" are refused here like any other relative path.
+        text = str(value) if isinstance(value, PurePath) else value
+        if isinstance(text, str | int) and not Path(str(text)).is_absolute():
             # The value is not repeated: the reason names the rule, the location names the key.
-            raise ValueError("must be an absolute path on the node (starting with /)")
+            hint = r" (the Windows default %LOCALAPPDATA%\pve-winrepair needs LOCALAPPDATA)" if os.name == "nt" else ""
+            raise ValueError(f"must be an absolute path on this machine{hint}")
         return value
 
     @field_validator("ssh_key")
@@ -252,4 +286,5 @@ __all__ = [
     "Settings",
     "SnapshotName",
     "SshSettings",
+    "default_state_dir",
 ]

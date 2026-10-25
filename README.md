@@ -217,24 +217,24 @@ may not write); [CONFIG.md](CONFIG.md) has them.
 The settings live in `/etc/pve-winrepair/config.toml` on the node. [CONFIG.md](CONFIG.md) explains
 every key, the other layers and the environment overrides.
 
-| Key                              | Default                    | Meaning                                                 |
-|----------------------------------|----------------------------|---------------------------------------------------------|
-| `[ssh] key`                      | `""` (required)            | Private key the node logs in to the guests with         |
-| `[ssh] user`                     | `"Administrator"`          | Administrator account on the guest                      |
-| `[ssh] strict_host_key_checking` | `true`                     | Refuse an unknown or changed guest host key             |
-| `[ssh] known_hosts_file`         | `"~/.ssh/known_hosts"`     | known_hosts file for the guests                         |
-| `[guest] subnet`                 | `""`                       | The LAN the guest's address is picked from (set it)     |
-| `[guest] runner_tasks`           | `[]`                       | Values for the guest tool's `verify-runners --task`     |
-| `[guest] expected_runners`       | `0`                        | Value for the guest tool's `verify-runners --expected`  |
-| `[repair] media_dir`             | `""` (required)            | Directory with the unpacked installation media          |
-| `[repair] snapshot_name`         | `"pre_winrepair"`          | Snapshot taken before the repair                        |
-| `[repair] stage_free_gb`         | `15.0`                     | Free GiB the staging drive needs                        |
-| `[repair] system_free_gb`        | `25.0`                     | Free GiB `C:` needs                                     |
-| `[node] state_dir`               | `"/var/lib/pve-winrepair"` | Where the repair receipts are kept                      |
-| `[node] host`                    | `""`                       | PVE node to drive over ssh; empty: this machine         |
-| `[node] ssh_user`                | `"root"`                   | Account this machine logs in as on the node             |
-| `[node] ssh_key`                 | `""`                       | Private key for the node (required with a node host)    |
-| `[node] known_hosts_file`        | `"~/.ssh/known_hosts"`     | known_hosts file the node's host key is checked against |
+| Key                              | Default                | Meaning                                                 |
+|----------------------------------|------------------------|---------------------------------------------------------|
+| `[ssh] key`                      | `""` (required)        | Private key the node logs in to the guests with         |
+| `[ssh] user`                     | `"Administrator"`      | Administrator account on the guest                      |
+| `[ssh] strict_host_key_checking` | `true`                 | Refuse an unknown or changed guest host key             |
+| `[ssh] known_hosts_file`         | `"~/.ssh/known_hosts"` | known_hosts file for the guests                         |
+| `[guest] subnet`                 | `""`                   | The LAN the guest's address is picked from (set it)     |
+| `[guest] runner_tasks`           | `[]`                   | Values for the guest tool's `verify-runners --task`     |
+| `[guest] expected_runners`       | `0`                    | Value for the guest tool's `verify-runners --expected`  |
+| `[repair] media_dir`             | `""` (required)        | Directory with the unpacked installation media          |
+| `[repair] snapshot_name`         | `"pre_winrepair"`      | Snapshot taken before the repair                        |
+| `[repair] stage_free_gb`         | `15.0`                 | Free GiB the staging drive needs                        |
+| `[repair] system_free_gb`        | `25.0`                 | Free GiB `C:` needs                                     |
+| `[node] state_dir`               | per OS (see CONFIG.md) | Where the repair receipts are kept                      |
+| `[node] host`                    | `""`                   | PVE node to drive over ssh; empty: this machine         |
+| `[node] ssh_user`                | `"root"`               | Account this machine logs in as on the node             |
+| `[node] ssh_key`                 | `""`                   | Private key for the node (required with a node host)    |
+| `[node] known_hosts_file`        | `"~/.ssh/known_hosts"` | known_hosts file the node's host key is checked against |
 
 Any key can be overridden for one run with `PVE_WINREPAIR___<SECTION>__<KEY>`. The usual case is a
 guest that refuses the configured key:

@@ -2,8 +2,9 @@
 
 ``docs/systemdesign/module_reference.md`` is where a reader learns which module does what and which
 settings exist. Each settings section has a table under a ``### `[<section>]`  -  `<Model>``` heading;
-its rows must name exactly the model's fields, each with the model's default, so the document cannot
-drift from the code without this test going red.
+its rows must name exactly the model's fields, each with the model's default (or, for a default
+computed per OS, the public function computing it), so the document cannot drift from the code
+without this test going red.
 """
 
 from __future__ import annotations
@@ -14,9 +15,12 @@ from typing import TYPE_CHECKING, cast
 
 import pytest
 
+from pve_winrepair.domain import settings as settings_module
 from pve_winrepair.domain.settings import GuestSettings, NodeSettings, RepairSettings, SshSettings
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from pydantic import BaseModel
 
 _MODULE_REFERENCE = Path(__file__).parent.parent / "docs" / "systemdesign" / "module_reference.md"
@@ -71,6 +75,17 @@ def test_the_module_reference_names_the_package(package: str) -> None:
 @pytest.mark.parametrize(("section", "model"), list(_SECTION_MODELS.items()), ids=list(_SECTION_MODELS))
 def test_the_settings_table_matches_the_model(section: str, model: type[BaseModel]) -> None:
     rows = _table_rows(_MODULE_REFERENCE.read_text(encoding="utf-8"), section, model)
-    expected = {name: _toml_literal(field.default) for name, field in model.model_fields.items()}
+    computed = {name for name, field in model.model_fields.items() if field.default_factory is not None}
+    expected = {
+        name: _toml_literal(field.default) for name, field in model.model_fields.items() if name not in computed
+    }
 
-    assert rows == expected
+    assert set(rows) == set(model.model_fields)
+    assert {name: default for name, default in rows.items() if name not in computed} == expected
+    for name in computed:
+        # A default computed per OS has no one literal: its cell names the public function that computes it.
+        call = re.fullmatch(r"([a-z_]+)\(\)", rows[name])
+        assert call is not None, f"{section}.{name}: {rows[name]!r} names no function"
+        assert call.group(1) in settings_module.__all__, f"{section}.{name}: {call.group(1)} is not public"
+        function: Callable[[], object] = getattr(settings_module, call.group(1))
+        assert getattr(model(**{name: function()}), name) == getattr(model(), name), f"{section}.{name}"

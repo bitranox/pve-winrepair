@@ -586,10 +586,9 @@ def cli_config(tmp_path: Path) -> dict[str, dict[str, object]]:
     }
 
 
-#: Marks a test whose CLI run loads ``[node] state_dir`` from :func:`cli_config`. The node's state
-#: directory is an absolute POSIX path on every OS (``NodeSettings`` refuses anything else, because
-#: the directory is on a Proxmox node), and the only place this test can put it is ``tmp_path``,
-#: which on Windows is ``C:\\...``: there the run ends with exit 78 before the command starts.
+#: Marks a test whose CLI run loads ``[node] state_dir`` from :func:`cli_config`. ``NodeSettings``
+#: takes any path absolute on the machine running the tool, so ``tmp_path`` (``C:\\...`` on Windows)
+#: loads there too; the marker stays until these tests are shown to pass on Windows.
 NEEDS_A_POSIX_STATE_DIR = pytest.mark.os_posix
 
 

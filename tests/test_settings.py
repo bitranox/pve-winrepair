@@ -9,6 +9,7 @@ stray ``.env`` decides a result.
 
 from __future__ import annotations
 
+import os
 from ipaddress import IPv4Network
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -20,7 +21,14 @@ from pve_winrepair.adapters.cli.main import main
 from pve_winrepair.adapters.config.loader import get_config
 from pve_winrepair.adapters.config.settings import SettingsError, load_settings
 from pve_winrepair.composition import build_production
-from pve_winrepair.domain.settings import GuestSettings, NodeSettings, RepairSettings, Settings, SshSettings
+from pve_winrepair.domain.settings import (
+    GuestSettings,
+    NodeSettings,
+    RepairSettings,
+    Settings,
+    SshSettings,
+    default_state_dir,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -43,7 +51,7 @@ def _refusal(config: Config) -> str:
 @pytest.mark.os_agnostic
 def test_the_shipped_defaults_load_as_the_model_defaults(isolated_layers: Path) -> None:
     config = get_config()
-    # Premise: every field comes from the shipped file, not from the models' own defaults.
+    # Premise: every field but node.state_dir comes from the shipped file, not from the models' own defaults.
     shipped = config.as_dict()
     for section, model in (
         ("ssh", SshSettings),
@@ -51,7 +59,10 @@ def test_the_shipped_defaults_load_as_the_model_defaults(isolated_layers: Path) 
         ("repair", RepairSettings),
         ("node", NodeSettings),
     ):
-        assert set(shipped[section]) == set(model.model_fields), section
+        # state_dir's default differs per OS (C1 decision), so the shipped file cannot hold one literal
+        # for it: it is the one key the file leaves commented.
+        expected = set(model.model_fields) - ({"state_dir"} if section == "node" else set())
+        assert set(shipped[section]) == expected, section
 
     assert load_settings(config) == Settings()
 
@@ -69,7 +80,7 @@ def test_the_model_defaults_are_the_documented_ones() -> None:
     assert settings.repair == RepairSettings(
         media_dir="", snapshot_name="pre_winrepair", stage_free_gb=15.0, system_free_gb=25.0
     )
-    assert settings.node.state_dir == Path("/var/lib/pve-winrepair")
+    assert settings.node.state_dir == Path(default_state_dir())
 
 
 @pytest.mark.os_agnostic
@@ -167,8 +178,10 @@ def test_a_digit_only_text_value_is_kept_as_its_text(config_factory: Callable[[d
 
 @pytest.mark.os_agnostic
 def test_a_fleet_shaped_file_validates_and_keeps_every_value(
-    config_factory: Callable[[dict[str, Any]], Config],
+    config_factory: Callable[[dict[str, Any]], Config], tmp_path: Path
 ) -> None:
+    # tmp_path: an absolute path on every OS, which a literal POSIX path is not on Windows.
+    state_dir = str(tmp_path / "state")
     config = config_factory(
         {
             "ssh": {
@@ -188,7 +201,7 @@ def test_a_fleet_shaped_file_validates_and_keeps_every_value(
                 "stage_free_gb": 15.0,
                 "system_free_gb": 25.0,
             },
-            "node": {"state_dir": "/var/lib/x"},
+            "node": {"state_dir": state_dir},
         }
     )
 
@@ -206,7 +219,7 @@ def test_a_fleet_shaped_file_validates_and_keeps_every_value(
     assert settings.repair.snapshot_name == "pre_repair"
     assert settings.repair.stage_free_gb == 15.0
     assert settings.repair.system_free_gb == 25.0
-    assert settings.node.state_dir == Path("/var/lib/x")
+    assert settings.node.state_dir == Path(state_dir)
 
 
 @pytest.mark.os_agnostic
@@ -308,15 +321,48 @@ def test_a_snapshot_name_of_two_to_forty_characters_is_accepted(
 
 # --- node.state_dir ----------------------------------------------------------------------------
 
-#: The refusal reason for a state directory that is not an absolute POSIX path.
-_STATE_DIR_REASON = "node.state_dir: must be an absolute path on the node (starting with /)"
+#: The refusal reason for a state directory that is not an absolute path on the machine running the tool.
+#: Windows appends the hint for its LOCALAPPDATA default; both literals are written out here, never
+#: imported from the code, so a changed wording turns these tests red.
+_STATE_DIR_REASON = "node.state_dir: must be an absolute path on this machine" + (
+    r" (the Windows default %LOCALAPPDATA%\pve-winrepair needs LOCALAPPDATA)" if os.name == "nt" else ""
+)
+
+
+@pytest.mark.os_agnostic
+def test_the_state_dir_default_is_per_os() -> None:
+    assert default_state_dir("posix", {}) == "/var/lib/pve-winrepair"
+    assert (
+        default_state_dir("nt", {"LOCALAPPDATA": r"C:\Users\op\AppData\Local"})
+        == r"C:\Users\op\AppData\Local\pve-winrepair"
+    )
+    assert default_state_dir("nt", {}) == ""
+
+
+@pytest.mark.os_agnostic
+def test_a_relative_state_dir_is_refused_on_every_os() -> None:
+    with pytest.raises(ValidationError, match="must be an absolute path on this machine"):
+        NodeSettings.model_validate({"state_dir": "relative/receipts"})
+
+
+@pytest.mark.os_posix
+def test_a_windows_path_is_not_absolute_on_posix() -> None:
+    with pytest.raises(ValidationError, match="must be an absolute path on this machine"):
+        NodeSettings.model_validate({"state_dir": r"C:\receipts"})
+
+
+@pytest.mark.os_windows
+def test_a_drive_path_is_accepted_on_windows_and_a_rooted_one_is_not() -> None:
+    assert NodeSettings.model_validate({"state_dir": r"C:\receipts"}).state_dir == Path(r"C:\receipts")
+    with pytest.raises(ValidationError, match="must be an absolute path on this machine"):
+        NodeSettings.model_validate({"state_dir": "/var/lib/pve-winrepair"})
 
 
 @pytest.mark.os_agnostic
 @pytest.mark.parametrize(
     "state_dir",
-    ["", "rel/dir", "~/x", "./receipts", 4711],
-    ids=["empty", "relative", "tilde", "dot-relative", "digit-only"],
+    ["", ".", "rel/dir", "~/x", "./receipts", 4711],
+    ids=["empty", "dot", "relative", "tilde", "dot-relative", "digit-only"],
 )
 def test_a_state_dir_that_is_not_absolute_is_refused_without_its_value(
     config_factory: Callable[[dict[str, Any]], Config], state_dir: object
@@ -326,9 +372,23 @@ def test_a_state_dir_that_is_not_absolute_is_refused_without_its_value(
     assert text == _STATE_DIR_REASON
 
 
-@pytest.mark.os_agnostic
+@pytest.mark.os_windows
+def test_the_windows_default_without_localappdata_is_refused_naming_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The environment is the external edge here: the default is read from it when the model is built.
+    monkeypatch.delenv("LOCALAPPDATA", raising=False)
+
+    with pytest.raises(ValidationError) as caught:
+        NodeSettings()
+
+    assert caught.value.errors()[0]["msg"] == (
+        r"Value error, must be an absolute path on this machine"
+        r" (the Windows default %LOCALAPPDATA%\pve-winrepair needs LOCALAPPDATA)"
+    )
+
+
+@pytest.mark.os_posix
 @pytest.mark.parametrize("state_dir", ["/var/lib/pve-winrepair", "/root/winrepair", "/"])
-def test_an_absolute_posix_state_dir_is_accepted_on_every_os(
+def test_an_absolute_posix_state_dir_is_accepted_on_posix(
     config_factory: Callable[[dict[str, Any]], Config], state_dir: str
 ) -> None:
     settings = load_settings(config_factory({"node": {"state_dir": state_dir}}))
