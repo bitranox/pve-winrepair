@@ -185,6 +185,7 @@ SECTION.KEY=VALUE` (repeatable), `--env-file PATH`, `--traceback` / `--no-traceb
 | `--ip IP`           | from the agent           | The guest's IPv4 address, for a guest without the QEMU agent; implies the powered-off snapshot      |
 | `--node HOST`       | `[node] host`            | The PVE node to drive over ssh, the guests reached through it; with neither, this machine           |
 | `--receipt FILE`    | `[node] state_dir`       | The receipt file on this machine, instead of `receipt-<vmid>.json` in `[node] state_dir`            |
+| `--media M`         | `[repair] media_source`  | `node`: `[repair] media_dir` on the node; `local`: `[repair] local_media_dir` on this machine       |
 | `--stage-root X:`   | measured                 | The drive to stage on; by default a non-system fixed drive with room, else `C:`                     |
 | `--tpm-storage S`   | the guest disk's storage | The PVE storage ID for a new vTPM volume                                                            |
 | `--json`            | off                      | Print a JSON envelope on stdout                                                                     |

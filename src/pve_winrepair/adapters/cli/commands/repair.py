@@ -18,6 +18,7 @@ import lib_log_rich.runtime
 import rich_click as click
 
 from pve_winrepair.application.repair import RepairRequest, run_repair
+from pve_winrepair.domain.enums import MediaChoice
 
 from ..constants import CLICK_CONTEXT_SETTINGS
 from ..context import get_cli_context
@@ -84,6 +85,19 @@ __all__ = ["cli_repair"]
     default=None,
     help="Receipt file on this machine, instead of receipt-<vmid>.json in [node] state_dir.",
 )
+# The choices are the enum VALUES: a click.Choice built from the enum itself matches the member NAME,
+# so the lowercase value the help shows would be refused. case_sensitive=False returns the canonical
+# value, so MediaChoice(media) takes any spelling click accepted.
+@option(
+    "--media",
+    "media",
+    type=click.Choice([choice.value for choice in MediaChoice], case_sensitive=False),
+    default=None,
+    help=(
+        "Where the media come from: node ([repair] media_dir, copied by the node) or local "
+        "([repair] local_media_dir here). Default: [repair] media_source."
+    ),
+)
 @option(
     "--stage-root",
     type=WindowsDrive(),
@@ -108,16 +122,18 @@ def cli_repair(
     ip: IPv4Address | None,
     node: str | None,
     receipt: Path | None,
+    media: str | None,
     stage_root: DriveLetter | None,
     tpm_storage: str | None,
 ) -> None:
     """Repair a guest whose cumulative update fails, by an in-place repair upgrade.
 
     Refuse a live upgrade run, hold Windows Update (on a running guest reached through the agent),
-    ensure a vTPM, snapshot, stage the installation media from [repair] media_dir, hold Windows Update
-    again, gate the image, record the receipt, launch setup from a SYSTEM task and poll to its
-    verdict. Each step goes to stderr as it happens. Exit 0 when repaired or staged, 1 when refused,
-    2 on an internal error or a bad option, 78 when the configuration does not load.
+    ensure a vTPM, snapshot, stage the installation media --media names ([repair] media_dir on the
+    node or [repair] local_media_dir here), hold Windows Update again, gate the image, record the
+    receipt, launch setup from a SYSTEM task and poll to its verdict. Each step goes to stderr as it
+    happens. Exit 0 when repaired or staged, 1 when refused, 2 on an internal error or a bad option,
+    78 when the configuration does not load.
     """
     cli_ctx = get_cli_context(ctx)
     settings = load_run_settings(ctx, cli_ctx)
@@ -132,6 +148,7 @@ def cli_repair(
                 ip=ip,
                 stage_root=stage_root,
                 tpm_storage=tpm_storage,
+                media=settings.repair.media_source if media is None else MediaChoice(media),
             )
             # Last: the link check is the one check that calls out (one round trip to a remote node).
             node_port = cli_ctx.services.make_node(settings.ssh, resolve_link(settings, node))

@@ -10,6 +10,7 @@ from __future__ import annotations
 import dataclasses
 import logging
 import os
+import shlex
 import sys
 from typing import TYPE_CHECKING
 
@@ -36,6 +37,7 @@ from guest_fakes import (
     envelope_steps,
     json_envelope,
     prepare_report,
+    route,
     run_cli,
     state_log,
 )
@@ -661,3 +663,88 @@ def test_a_bad_snapshot_name_is_refused_before_the_remote_node_is_called(tmp_pat
     assert run.exit_code == 1
     assert "--snapshot-name: String should match pattern " in run.stderr
     assert runner.calls == []
+
+
+def _local_media_on_a_remote_node(tmp_path: Path) -> tuple[Path, dict[str, dict[str, object]]]:
+    """A ``local_media_dir`` holding ``setup.exe`` and the ``[node]`` link to :data:`NODE_LINK`."""
+    local = tmp_path / "iso"
+    local.mkdir()
+    (local / "setup.exe").write_bytes(b"MZ")
+    config = cli_config(tmp_path)
+    config["node"] = {
+        **config["node"],
+        "host": NODE_LINK.host,
+        "ssh_key": NODE_LINK.key,
+        "known_hosts_file": NODE_LINK.known_hosts,
+    }
+    config["repair"] = {**config["repair"], "local_media_dir": str(local)}
+    return local, config
+
+
+def _node_runner() -> FakeRunner:
+    """A healthy agent guest behind :data:`NODE_LINK`, whose agent holds a key and whose ``sh`` calls succeed."""
+    return agent_runner(
+        FakePve(), command=Reply(0, "/usr/sbin/qm\n"), **{"ssh-add": Reply(0, "256 k\n"), "sh": Reply(0)}
+    )
+
+
+@NEEDS_A_POSIX_STATE_DIR
+def test_media_local_copies_this_machines_media_through_the_node(tmp_path: Path) -> None:
+    local, config = _local_media_on_a_remote_node(tmp_path)
+    runner = _node_runner()
+    run = run_cli(
+        ["repair", "--vmid", "1", "--node", NODE_LINK.host, "--media", "local", "--stage-only", "--json"],
+        config,
+        runner,
+    )
+    assert (run.exit_code, json_envelope(run.stdout)["verdict"]) == (0, "STAGED")
+    copies = [c for c in runner.calls if route(c) == "scp" and str(local / "setup.exe") in c]
+    assert len(copies) == 1 and copies[0][1:3] == ["-o", f"ProxyCommand={NODE_LINK.proxy_command()}"]
+    # The local media never ask the node's agent or shell: no node-side check, no node-side copy.
+    assert [c for c in runner.calls if route(c) in ("sh", "ssh-add")] == []
+
+
+@NEEDS_A_POSIX_STATE_DIR
+def test_the_media_source_setting_is_the_default_and_the_media_option_overrides_it(tmp_path: Path) -> None:
+    local, config = _local_media_on_a_remote_node(tmp_path)
+    config["repair"] = {**config["repair"], "media_source": "local"}
+    by_setting = _node_runner()
+    run = run_cli(["repair", "--vmid", "1", "--stage-only", "--json"], config, by_setting)
+    assert (run.exit_code, json_envelope(run.stdout)["verdict"]) == (0, "STAGED")
+    assert len([c for c in by_setting.calls if route(c) == "scp" and str(local / "setup.exe") in c]) == 1
+    by_option = _node_runner()
+    run = run_cli(["repair", "--vmid", "1", "--media", "node", "--stage-only", "--json"], config, by_option)
+    assert (run.exit_code, json_envelope(run.stdout)["verdict"]) == (0, "STAGED")
+    assert not any(str(local / "setup.exe") in c for c in by_option.calls)
+    node_side = [shlex.split(c[-1]) for c in by_option.calls if route(c) == "sh"]
+    # Both node-side calls name the node's [repair] media_dir: the check, then the copy.
+    assert len(node_side) == 2 and all(str(tmp_path / "media") in words for words in node_side)
+
+
+@NEEDS_A_POSIX_STATE_DIR
+def test_the_media_option_takes_node_in_any_case(tmp_path: Path) -> None:
+    run = run_cli(
+        ["repair", "--vmid", "1", "--media", "NODE", "--stage-only", "--json"],
+        cli_config(tmp_path),
+        agent_runner(FakePve()),
+    )
+    assert (run.exit_code, json_envelope(run.stdout)["verdict"]) == (0, "STAGED")
+
+
+@NEEDS_A_POSIX_STATE_DIR
+def test_the_media_option_takes_local_in_any_case_and_names_its_unset_directory(tmp_path: Path) -> None:
+    runner = agent_runner(FakePve())
+    run = run_cli(["repair", "--vmid", "1", "--media", "Local", "--json"], cli_config(tmp_path), runner)
+    envelope = json_envelope(run.stdout)
+    assert (run.exit_code, envelope["verdict"]) == (1, "ERROR")
+    assert str(envelope_steps(envelope)[-1]["message"]) == (
+        "[repair] local_media_dir is not configured: set it to the directory holding the installation media"
+    )
+    assert not any(call[0] == "scp" for call in runner.calls)
+
+
+def test_an_unknown_media_choice_is_a_usage_error(tmp_path: Path) -> None:
+    runner = FakeRunner()
+    run = run_cli(["repair", "--vmid", "1", "--media", "nas"], cli_config(tmp_path), runner)
+    assert run.exit_code == 2 and "--media" in run.stderr and runner.calls == []
+    assert "'nas' is not one of 'node', 'local'" in run.stderr

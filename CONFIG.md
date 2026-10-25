@@ -94,7 +94,8 @@ staging directory.
 **`media_source`** (default `"node"`): where a repair takes the installation media from. `"node"`
 is `media_dir` on the node; `"local"` is `local_media_dir` on the machine running the tool. Any
 other value, upper case included, is refused. With no `[node] host` the node is the machine running
-the tool, so both name a directory on the same machine.
+the tool, so both name a directory on the same machine. `repair --media node|local` overrides it for
+one run.
 
 **`local_media_dir`** (default `""`): this machine's copy of the installation media, laid out like
 `media_dir` (`setup.exe` and `sources/install.wim` at its top level). Required when `media_source`

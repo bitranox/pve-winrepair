@@ -58,7 +58,7 @@ moves or removes a module, a CLI option or a public name.
   - `commands/__init__.py`  -  Re-exports every command (`cli_repair`, `cli_apply`, `cli_guest_tool`, `cli_config`, ...)
   - `commands/info.py`  -  info command
   - `commands/config.py`  -  config, config-deploy, config-generate-examples commands
-  - `commands/repair.py`  -  `repair --vmid N [--stage-only] [--snapshot-name S] [--hours H] [--ip IP] [--node HOST] [--receipt FILE] [--stage-root X:] [--tpm-storage S] [--json]`; `--snapshot-name` defaults to `[repair] snapshot_name` and is validated by its rule
+  - `commands/repair.py`  -  `repair --vmid N [--stage-only] [--snapshot-name S] [--hours H] [--ip IP] [--node HOST] [--receipt FILE] [--media node|local] [--stage-root X:] [--tpm-storage S] [--json]`; `--snapshot-name` defaults to `[repair] snapshot_name` and is validated by its rule, `--media` to `[repair] media_source`
   - `commands/apply.py`  -  `apply --vmid N --ip IP [--node HOST] [--receipt FILE] [--apply-minutes M] [--json]`
   - `commands/guest_tool.py`  -  `guest-tool path` (the packed tool) and `guest-tool sha256` (`<sha256>  <content address>`); neither reads the configuration
   - `commands/runs.py`  -  What `repair` and `apply` share: settings (exit 78), the checks before any call (`[ssh] key` set, the receipt's directory (`[node] state_dir`, or the `--receipt` file's) a directory or creatable as one, the remote node `--node` or `[node] host` names (`resolve_link`: `[node] ssh_key` set) usable (`check_link`); exit 1), steps and progress lines on stderr, the `--json` envelope `{ok, command, vmid, verdict, steps}` (a `RunEnvelope` for a `RunCommand`) or `vm <vmid>: <verdict>` on stdout; exit 0 OK, 1 refused, 2 internal
@@ -310,6 +310,7 @@ Repair one guest by an in-place repair upgrade (`application/repair.py`).
 | `--ip IP`           | Guest IPv4 address for a guest without QEMU agent; implies the offline snapshot; MAC-checked          |
 | `--node HOST`       | PVE node to drive over ssh, guests reached through it (default `[node] host`; empty: this machine)    |
 | `--receipt FILE`    | Receipt file on this machine, instead of `receipt-<vmid>.json` in `[node] state_dir`                  |
+| `--media M`         | Media from `node` (`[repair] media_dir`) or `local` (`local_media_dir` here); default `media_source`  |
 | `--stage-root X:`   | Drive to stage on (default: a non-system fixed drive with room, else `C:`)                            |
 | `--tpm-storage S`   | PVE storage ID for a new vTPM volume (default: the storage of the guest's disk)                       |
 | `--json`            | Print the envelope `{ok, command, vmid, verdict, steps}` instead of the verdict line                  |
