@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from pve_winrepair.adapters.guest_ssh import TOOL_DIR, Guest, run
-from pve_winrepair.adapters.media import LocalMedia
+from pve_winrepair.adapters.media import LocalMedia, NodeMedia
 from pve_winrepair.domain.vm_config import (
     SnapshotResult,
     VmConfigRead,
@@ -108,5 +108,7 @@ class Node:
         return Guest(str(ip), ssh_settings=self.ssh, tool_dir=self.tool_dir, runner=runner)
 
     def media(self, directory: str, *, from_node: bool) -> MediaSource:
-        """The media in ``directory``; always on this machine until node-side media exist (Task 2.7)."""
-        return LocalMedia(Path(directory))
+        """The media in ``directory``: read and copied on the linked node when ``from_node``, else on this machine."""
+        if self.link is None or not from_node:
+            return LocalMedia(Path(directory))
+        return NodeMedia(directory, self.link, self.ssh, self.runner)

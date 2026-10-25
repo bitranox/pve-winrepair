@@ -179,11 +179,15 @@ def route(cmd: Sequence[str]) -> str:
     """The key a call is answered under: ``qm``, ``scp``, the tool subcommand, or the raw remote verb.
 
     A call to a remote node is answered under the first word of the command it runs there
-    (``qm``, or ``command`` for the preflight's ``command -v qm``).
+    (``qm``, ``command`` for the preflight's ``command -v qm``, ``sh`` for the node-side media check
+    and copy); ``ssh-add`` is the local agent query that precedes them.
     """
     if cmd[0] == "ssh" and cmd[-2].startswith(f"{NODE_LINK.user}@"):
         # The last word is the quoted command (NodeLink.ssh_argv); the node runs no guest tool.
         return shlex.split(cmd[-1])[0]
+    if cmd[0] == "ssh-add":
+        # The node-side media check asks this machine's agent first (NodeMedia.check).
+        return "ssh-add"
     if cmd[0] in ("qm", "scp"):
         return cmd[0]
     at = next(i for i, token in enumerate(cmd) if token.startswith(f"{USER}@"))

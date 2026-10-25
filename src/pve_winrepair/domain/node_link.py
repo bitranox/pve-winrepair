@@ -63,9 +63,14 @@ class NodeLink:
         """``user@host`` as ssh takes it."""
         return f"{self.user}@{self.host}"
 
-    def ssh_argv(self, remote: Sequence[str]) -> list[str]:
-        """ssh to the node running ``remote`` there, as one quoted word the node's shell splits back exactly."""
-        return ["ssh", "-i", self.key, *self._options(), self.target, shlex.join(remote)]
+    def ssh_argv(self, remote: Sequence[str], *, forward_agent: bool = False) -> list[str]:
+        """ssh to the node running ``remote`` there, as one quoted word the node's shell splits back exactly.
+
+        ``forward_agent`` adds ``-A``, only for the node-side media copy: the node then logs in to the guest
+        with the operator's key without that key ever being stored on the node.
+        """
+        agent = ["-A"] if forward_agent else []
+        return ["ssh", *agent, "-i", self.key, *self._options(), self.target, shlex.join(remote)]
 
     def proxy_command(self, *, windows: bool | None = None) -> str:
         """The ``ProxyCommand`` that carries a guest connection through the node, logging in with the node key.

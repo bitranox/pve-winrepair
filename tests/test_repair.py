@@ -8,6 +8,7 @@ power state.
 from __future__ import annotations
 
 import json
+import shlex
 import subprocess
 from datetime import datetime, timezone
 from ipaddress import IPv4Address, IPv4Network
@@ -855,27 +856,31 @@ def test_guest_ip_with_no_address_in_the_subnet_retries_then_refuses() -> None:
 
 def _run(
     runner: FakeRunner,
-    media: Path,
+    media_dir: Path,
     *,
     ip: str | None = None,
     hours: float = 6.0,
     stage_only: bool = False,
     receipts: FileReceiptStore | None = None,
     link: NodeLink | None = None,
+    media: MediaChoice = MediaChoice.NODE,
 ) -> tuple[RunResult, list[dict[str, object]]]:
     """Run the whole repair (not stage-only by default) on a fake node; return the result and its steps.
 
-    The receipts go to ``receipts``, by default a state directory beside ``media``; ``link`` makes the
-    node a remote one (default: this machine).
+    ``media_dir`` is both ``[repair] media_dir`` and ``local_media_dir``; ``media`` picks which one the run
+    stages from. The receipts go to ``receipts``, by default a state directory beside ``media_dir``;
+    ``link`` makes the node a remote one (default: this machine).
     """
     address = None if ip is None else IPv4Address(ip)
-    request = RepairRequest(vmid=1, snapshot_name="pre_kb_test", hours=hours, ip=address, stage_only=stage_only)
+    request = RepairRequest(
+        vmid=1, snapshot_name="pre_kb_test", hours=hours, ip=address, stage_only=stage_only, media=media
+    )
     result = run_repair(
         request,
         make_node(runner, FakeClock(), link=link),
-        repair=_repair_settings(media),
+        repair=_repair_settings(media_dir),
         guest=GUEST,
-        receipts=receipts or FileReceiptStore(media.parent / "state"),
+        receipts=receipts or FileReceiptStore(media_dir.parent / "state"),
         on_step=lambda _s: None,
     )
     return result, _wire(result.steps)
@@ -889,11 +894,15 @@ def _media(tmp_path: Path) -> Path:
     return media
 
 
-@pytest.mark.parametrize("link", [None, NODE_LINK], ids=["this-node", "remote-node"])
-def test_main_runs_the_whole_agent_path_to_done_ok(tmp_path: Path, link: NodeLink | None) -> None:
+@pytest.mark.parametrize(
+    ("link", "choice"),
+    [(None, MediaChoice.NODE), (NODE_LINK, MediaChoice.LOCAL)],
+    ids=["this-node", "remote-node"],
+)
+def test_main_runs_the_whole_agent_path_to_done_ok(tmp_path: Path, link: NodeLink | None, choice: MediaChoice) -> None:
     runner = agent_runner(FakePve())
     media = _media(tmp_path)
-    result, steps = _run(runner, media, link=link)
+    result, steps = _run(runner, media, link=link, media=choice)
     assert (result.exit, result.verdict) == (RunExit.OK, "STATE=DONE-OK")
     assert [s["step"] for s in steps] == [
         "running", "push_tool", "no_live_run", "quiesce_wu", "servicing_idle", "vtpm", "running",
@@ -906,6 +915,19 @@ def test_main_runs_the_whole_agent_path_to_done_ok(tmp_path: Path, link: NodeLin
         assert all(call[0] == "ssh" for call in runner.calls if route(call) == "qm")
         proxy = ["-o", f"ProxyCommand={link.proxy_command()}"]
         assert all(call[1:3] == proxy for call in runner.calls if route(call) != "qm")
+
+
+def test_a_remote_run_stages_the_nodes_media_on_the_node(tmp_path: Path) -> None:
+    runner = agent_runner(FakePve(), **{"ssh-add": Reply(0, "256 k\n"), "sh": Reply(0)})
+    result, _steps = _run(runner, _media(tmp_path), link=NODE_LINK, media=MediaChoice.NODE)
+    assert (result.exit, result.verdict) == (RunExit.OK, "STATE=DONE-OK")
+    node_calls = [shlex.split(c[-1])[0] for c in runner.calls if c[:2] == ["ssh", "-A"]]
+    assert node_calls == ["sh", "sh"]  # the media check, then the node-side copy
+    copy = [i for i, c in enumerate(runner.calls) if c[:2] == ["ssh", "-A"]][-1]
+    assert runner.timeouts[copy] == 5400  # [repair] stage_timeout_minutes, as for local media
+    # Straight to the node: a ProxyCommand through the node itself would never connect.
+    assert not any(w.startswith("ProxyCommand=") for w in runner.calls[copy])
+    assert not any(route(c) == "scp" and str(tmp_path) in " ".join(c) for c in runner.calls)  # nothing copied from here
 
 
 def test_the_snapshot_step_reports_whether_pve_froze_the_guest_filesystem(tmp_path: Path) -> None:

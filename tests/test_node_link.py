@@ -36,6 +36,13 @@ def test_quotes_and_empty_words_survive_the_node_shell() -> None:
     assert shlex.split(NODE_LINK.ssh_argv(words)[-1]) == words
 
 
+def test_agent_forwarding_is_asked_for_only_where_needed() -> None:
+    assert NODE_LINK.ssh_argv(["true"], forward_agent=True)[:2] == ["ssh", "-A"]
+    assert "-A" not in NODE_LINK.ssh_argv(["true"])
+    # Nothing else moves: the forwarded call is the plain one with -A after ssh.
+    assert NODE_LINK.ssh_argv(["true"], forward_agent=True) == ["ssh", "-A", *NODE_LINK.ssh_argv(["true"])[1:]]
+
+
 def test_the_node_connection_is_strict_about_its_host_key_and_never_prompts() -> None:
     argv = NODE_LINK.ssh_argv(["true"])
     options = {argv[i + 1] for i, token in enumerate(argv) if token == "-o"}
