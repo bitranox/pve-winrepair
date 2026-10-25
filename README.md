@@ -184,14 +184,15 @@ SECTION.KEY=VALUE` (repeatable), `--env-file PATH`, `--traceback` / `--no-traceb
 | `--stage-only`      | off                      | Stage the media and hold Windows Update, but neither gate the WIM nor launch setup (verdict STAGED) |
 | `--ip IP`           | from the agent           | The guest's IPv4 address, for a guest without the QEMU agent; implies the powered-off snapshot      |
 | `--node HOST`       | `[node] host`            | The PVE node to drive over ssh, the guests reached through it; with neither, this machine           |
+| `--receipt FILE`    | `[node] state_dir`       | The receipt file on this machine, instead of `receipt-<vmid>.json` in `[node] state_dir`            |
 | `--stage-root X:`   | measured                 | The drive to stage on; by default a non-system fixed drive with room, else `C:`                     |
 | `--tpm-storage S`   | the guest disk's storage | The PVE storage ID for a new vTPM volume                                                            |
 | `--json`            | off                      | Print a JSON envelope on stdout                                                                     |
 
-`apply` takes `--vmid N` and `--ip IP` (both required), `--node HOST` (as for `repair`),
-`--apply-minutes M` (default `90.0`: how long the apply phase may take before it counts as overrun;
-a finite number above 0) and `--json`. A value these options refuse is a usage error (exit 2) before
-any call.
+`apply` takes `--vmid N` and `--ip IP` (both required), `--node HOST` and `--receipt FILE` (as for
+`repair`; give `apply` the file the repair wrote), `--apply-minutes M` (default `90.0`: how long
+the apply phase may take before it counts as overrun; a finite number above 0) and `--json`. A
+value these options refuse is a usage error (exit 2) before any call.
 
 Both commands print each step on stderr as it happens. stdout carries only the result: one line
 `vm <vmid>: <verdict>`, or with `--json` an envelope like this one:
@@ -340,15 +341,16 @@ After a finished repair, remove `C:\winrepair`, `C:\upgrade-state.log` and the s
 ### The repair receipt
 
 `repair` records the build of the staged image in `<state_dir>/receipt-<vmid>.json`
-(`/var/lib/pve-winrepair/receipt-100.json` for VM 100 with the default `state_dir`), after the WIM
-gate and before it launches setup, together with the build and InstallDate the guest ran then
-(`build_before`, `install_date_before`). `apply` reads it before it touches the guest, refuses to
-run without one or with one that lacks a field, and accepts only that build; for same-build media
-it also requires a changed InstallDate. That an in-place upgrade always rewrites InstallDate is
-not yet measured on a real upgrade: should it not, every same-build repair ends
-REVERTED_OR_UNCHANGED and its Windows Update hold has to be released by hand. A repair removes the VM's previous receipt once it is sure
-no run is live, so a run that stops before the WIM gate, or a `--stage-only` run, leaves none. The
-file is replaced atomically and only its owner can read it (0600, in a 0700 directory when
+(`/var/lib/pve-winrepair/receipt-100.json` for VM 100 with the default `state_dir`; with
+`--receipt FILE`, in that file instead), after the WIM gate and before it launches setup, together
+with the build and InstallDate the guest ran then (`build_before`, `install_date_before`). `apply`
+reads it before it touches the guest, refuses to run without one or with one that lacks a field, and
+accepts only that build; for same-build media it also requires a changed InstallDate. That an
+in-place upgrade always rewrites InstallDate is not yet measured on a real upgrade: should it not,
+every same-build repair ends REVERTED_OR_UNCHANGED and its Windows Update hold has to be released by
+hand. A repair removes the VM's previous receipt (with `--receipt`, that file) once it is sure no
+run is live, so a run that stops before the WIM gate, or a `--stage-only` run, leaves none. The file
+is replaced atomically and only its owner can read it (0600, in a 0700 directory when
 `pve-winrepair` creates the directory).
 
 ## Guest tool subcommands

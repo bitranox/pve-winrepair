@@ -111,6 +111,29 @@ def test_an_existing_directory_keeps_its_mode(tmp_path: Path) -> None:
     assert stat.S_IMODE(tmp_path.stat().st_mode) == 0o750
 
 
+def test_a_receipt_file_replaces_the_per_vm_name(tmp_path: Path) -> None:
+    store = FileReceiptStore(tmp_path / "unused", tmp_path / "mine" / "r.json")
+    assert store.path(7) == tmp_path / "mine" / "r.json"
+    store.write(_receipt(vmid=7))
+    assert store.read(7) == _receipt(vmid=7)
+    assert not (tmp_path / "unused").exists()
+
+
+def test_a_receipt_file_of_another_vm_is_still_refused(tmp_path: Path) -> None:
+    file = tmp_path / "r.json"
+    FileReceiptStore(tmp_path, file).write(_receipt(vmid=7))
+    with pytest.raises(ReceiptError, match="is for VM 7, not VM 8"):
+        FileReceiptStore(tmp_path, file).read(8)
+
+
+@pytest.mark.os_posix
+def test_the_directory_created_for_a_receipt_file_is_0700(tmp_path: Path) -> None:
+    file = tmp_path / "var" / "mine" / "r.json"
+    FileReceiptStore(tmp_path / "unused", file).write(_receipt())
+    assert stat.S_IMODE(file.parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(file.stat().st_mode) == 0o600
+
+
 def test_read_of_an_absent_vmid_is_none(tmp_path: Path) -> None:
     assert FileReceiptStore(tmp_path / "never-created").read(1) is None
 

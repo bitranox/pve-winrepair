@@ -102,7 +102,7 @@ def build_testing(*, make_node: MakeNode | None = None, make_receipts: MakeRecei
         make_node: The node the commands run on (a node on a fake runner); default: one that
             refuses to run anything.
         make_receipts: The receipt store; default: the file store, in whatever ``[node] state_dir``
-            the test configures.
+            the test configures or the ``--receipt`` file the run names.
 
     Returns:
         AppServices container with in-memory adapters.

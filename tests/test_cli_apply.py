@@ -69,6 +69,32 @@ def test_apply_json_with_a_receipt_is_verified(tmp_path: Path) -> None:
 
 
 @NEEDS_A_POSIX_STATE_DIR
+def test_apply_reads_the_receipt_from_the_file_given(tmp_path: Path) -> None:
+    file = tmp_path / "elsewhere" / "r.json"
+    FileReceiptStore(tmp_path / "unused", file).write(RECEIPT)
+    run = run_cli([*APPLY, "--receipt", str(file), "--json"], cli_config(tmp_path), _runner())
+    envelope = json_envelope(run.stdout)
+    assert (run.exit_code, envelope["verdict"]) == (0, "VERIFIED")
+    receipt = next(step for step in envelope_steps(envelope) if step["step"] == "receipt")
+    assert receipt["path"] == str(file)
+
+
+@NEEDS_A_POSIX_STATE_DIR
+def test_apply_refuses_a_receipt_file_below_a_regular_file_before_any_call(tmp_path: Path) -> None:
+    blocker = tmp_path / "a-file"
+    blocker.write_text("", encoding="utf-8")
+    runner = _runner()
+    run = run_cli([*APPLY, "--receipt", str(blocker / "r.json"), "--json"], cli_config(tmp_path), runner)
+    envelope = json_envelope(run.stdout)
+    assert (run.exit_code, envelope["verdict"]) == (1, "ERROR")
+    assert str(envelope_steps(envelope)[-1]["message"]) == (
+        f"--receipt {blocker / 'r.json'}: directory {blocker} cannot be a directory: {blocker} is not a directory"
+        f" - {WU_HELD_HINT}"
+    )
+    assert runner.calls == []
+
+
+@NEEDS_A_POSIX_STATE_DIR
 def test_a_live_run_is_refused_with_its_verdict_written_as_text_on_stderr(tmp_path: Path) -> None:
     """The step carries the refusal's RunVerdict: the line must show its value, not RunVerdict.RUN_LIVE."""
     run = run_cli([*APPLY, "--json"], _with_receipt(tmp_path), apply_runner(FakePve(), ALIVE, DONE_OK))

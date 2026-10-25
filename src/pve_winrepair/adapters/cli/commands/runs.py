@@ -17,7 +17,7 @@ Contents:
     * :class:`RunEnvelope` - the ``--json`` envelope of a run.
     * :class:`PreflightError` - a check before any call failed; the message names the setting or option.
     * :func:`load_run_settings` - the node CLI settings, or exit 78 naming every refused value.
-    * :func:`check_node` - refuse an unconfigured ``[ssh] key`` or an unusable ``[node] state_dir``.
+    * :func:`check_node` - refuse an unconfigured ``[ssh] key`` or an unusable receipt directory.
     * :func:`resolve_link` - the link to the node ``--node`` or ``[node] host`` names, or None for this machine.
     * :func:`check_link` - refuse a remote node that does not answer, refuses the key or has no ``qm``.
     * :func:`resolve_snapshot_name` - ``--snapshot-name`` validated as ``[repair] snapshot_name`` is.
@@ -113,18 +113,29 @@ def load_run_settings(ctx: click.Context, cli_ctx: CLIContext) -> Settings:
         ctx.exit(ExitCode.CONFIG_ERROR)
 
 
-def check_node(settings: Settings) -> None:
+def check_node(settings: Settings, receipt: Path | None = None) -> None:
     """Refuse what would otherwise fail only deep inside the run.
 
+    Args:
+        settings: The loaded settings.
+        receipt: ``--receipt``, the receipt file used instead of ``[node] state_dir``; None when the
+            option was not given.
+
     Raises:
-        PreflightError: ``[ssh] key`` is empty (every guest call would fail), or ``[node] state_dir`` is
-            not a directory and cannot be created as one (the receipt write would fail after the
-            snapshot, the media copy, the Windows Update hold and prepare).
+        PreflightError: ``[ssh] key`` is empty (every guest call would fail), or the directory that
+            holds the receipt (``[node] state_dir``, or the ``--receipt`` file's directory) is not a
+            directory and cannot be created as one (the receipt write would fail after the snapshot,
+            the media copy, the Windows Update hold and prepare).
     """
     if not settings.ssh.key:
         raise PreflightError(
             "[ssh] key is not configured: set it to the private key the node logs in to the guests with"
         )
+    if receipt is not None:
+        blocker = _not_a_directory(receipt.parent)
+        if blocker is not None:
+            raise PreflightError(f"--receipt {receipt}: directory {receipt.parent} cannot be a directory: {blocker}")
+        return
     blocker = _not_a_directory(settings.node.state_dir)
     if blocker is not None:
         raise PreflightError(f"[node] state_dir {settings.node.state_dir} cannot be a directory: {blocker}")

@@ -41,12 +41,12 @@ from guest_fakes import (
 )
 from lib_layered_config import Config
 
-from pve_winrepair.adapters.cli.commands.runs import PreflightError, resolve_link, resolve_snapshot_name
+from pve_winrepair.adapters.cli.commands.runs import PreflightError, check_node, resolve_link, resolve_snapshot_name
 from pve_winrepair.adapters.cli.main import main
 from pve_winrepair.composition import AppServices, build_testing
 from pve_winrepair.domain.envelope import WU_HELD_HINT
 from pve_winrepair.domain.node_link import NodeLink
-from pve_winrepair.domain.settings import NodeSettings, RepairSettings, Settings
+from pve_winrepair.domain.settings import NodeSettings, RepairSettings, Settings, SshSettings
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -77,6 +77,63 @@ def test_repair_json_runs_the_agent_path_to_done_ok(tmp_path: Path) -> None:
     # The receipt went to [node] state_dir, the node reached the guest with the [ssh] key.
     assert (tmp_path / "state" / "receipt-1.json").is_file()
     assert all(call[call.index("-i") + 1] == KEY for call in runner.calls if call[0] in ("ssh", "scp"))
+
+
+@NEEDS_A_POSIX_STATE_DIR
+def test_repair_writes_the_receipt_to_the_file_given(tmp_path: Path) -> None:
+    file = tmp_path / "r.json"
+    argv = ["repair", "--vmid", "1", "--receipt", str(file), "--json"]
+    run = run_cli(argv, cli_config(tmp_path), agent_runner(FakePve()))
+    envelope = json_envelope(run.stdout)
+    assert (run.exit_code, envelope["verdict"]) == (0, "STATE=DONE-OK")
+    receipt = next(step for step in envelope_steps(envelope) if step["step"] == "receipt")
+    assert receipt["path"] == str(file)
+    assert file.is_file()
+    assert not (tmp_path / "state" / "receipt-1.json").exists()
+
+
+@NEEDS_A_POSIX_STATE_DIR
+def test_a_receipt_file_below_a_regular_file_is_refused_before_any_call(tmp_path: Path) -> None:
+    blocker = tmp_path / "a-file"
+    blocker.write_text("", encoding="utf-8")
+    runner = agent_runner(FakePve())
+    argv = ["repair", "--vmid", "1", "--receipt", str(blocker / "r.json"), "--json"]
+    run = run_cli(argv, cli_config(tmp_path), runner)
+    envelope = json_envelope(run.stdout)
+    assert (run.exit_code, envelope["verdict"]) == (1, "ERROR")
+    assert str(envelope_steps(envelope)[-1]["message"]) == (
+        f"--receipt {blocker / 'r.json'}: directory {blocker} cannot be a directory: {blocker} is not a directory"
+    )
+    assert runner.calls == []
+
+
+def test_a_receipt_option_that_is_a_directory_is_a_usage_error(tmp_path: Path) -> None:
+    runner = FakeRunner()
+    run = run_cli(["repair", "--vmid", "1", "--receipt", str(tmp_path)], cli_config(tmp_path), runner)
+    assert run.exit_code == 2
+    assert "Invalid value for '--receipt'" in run.stderr
+    assert "is a directory" in run.stderr
+    assert runner.calls == []
+
+
+def test_with_a_receipt_file_the_state_dir_is_not_checked(tmp_path: Path) -> None:
+    settings = Settings(ssh=SshSettings(key="/k"), node=NodeSettings(state_dir=tmp_path / "blocked"))
+    (tmp_path / "blocked").write_text("a file, not a directory", encoding="utf-8")
+    check_node(settings, tmp_path / "r.json")  # no PreflightError
+    with pytest.raises(PreflightError, match=r"^\[node\] state_dir "):
+        check_node(settings)
+
+
+def test_a_receipt_file_whose_directory_cannot_be_one_is_refused_naming_the_option(tmp_path: Path) -> None:
+    settings = Settings(ssh=SshSettings(key="/k"), node=NodeSettings(state_dir=tmp_path))
+    blocker = tmp_path / "a-file"
+    blocker.write_text("", encoding="utf-8")
+    receipt = blocker / "r.json"
+    with pytest.raises(PreflightError) as caught:
+        check_node(settings, receipt)
+    assert str(caught.value) == (
+        f"--receipt {receipt}: directory {blocker} cannot be a directory: {blocker} is not a directory"
+    )
 
 
 @NEEDS_A_POSIX_STATE_DIR

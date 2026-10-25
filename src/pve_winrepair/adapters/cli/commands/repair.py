@@ -11,6 +11,7 @@ Contents:
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import lib_log_rich.runtime
@@ -78,6 +79,12 @@ __all__ = ["cli_repair"]
     help="PVE node to drive over ssh, guests reached through it. Default: [node] host; empty: this machine.",
 )
 @option(
+    "--receipt",
+    type=click.Path(dir_okay=False, readable=False, path_type=Path),
+    default=None,
+    help="Receipt file on this machine, instead of receipt-<vmid>.json in [node] state_dir.",
+)
+@option(
     "--stage-root",
     type=WindowsDrive(),
     default=None,
@@ -100,6 +107,7 @@ def cli_repair(
     stage_only: bool,
     ip: IPv4Address | None,
     node: str | None,
+    receipt: Path | None,
     stage_root: DriveLetter | None,
     tpm_storage: str | None,
 ) -> None:
@@ -115,7 +123,7 @@ def cli_repair(
     settings = load_run_settings(ctx, cli_ctx)
     with lib_log_rich.runtime.bind(job_id="cli-repair", extra={"command": "repair", "vmid": vmid}):
         try:
-            check_node(settings)
+            check_node(settings, receipt)
             request = RepairRequest(
                 vmid=vmid,
                 snapshot_name=resolve_snapshot_name(settings.repair, snapshot_name),
@@ -135,7 +143,7 @@ def cli_repair(
             node_port,
             repair=settings.repair,
             guest=settings.guest,
-            receipts=cli_ctx.services.make_receipts(settings.node.state_dir),
+            receipts=cli_ctx.services.make_receipts(settings.node.state_dir, receipt),
             on_step=echo_step,
         )
         finish(ctx, result, command=RunCommand.REPAIR, vmid=vmid, as_json=as_json)

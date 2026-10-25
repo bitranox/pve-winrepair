@@ -113,9 +113,9 @@ class MakeNode(Protocol):
 
 
 class MakeReceipts(Protocol):
-    """The receipt store kept in the given ``[node] state_dir``."""
+    """The receipt store kept in the given ``[node] state_dir``, or the one ``--receipt`` file when one is given."""
 
-    def __call__(self, state_dir: Path, /) -> ReceiptStore: ...
+    def __call__(self, state_dir: Path, file: Path | None, /) -> ReceiptStore: ...
 
 
 class GuestPort(Protocol):

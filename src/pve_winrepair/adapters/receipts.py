@@ -1,4 +1,7 @@
-"""Repair receipts as files in the node's state directory, one per VM: ``<state_dir>/receipt-<vmid>.json``.
+"""Repair receipts as files in the state directory, one per VM: ``<state_dir>/receipt-<vmid>.json``.
+
+``repair --receipt FILE`` and ``apply --receipt FILE`` name one file instead, used for whichever VM
+the run is for; a receipt read from it is still refused when it names another VM.
 
 A receipt is written to a temporary file in the same directory and moved over the old one with
 ``os.replace``, so a reader sees the previous receipt or the new one, never a half-written file. The
@@ -32,15 +35,16 @@ def _cause(error: OSError | UnicodeDecodeError) -> str:
 
 
 class FileReceiptStore:
-    """The repair receipts of one node, as JSON files in ``state_dir``."""
+    """The repair receipts of one node, as JSON files in ``state_dir`` or in the one ``file`` given."""
 
-    def __init__(self, state_dir: Path) -> None:
-        """Keep receipts in ``state_dir`` (created 0700 on the first write when absent)."""
+    def __init__(self, state_dir: Path, file: Path | None = None) -> None:
+        """Keep receipts in ``state_dir`` (created 0700 on the first write when absent), or in ``file`` for every VM."""
         self._state_dir = state_dir
+        self._file = file
 
     def path(self, vmid: int) -> Path:
-        """Where the receipt of ``vmid`` is kept."""
-        return self._state_dir / f"receipt-{vmid}.json"
+        """Where the receipt of ``vmid`` is kept: ``file`` when one was given (``--receipt``)."""
+        return self._file if self._file is not None else self._state_dir / f"receipt-{vmid}.json"
 
     def write(self, receipt: RepairReceipt) -> Path:
         """Replace the receipt of ``receipt.vmid`` atomically; return its path.
@@ -98,12 +102,16 @@ class FileReceiptStore:
             raise ReceiptError(f"cannot remove the repair receipt {path}: {_cause(exc)}") from exc
 
     def _ensure_dir(self) -> None:
-        """Create the state directory 0700 when it is absent; an existing one keeps its mode."""
-        if self._state_dir.is_dir():
+        """Create the directory that holds the receipts 0700 when it is absent; an existing one keeps its mode.
+
+        That is the state directory, or the receipt file's own directory when a file was given.
+        """
+        directory = self._state_dir if self._file is None else self._file.parent
+        if directory.is_dir():
             return
         # Created 0700 so it is never wider, then set exactly: mkdir's mode passes through the umask.
-        self._state_dir.mkdir(mode=_DIR_MODE, parents=True)
-        self._state_dir.chmod(_DIR_MODE)
+        directory.mkdir(mode=_DIR_MODE, parents=True)
+        directory.chmod(_DIR_MODE)
 
     @staticmethod
     def _replace(target: Path, text: str) -> None:
