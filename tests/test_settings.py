@@ -387,6 +387,55 @@ def test_a_node_ssh_user_starting_with_a_dash_is_refused(config_factory: Callabl
     assert any(line.startswith("node.ssh_user: String should match pattern") for line in refused.value.lines)
 
 
+# --- ssh paths: known_hosts files, the node key -----------------------------------------------
+
+#: The refusal reason for a "%" in a path that travels through the jump to a guest.
+_PERCENT_REASON = "must not contain %: ssh expands it as a token, once more through the jump to a guest"
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(
+    ("section", "key", "value", "reason"),
+    [
+        ("node", "known_hosts_file", "", "node.known_hosts_file: must not be empty"),
+        (
+            "node",
+            "known_hosts_file",
+            "/a b/kh",
+            "node.known_hosts_file: must not contain whitespace: ssh splits the value into several files",
+        ),
+        (
+            "node",
+            "known_hosts_file",
+            "/kh%h",
+            f"node.known_hosts_file: {_PERCENT_REASON}",
+        ),
+        ("node", "ssh_key", '/k"ey', "node.ssh_key: must not contain a double quote"),
+        (
+            "ssh",
+            "known_hosts_file",
+            "/a b/kh",
+            "ssh.known_hosts_file: must not contain whitespace: ssh splits the value into several files",
+        ),
+        ("ssh", "known_hosts_file", "", "ssh.known_hosts_file: must not be empty"),
+    ],
+)
+def test_an_ssh_path_no_quoting_carries_is_refused_at_load(
+    config_factory: Callable[[dict[str, Any]], Config], section: str, key: str, value: str, reason: str
+) -> None:
+    assert _refusal(config_factory({section: {key: value}})) == reason
+
+
+@pytest.mark.os_agnostic
+def test_a_guest_known_hosts_file_keeps_ssh_tokens_and_a_node_key_may_hold_a_space(
+    config_factory: Callable[[dict[str, Any]], Config],
+) -> None:
+    settings = load_settings(
+        config_factory({"ssh": {"known_hosts_file": "~/.ssh/kh_%h"}, "node": {"ssh_key": "/home/a b/node.key"}})
+    )
+    assert (settings.ssh.known_hosts_file, settings.node.ssh_key) == ("~/.ssh/kh_%h", "/home/a b/node.key")
+
+
 # --- numbers: no booleans ----------------------------------------------------------------------
 
 

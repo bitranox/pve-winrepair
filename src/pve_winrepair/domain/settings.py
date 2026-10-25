@@ -18,6 +18,8 @@ from typing import Annotated, Final
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
 
+from pve_winrepair.domain.ssh_paths import jump_key_problem, known_hosts_problem
+
 #: A Windows account name as the guest's sshd takes it: no domain part, no spaces.
 _USER_PATTERN: Final[str] = r"^[A-Za-z0-9_.-]{1,64}$"
 #: A node host as ssh takes it: a DNS name or an IPv4 address. A letter or digit first, so ssh can never
@@ -58,8 +60,29 @@ def _refuse_a_boolean(value: object) -> object:
     return value
 
 
+def _unless(problem: str | None, value: str) -> str:
+    """``value`` unchanged when ``problem`` is None, else a ValueError carrying ``problem``.
+
+    The value is not repeated: the reason names the rule, the location names the key.
+
+    Example:
+        >>> _unless(None, "/kh")
+        '/kh'
+        >>> _unless("must not be empty", "")
+        Traceback (most recent call last):
+        ...
+        ValueError: must not be empty
+    """
+    if problem is not None:
+        raise ValueError(problem)
+    return value
+
+
 class SshSettings(BaseModel):
     """How the node reaches a guest over ssh.
+
+    ``known_hosts_file`` must not be empty or hold whitespace or ``"``, which ssh would misread; its ``%``
+    tokens stay ssh's, since the guest ssh is a direct argv (a per-guest ``known_hosts_%h`` is legitimate).
 
     Example:
         >>> SshSettings().user
@@ -73,8 +96,14 @@ class SshSettings(BaseModel):
     key: str = ""
     user: str = Field(default="Administrator", pattern=_USER_PATTERN)
     strict_host_key_checking: bool = True
-    # Kept as written: ssh expands a leading "~" itself, so the node passes the text unchanged.
+    # Kept as written: ssh expands a leading "~" itself, so the node passes the text unchanged. What
+    # ssh would misread is refused instead (ssh_paths): its option parser splits the value at whitespace.
     known_hosts_file: str = "~/.ssh/known_hosts"
+
+    @field_validator("known_hosts_file")
+    @classmethod
+    def _known_hosts_file_is_one_ssh_path(cls, value: str) -> str:
+        return _unless(known_hosts_problem(value, through_jump=False), value)
 
 
 def _subnet(value: object) -> IPv4Network | None:
@@ -154,7 +183,9 @@ class NodeSettings(BaseModel):
     ``host`` is the PVE node to drive over ssh, a DNS name or an IPv4 address; "" means this machine is the node.
     ``ssh_user`` is the account the tool logs in to the node as; it never starts with "-".
     ``ssh_key`` is the private key file this machine logs in to the node with; "" means not configured.
-    ``known_hosts_file`` is the known_hosts file the node's host key is checked against, passed to ssh as written.
+    It travels inside the ``ProxyCommand`` to a guest, so ``"`` and ``%`` are refused; a space is quoted.
+    ``known_hosts_file`` is the known_hosts file the node's host key is checked against, passed to ssh as written;
+    it must not be empty or hold whitespace, ``"`` or ``%`` (the jump would expand a ``%`` token twice).
 
     Example:
         >>> NodeSettings().state_dir.name
@@ -166,9 +197,11 @@ class NodeSettings(BaseModel):
     state_dir: Path = Path("/var/lib/pve-winrepair")
     host: str = Field(default="", pattern=NODE_HOST_PATTERN)
     ssh_user: str = Field(default="root", pattern=_NODE_USER_PATTERN)
-    # Kept as written, like [ssh] key: ssh reads the path itself on the machine running the tool.
+    # Kept as written, like [ssh] key: ssh reads the path itself on the machine running the tool. A
+    # '"' or '%' is refused: no quoting carries either through the ProxyCommand (see ssh_paths).
     ssh_key: str = ""
     # Passed as written, like [ssh] known_hosts_file: ssh expands a leading "~" on the machine running the tool.
+    # Refused: whitespace and '"' (ssh misreads them), and '%', which the jump to a guest expands once more.
     known_hosts_file: str = "~/.ssh/known_hosts"
 
     @field_validator("state_dir", mode="before")
@@ -183,6 +216,16 @@ class NodeSettings(BaseModel):
             # The value is not repeated: the reason names the rule, the location names the key.
             raise ValueError("must be an absolute path on the node (starting with /)")
         return value
+
+    @field_validator("ssh_key")
+    @classmethod
+    def _ssh_key_survives_the_jump(cls, value: str) -> str:
+        return _unless(jump_key_problem(value), value)
+
+    @field_validator("known_hosts_file")
+    @classmethod
+    def _known_hosts_file_survives_the_jump(cls, value: str) -> str:
+        return _unless(known_hosts_problem(value, through_jump=True), value)
 
 
 class Settings(BaseModel):

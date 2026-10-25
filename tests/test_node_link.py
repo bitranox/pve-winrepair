@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import os
 import shlex
 import subprocess  # nosec B404
 from typing import TYPE_CHECKING
 
+import pytest
 from guest_fakes import GUEST_IP, KEY, NODE_LINK, USER, FakeRunner, Reply
 
 from pve_winrepair.domain.node_link import NodeLink
@@ -47,18 +49,20 @@ def test_the_node_ssh_checks_the_node_against_the_configured_known_hosts() -> No
 
 
 def test_the_proxy_command_checks_the_node_against_the_same_file() -> None:
-    assert NODE_LINK.proxy_command().endswith("-o UserKnownHostsFile=/keys/known_hosts_node -W %h:%p root@pve1")
+    assert NODE_LINK.proxy_command(windows=False).endswith(
+        "-o UserKnownHostsFile=/keys/known_hosts_node -W %h:%p root@pve1"
+    )
 
 
 def test_the_proxy_command_reaches_the_guest_through_the_node_with_the_node_key() -> None:
-    words = shlex.split(NODE_LINK.proxy_command())
+    words = shlex.split(NODE_LINK.proxy_command(windows=False))
     assert words[:3] == ["ssh", "-i", "/keys/node.key"]
     assert words[-3:] == ["-W", "%h:%p", "root@pve1"]
 
 
 def test_a_node_key_path_with_a_space_stays_one_word_in_the_proxy_command() -> None:
     link = NodeLink(host="pve1", user="root", key="/home/a b/node.key", known_hosts="/keys/known_hosts_node")
-    assert shlex.split(link.proxy_command())[2] == "/home/a b/node.key"
+    assert shlex.split(link.proxy_command(windows=False))[2] == "/home/a b/node.key"
 
 
 def test_the_jumped_runner_adds_the_proxy_to_ssh_and_scp_only() -> None:
@@ -81,3 +85,47 @@ def test_the_jumped_runner_passes_anything_else_through_unchanged() -> None:
 
     NODE_LINK.jumped(inner)(["qm", "status", "100"], 30)
     assert seen == [["qm", "status", "100"]]
+
+
+#: A Windows node link: a spaced key path, and a known_hosts path with none (spaces there are refused).
+WIN = NodeLink(host="pve1", user="root", key=r"C:\Users\srv admin\keys\node.key", known_hosts=r"C:\Users\operator\kh")
+
+
+def test_on_windows_the_paths_are_double_quoted_exactly_as_measured() -> None:
+    assert WIN.proxy_command(windows=True) == (
+        r'ssh -i "C:\Users\srv admin\keys\node.key" -o BatchMode=yes -o PreferredAuthentications=publickey '
+        r"-o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=20 -o ServerAliveInterval=30 "
+        r'-o "UserKnownHostsFile=C:\Users\operator\kh" -W %h:%p root@pve1'
+    )
+
+
+def test_on_posix_the_command_is_shlex_joined() -> None:
+    assert NODE_LINK.proxy_command(windows=False) == (
+        "ssh -i /keys/node.key -o BatchMode=yes -o PreferredAuthentications=publickey -o IdentitiesOnly=yes "
+        "-o StrictHostKeyChecking=yes -o ConnectTimeout=20 -o ServerAliveInterval=30 "
+        "-o UserKnownHostsFile=/keys/known_hosts_node -W %h:%p root@pve1"
+    )
+
+
+@pytest.mark.parametrize(
+    ("key", "known_hosts", "reason"),
+    [
+        ("/k%h/node.key", "/kh", "must not contain %"),
+        ('C:\\a"b', "C:\\kh", "must not contain a double quote"),
+        ("/k", "/a b/kh", "must not contain whitespace"),
+        ("/k", "/kh%p", "must not contain %"),
+    ],
+)
+def test_a_link_refuses_a_path_no_quoting_carries(key: str, known_hosts: str, reason: str) -> None:
+    with pytest.raises(ValueError, match=reason):
+        NodeLink(host="pve1", user="root", key=key, known_hosts=known_hosts)
+
+
+def test_without_an_argument_the_running_platform_decides() -> None:
+    assert NODE_LINK.proxy_command() == NODE_LINK.proxy_command(windows=os.name == "nt")
+
+
+def test_the_jumped_runner_carries_the_platform_form() -> None:
+    runner = FakeRunner().on("hostname", Reply(0))
+    NODE_LINK.jumped(runner, windows=True)(["ssh", "-i", KEY, f"{USER}@{GUEST_IP}", "hostname"], 5.0)
+    assert runner.calls[0][1:3] == ["-o", f"ProxyCommand={NODE_LINK.proxy_command(windows=True)}"]

@@ -57,7 +57,9 @@ the guests, passed to ssh as written (ssh expands a leading `~` against the home
 runs it). Keep it a real file, never `/dev/null`: that turns every connection into a first
 connection, ssh then prints a "Permanently added" warning on every call, and with strict checking
 on, no guest could ever be reached. A separate file such as `~/.ssh/known_hosts_guests` keeps the
-guests' keys apart from the node's own.
+guests' keys apart from the node's own. An empty value, whitespace and `"` are refused at load:
+ssh's option parser splits the value at whitespace into several files. A `%` token such as `%h` is
+ssh's own and stays usable here (`~/.ssh/known_hosts_%h` keeps one file per guest).
 
 ### `[guest]`
 
@@ -128,13 +130,17 @@ run is refused before any call.
 
 **`ssh_key`** (default `""`): the private key file this machine logs in to the node with, passed to
 ssh as written (ssh expands a leading `~`). It is not `[ssh] key`, which is the key for the guests;
-the node connection never shares that key or user.
+the node connection never shares that key or user. The key also travels inside the `ProxyCommand`
+that reaches a guest through the node, so `"` and `%` are refused at load (no quoting carries them
+through that string); a space is fine.
 
 **`known_hosts_file`** (default `"~/.ssh/known_hosts"`): the known_hosts file the remote node's host
 key is checked against, passed to ssh as written (ssh expands a leading `~`). The check is strict:
 a node whose key is missing from the file, or has changed, is refused before any call, so add the
 node's key there first. It is not `[ssh] known_hosts_file`, which holds the guests' keys; the jump
-through the node to a guest checks the node against this file too.
+through the node to a guest checks the node against this file too. An empty value, whitespace, `"`
+and `%` are refused at load: ssh splits the value at whitespace, and expands a `%` token once more
+in the jump, where even `%%` does not give a literal percent.
 
 ---
 
