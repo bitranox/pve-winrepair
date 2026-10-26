@@ -381,6 +381,10 @@ class UpgradeHost(Protocol):
         """Return whether a path exists."""
         ...
 
+    def is_file(self, path: str) -> bool:
+        """Return whether a regular file is at ``path``; an error on the way reads as no file."""
+        ...
+
     def run_setup(self, argv: Sequence[str]) -> SetupRun:
         """Run setup.exe and wait for it AND every process it started; raises if it cannot start."""
         ...
@@ -505,6 +509,10 @@ class PwshpyHost:
     def test_path(self, path: str) -> bool:
         """See :meth:`UpgradeHost.test_path`."""
         return ps.test_path(path)
+
+    def is_file(self, path: str) -> bool:
+        """See :meth:`UpgradeHost.is_file`."""
+        return _is_file(path)
 
     def run_setup(self, argv: Sequence[str]) -> SetupRun:
         """See :meth:`UpgradeHost.run_setup`.
@@ -1493,7 +1501,7 @@ def _judge_directory(host: UpgradeHost, directory: str, *, create: bool) -> Dire
 
 def _tool_in_place(host: UpgradeHost, tool: str) -> tuple[bool, str | None, str | None]:
     """(present, sha256, problem) for a tool already at its content address."""
-    if not _is_file(tool):
+    if not host.is_file(tool):
         return False, None, None
     try:
         digest, mismatch = content_address(tool)

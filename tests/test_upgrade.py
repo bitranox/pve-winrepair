@@ -142,6 +142,8 @@ class FakeUpgradeHost:
     reparse: set[str] = field(default_factory=set[str])
     create_fails: bool = False
     walk_fails: bool = False
+    # Files the host reports at a fixed path that no fixture wrote (is_file answers yes for them).
+    reported_files: set[str] = field(default_factory=set[str])
 
     def system_root(self) -> str:
         return r"C:\Windows"
@@ -305,6 +307,11 @@ class FakeUpgradeHost:
         assert path == r"C:\$WINDOWS.~BT\NewOS"
         return self.newos
 
+    def is_file(self, path: str) -> bool:
+        # The ``host`` fixture writes the guest's files into the cwd under their Windows names, which
+        # only POSIX takes as a relative name; on Windows that name is this machine's own file.
+        return path in self.reported_files or (sys.platform != "win32" and Path(path).is_file())
+
     def run_setup(self, argv: Sequence[str]) -> upgrade.SetupRun:
         self.setup_argv = list(argv)
         if self.setup_fails:
@@ -366,17 +373,11 @@ def host(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FakeUpgradeHost:
 def fresh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FakeUpgradeHost:
     """A guest the driver has not touched yet: no C:\\winrepair, no stage root, no tool.
 
-    The directories are the fake's, but lock-dirs looks for a tool already at its fixed path on
-    the real file system: in the cwd on POSIX, the machine's own C:\\winrepair on Windows. A test
-    that gets that far carries :data:`READS_THE_REAL_TOOL_PATH`; the state log is under tmp_path.
+    The directories are the fake's, and so is the answer whether a tool is already at its fixed
+    path (``is_file``); the state log is under tmp_path.
     """
     monkeypatch.chdir(tmp_path)
     return FakeUpgradeHost(state_log=tmp_path / "upgrade-state.log")
-
-
-#: Marks a ``fresh`` test whose lock-dirs run reaches the tool check at the fixed C:\winrepair path,
-#: which on Windows reads the real machine rather than the test's cwd.
-READS_THE_REAL_TOOL_PATH = pytest.mark.os_posix
 
 
 @pytest.fixture
@@ -1416,7 +1417,6 @@ def _actions(envelope: dict[str, object]) -> list[tuple[object, object]]:
     return [(obj(d)["path"], obj(d)["action"]) for d in items(_data(envelope)["directories"])]
 
 
-@READS_THE_REAL_TOOL_PATH
 def test_lock_dirs_creates_and_locks_both_directories(fresh: FakeUpgradeHost) -> None:
     code, envelope = _lock_dirs(fresh, "--stage-root", r"D:\upgrade")
 
@@ -1427,7 +1427,6 @@ def test_lock_dirs_creates_and_locks_both_directories(fresh: FakeUpgradeHost) ->
     assert _actions(envelope) == [(r"C:\winrepair", "CREATED"), (r"D:\upgrade", "CREATED")]
 
 
-@READS_THE_REAL_TOOL_PATH
 def test_lock_dirs_without_a_stage_root_locks_only_the_tool_directory(fresh: FakeUpgradeHost) -> None:
     # The driver's push runs it from an admin-only copy before the tool goes into C:\winrepair,
     # when the stage root is not known yet.
@@ -1452,7 +1451,6 @@ def test_lock_dirs_leaves_an_exactly_locked_directory_and_its_content_alone(host
 # --no-create is apply's after-reboot report: it says a directory is gone instead of making it.
 
 
-@READS_THE_REAL_TOOL_PATH
 def test_lock_dirs_no_create_reports_an_absent_directory_and_creates_nothing(fresh: FakeUpgradeHost) -> None:
     code, envelope = _lock_dirs(fresh, "--no-create")
     assert code == 0
@@ -1596,6 +1594,17 @@ def test_lock_dirs_refuses_a_tool_already_there_that_others_can_write(fileless_h
     _lock_refused(fileless_host, envelope, f"lets {USERS_SID} write")
 
 
+def test_lock_dirs_asks_the_host_whether_a_tool_is_already_there(fresh: FakeUpgradeHost) -> None:
+    # A file the host reports that cannot then be hashed (gone, or unreadable) is refused, not skipped.
+    fresh.reported_files.add(TOOL)
+
+    code, envelope = _lock_dirs(fresh)
+
+    assert code == 1
+    _lock_refused(fresh, envelope, f"cannot check the tool already at {TOOL}")
+    assert _data(envelope)["tool_present"] is True
+
+
 def test_lock_dirs_refuses_a_directory_it_cannot_create(fresh: FakeUpgradeHost) -> None:
     fresh.create_fails = True
 
@@ -1666,7 +1675,6 @@ class _Win32LockHost(FakeUpgradeHost):
 LOCK_DESCRIPTOR_ACES = [((0, 0x3), FULL, Sid(SYSTEM_SID)), ((0, 0x3), FULL, Sid(ADMINS_SID))]
 
 
-@READS_THE_REAL_TOOL_PATH
 def test_lock_dirs_creates_each_directory_with_the_lock_already_in_place(fresh: FakeUpgradeHost) -> None:
     # A directory made first and locked afterwards is open to every local user in between, and a
     # handle opened then keeps its access after the lock. So each one comes into existence locked.
