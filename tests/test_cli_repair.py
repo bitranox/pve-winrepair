@@ -21,6 +21,7 @@ from guest_fakes import (
     DONE_OK,
     GONE,
     GUEST_IP,
+    GUEST_KNOWN,
     KEY,
     NEEDS_A_POSIX_STATE_DIR,
     NO_LOG,
@@ -735,9 +736,8 @@ def test_a_node_option_ssh_could_read_as_an_option_is_a_usage_error(tmp_path: Pa
 def test_repair_with_the_node_option_runs_every_qm_call_on_that_node(tmp_path: Path) -> None:
     config = cli_config(tmp_path)
     config["node"] = {**config["node"], "ssh_key": NODE_LINK.key, "known_hosts_file": NODE_LINK.known_hosts}
-    runner = agent_runner(FakePve(), **{"ssh-add": Reply(0, "256 k\n"), "sh": Reply(0)}).on(
-        "command", Reply(0, "/usr/sbin/qm\n", "")
-    )
+    node_side = {"ssh-add": Reply(0, "256 k\n"), "ssh-keygen": Reply(0, GUEST_KNOWN), "sh": Reply(0)}
+    runner = agent_runner(FakePve(), **node_side).on("command", Reply(0, "/usr/sbin/qm\n", ""))
     run = run_cli(["repair", "--vmid", "1", "--json", "--node", NODE_LINK.host], config, runner)
     assert (run.exit_code, json_envelope(run.stdout)["verdict"]) == (0, "STATE=DONE-OK")
     remote = [call for call in runner.calls if call[0] == "ssh" and call[-2] == NODE_LINK.target]
@@ -774,10 +774,12 @@ def _local_media_on_a_remote_node(tmp_path: Path) -> tuple[Path, dict[str, dict[
 
 
 def _node_runner() -> FakeRunner:
-    """A healthy agent guest behind :data:`NODE_LINK`, whose agent holds a key and whose ``sh`` calls succeed."""
-    return agent_runner(
-        FakePve(), command=Reply(0, "/usr/sbin/qm\n"), **{"ssh-add": Reply(0, "256 k\n"), "sh": Reply(0)}
-    )
+    """A healthy agent guest behind :data:`NODE_LINK`, whose agent holds a key and whose ``sh`` calls succeed.
+
+    This machine's known_hosts holds the guest's key (:data:`GUEST_KNOWN`), which the node-side copy hands over.
+    """
+    node_side = {"ssh-add": Reply(0, "256 k\n"), "ssh-keygen": Reply(0, GUEST_KNOWN), "sh": Reply(0)}
+    return agent_runner(FakePve(), command=Reply(0, "/usr/sbin/qm\n"), **node_side)
 
 
 @NEEDS_A_POSIX_STATE_DIR
@@ -793,7 +795,7 @@ def test_media_local_copies_this_machines_media_through_the_node(tmp_path: Path)
     copies = [c for c in runner.calls if route(c) == "scp" and str(local / "setup.exe") in c]
     assert len(copies) == 1 and copies[0][1:3] == ["-o", f"ProxyCommand={NODE_LINK.proxy_command()}"]
     # The local media never ask the node's agent or shell: no node-side check, no node-side copy.
-    assert [c for c in runner.calls if route(c) in ("sh", "ssh-add")] == []
+    assert [c for c in runner.calls if route(c) in ("sh", "ssh-add", "ssh-keygen")] == []
 
 
 @NEEDS_A_POSIX_STATE_DIR

@@ -97,6 +97,17 @@ other value, upper case included, is refused. With no `[node] host` the node is 
 the tool, so both name a directory on the same machine. `repair --media node|local` overrides it for
 one run.
 
+With a remote node, `"node"` has the node's own scp copy the media into the guest, logging in with
+the guest key from your ssh-agent (forwarded to the node). The node checks the guest strictly
+against the guest's host key as THIS machine holds it: right before the copy, the tool reads the
+guest's lines from `[ssh] known_hosts_file` with `ssh-keygen -F <guest ip>` (a leading `~` expanded
+as ssh would) and hands them to the node in a temporary file it removes afterwards, whatever
+`[ssh] strict_host_key_checking` says; the node's own known_hosts files are neither read nor
+written. The run has connected to the guest from here by then, so the line is normally there; when
+it is not, or `ssh-keygen` cannot read the file, the copy is refused, naming the file and the guest.
+`ssh-keygen` expands no `%` token, so with a remote node a `[ssh] known_hosts_file` such as
+`~/.ssh/known_hosts_%h` makes `"node"` refuse; `"local"` uses ssh's own expansion and works.
+
 **`local_media_dir`** (default `""`): this machine's copy of the installation media, laid out like
 `media_dir` (`setup.exe` and `sources/install.wim` at its top level). Required when `media_source`
 is `"local"`; empty means not configured.

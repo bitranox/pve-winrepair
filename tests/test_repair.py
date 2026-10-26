@@ -18,7 +18,9 @@ import pytest
 from guest_fakes import (
     ALIVE,
     GONE,
+    GUEST_HOST_KEY,
     GUEST_IP,
+    GUEST_KNOWN,
     IMAGE,
     INSTALL_DATE,
     LAN_IP,
@@ -918,12 +920,17 @@ def test_main_runs_the_whole_agent_path_to_done_ok(tmp_path: Path, link: NodeLin
 
 
 def test_a_remote_run_stages_the_nodes_media_on_the_node(tmp_path: Path) -> None:
-    runner = agent_runner(FakePve(), **{"ssh-add": Reply(0, "256 k\n"), "sh": Reply(0)})
+    node_side = {"ssh-add": Reply(0, "256 k\n"), "ssh-keygen": Reply(0, GUEST_KNOWN), "sh": Reply(0)}
+    runner = agent_runner(FakePve(), **node_side)
     result, _steps = _run(runner, _media(tmp_path), link=NODE_LINK, media=MediaChoice.NODE)
     assert (result.exit, result.verdict) == (RunExit.OK, "STATE=DONE-OK")
     node_calls = [shlex.split(c[-1])[0] for c in runner.calls if c[:2] == ["ssh", "-A"]]
     assert node_calls == ["sh", "sh"]  # the media check, then the node-side copy
     copy = [i for i, c in enumerate(runner.calls) if c[:2] == ["ssh", "-A"]][-1]
+    # The guest key the copy trusts is read here after the push connected to the guest, right before the copy.
+    pushes = [i for i, c in enumerate(runner.calls) if route(c) == "scp"]
+    assert route(runner.calls[copy - 1]) == "ssh-keygen" and pushes and pushes[0] < copy - 1
+    assert shlex.split(runner.calls[copy][-1])[6] == GUEST_HOST_KEY
     assert runner.timeouts[copy] == 5400  # [repair] stage_timeout_minutes, as for local media
     # Straight to the node: a ProxyCommand through the node itself would never connect.
     assert not any(w.startswith("ProxyCommand=") for w in runner.calls[copy])

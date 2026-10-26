@@ -6,7 +6,10 @@ order, so a run copies exactly what :meth:`pathlib.Path.iterdir` lists.
 
 :class:`NodeMedia` is a directory on a remote node: the node's own scp copies it into the guest on the
 node's network, so the media never cross the link from this machine. The node logs in to the guest
-with the operator's key through the forwarded ssh-agent (``ssh -A``), so that key is never stored there.
+with the operator's key through the forwarded ssh-agent (``ssh -A``), so that key is never stored there,
+and checks the guest against the host key THIS machine already checked: the guest's lines from
+``[ssh] known_hosts_file`` travel with the copy into a temporary file on the node, so the node's own
+known_hosts files are neither read nor written.
 """
 
 from __future__ import annotations
@@ -14,11 +17,10 @@ from __future__ import annotations
 # The node-side copy catches the runner's own timeout and failure to start, as subprocess.run raises them.
 import subprocess  # nosec B404
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from pve_winrepair.application.ports import GuestPort, MediaSource
     from pve_winrepair.domain.envelope import Runner
     from pve_winrepair.domain.node_link import NodeLink
@@ -28,10 +30,25 @@ __all__ = ["LocalMedia", "NodeMedia"]
 
 #: The node-side check, run as ``sh -c <it> sh <dir>``: 10 = no forwarded agent, 11 = no directory, 12 = empty.
 _CHECK = 'test -n "$SSH_AUTH_SOCK" || exit 10; test -d "$1" || exit 11; test -n "$(ls -A -- "$1")" || exit 12'
-#: The node-side copy, run as ``sh -c <it> sh <dir> <target> <scp options...>``: every entry by glob,
-#: from inside the dir.
-_COPY = 'dir=$1; target=$2; shift 2; cd -- "$dir" && exec scp -q -r "$@" -- * "$target"'
+#: The node-side copy, run as ``sh -c <it> sh <dir> <target> <guest host keys> <scp options...>``: every
+#: entry by glob, from inside the dir. The host-key lines go to a private temporary file (umask 077),
+#: the only known_hosts scp consults (GlobalKnownHostsFile=/dev/null), always strictly: they were checked
+#: on this machine. No exec: the EXIT trap removes the file once scp is done, and a signal exits through
+#: it as well; the script's status is scp's.
+_COPY = (
+    "dir=$1; target=$2; keys=$3; shift 3; umask 077; known=$(mktemp) || exit 1; "
+    'trap \'rm -f -- "$known"\' EXIT; trap "exit 129" HUP; trap "exit 130" INT; trap "exit 143" TERM; '
+    'printf "%s\\n" "$keys" > "$known" || exit 1; cd -- "$dir" || exit 1; '
+    'scp -q -r -o "UserKnownHostsFile=$known" -o GlobalKnownHostsFile=/dev/null -o StrictHostKeyChecking=yes '
+    '"$@" -- * "$target"'
+)
+#: The node scp's options after the trust options :data:`_COPY` sets itself.
+_COPY_OPTIONS = (
+    "-o", "BatchMode=yes", "-o", "PreferredAuthentications=publickey",
+    "-o", "ConnectTimeout=20", "-o", "ServerAliveInterval=30",
+)  # fmt: skip
 _AGENT_TIMEOUT = 10
+_KEYGEN_TIMEOUT = 10
 _CHECK_TIMEOUT = 30
 #: ``ssh-add -l``'s refusals by exit code (man ssh-add: 1 = the agent holds no identity, 2 = no agent).
 _AGENT_REASONS = {
@@ -69,8 +86,10 @@ class NodeMedia:
     """The media in a directory on a remote node, copied node -> guest on the node's own network.
 
     The node's scp logs in to the guest with the operator's key through the forwarded agent, so it
-    must not carry ``IdentitiesOnly=yes`` (no identity file is configured on the node) and checks the
-    guest against the node's own known_hosts: ``[ssh] known_hosts_file`` names a file on THIS machine.
+    must not carry ``IdentitiesOnly=yes`` (no identity file is configured on the node). It checks the
+    guest against the lines ``ssh-keygen -F`` finds for it in ``[ssh] known_hosts_file`` on THIS machine,
+    where :meth:`GuestPort.push_tool` has connected to the guest before the media are staged; without
+    such a line the copy is refused rather than trusting anything the node holds.
     """
 
     directory: str
@@ -106,20 +125,44 @@ class NodeMedia:
         return f"cannot check the media on node {self.link.target}: {lines[-1] if lines else f'exit {node.returncode}'}"
 
     def copy_into(self, guest: GuestPort, dest: str, *, timeout: float) -> subprocess.CompletedProcess[str]:
-        """The node scp's every entry into the guest directory ``dest``; a timeout comes back as a failed process."""
-        checking = "yes" if self.ssh.strict_host_key_checking else "no"
-        options = [
-            "-o", "BatchMode=yes", "-o", "PreferredAuthentications=publickey",
-            "-o", f"StrictHostKeyChecking={checking}", "-o", "ConnectTimeout=20", "-o", "ServerAliveInterval=30",
-        ]  # fmt: skip
+        """The node scp's every entry into the guest directory ``dest``; a timeout comes back as a failed process.
+
+        Refused (a failed process, the node never called) when this machine holds no host key for the guest.
+        """
+        known = self._guest_host_keys(guest.ip)
+        if isinstance(known, str):
+            return subprocess.CompletedProcess(["ssh-keygen"], 255, "", known)
         target = f"{self.ssh.user}@{guest.ip}:{dest}"
-        argv = self.link.ssh_argv(["sh", "-c", _COPY, "sh", self.directory, target, *options], forward_agent=True)
+        remote = ["sh", "-c", _COPY, "sh", self.directory, target, "\n".join(known), *_COPY_OPTIONS]
+        argv = self.link.ssh_argv(remote, forward_agent=True)
         try:
             return self.runner(argv, timeout)
         except subprocess.TimeoutExpired:
             return subprocess.CompletedProcess(argv, 255, "", f"media transfer: timed out after {timeout:g} s")
         except OSError as exc:
             return subprocess.CompletedProcess(argv, 255, "", f"media transfer: could not run ssh: {exc}")
+
+    def _guest_host_keys(self, ip: str) -> list[str] | str:
+        """The guest's lines in this machine's ``[ssh] known_hosts_file``, or why there are none to hand over."""
+        # ssh expands a leading "~" itself, ssh-keygen -f does not: expanded here the way ssh would. Any
+        # other path is passed as written, never normalised, so the message names the configured file.
+        configured = self.ssh.known_hosts_file
+        file = str(Path(configured).expanduser()) if configured.startswith("~") else configured
+        found = self._run(["ssh-keygen", "-F", ip, "-f", file], _KEYGEN_TIMEOUT)
+        if isinstance(found, str):
+            return f"cannot read the host key of guest {ip} from {file}: {found}"
+        # ssh-keygen -F exits 1 when no line matches, and prints a "# Host ... found" comment before each line.
+        lines = [line for line in found.stdout.splitlines() if line.strip() and not line.startswith("#")]
+        if found.returncode == 0 and lines:
+            return lines
+        if found.returncode in (0, 1):
+            return (
+                f"no host key for guest {ip} in {file}: --media node trusts only the guest key this machine "
+                "checked; connect to the guest once from here (or run --media local)"
+            )
+        stderr = found.stderr.strip().splitlines()
+        cause = stderr[-1] if stderr else f"ssh-keygen exit {found.returncode}"
+        return f"cannot read the host key of guest {ip} from {file}: {cause}"
 
     def _run(self, argv: list[str], timeout: float) -> subprocess.CompletedProcess[str] | str:
         """The finished process, or why it did not finish (a timeout, a command that could not start)."""

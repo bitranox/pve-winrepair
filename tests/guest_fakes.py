@@ -91,6 +91,11 @@ SSH = SshSettings(key=KEY, user=USER)
 #: :func:`route` tells a node call from a guest call by that token.
 NODE_LINK = NodeLink(host="pve1", user="root", key="/keys/node.key", known_hosts="/keys/known_hosts_node")
 GUEST_IP = "192.0.2.10"
+#: The guest's line in this machine's ``[ssh] known_hosts_file``, as ``ssh-keygen -F`` prints it: the node-side
+#: media copy trusts exactly this key. Its spaces must survive the quoting to the node.
+GUEST_HOST_KEY = f"{GUEST_IP} ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeGuestHostKeyForTestsOnly0000000000000"
+#: What ``ssh-keygen -F <GUEST_IP> -f <file>`` prints when the file holds that line.
+GUEST_KNOWN = f"# Host {GUEST_IP} found: line 1 \n{GUEST_HOST_KEY}\n"
 LAN_IP = "192.0.2.50"
 # What would stop, restart or reconfigure the VM, or take a snapshot of it.
 MUTATING_QM = frozenset({"shutdown", "stop", "start", "set", "snapshot", "rollback", "reboot"})
@@ -180,14 +185,15 @@ def route(cmd: Sequence[str]) -> str:
 
     A call to a remote node is answered under the first word of the command it runs there
     (``qm``, ``command`` for the preflight's ``command -v qm``, ``sh`` for the node-side media check
-    and copy); ``ssh-add`` is the local agent query that precedes them.
+    and copy); ``ssh-add`` and ``ssh-keygen`` are the local agent and known_hosts queries that precede them.
     """
     if cmd[0] == "ssh" and cmd[-2].startswith(f"{NODE_LINK.user}@"):
         # The last word is the quoted command (NodeLink.ssh_argv); the node runs no guest tool.
         return shlex.split(cmd[-1])[0]
-    if cmd[0] == "ssh-add":
-        # The node-side media check asks this machine's agent first (NodeMedia.check).
-        return "ssh-add"
+    if cmd[0] in ("ssh-add", "ssh-keygen"):
+        # The node-side media check asks this machine's agent first (NodeMedia.check); the node-side copy
+        # reads the guest's host key from this machine's known_hosts first (NodeMedia.copy_into).
+        return cmd[0]
     if cmd[0] in ("qm", "scp"):
         return cmd[0]
     at = next(i for i, token in enumerate(cmd) if token.startswith(f"{USER}@"))
