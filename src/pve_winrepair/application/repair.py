@@ -794,14 +794,15 @@ def _late_marker(guest: GuestPort, rep: Report, sleep: Callable[[float], None]) 
         except READ_FAILURES:
             continue
         if marker is not None:
-            rep.add(
+            done = marker is RunVerdict.DONE_OK
+            (rep.add if done else rep.add_held_end)(
                 StepName.POLL,
-                ok=marker is RunVerdict.DONE_OK,
+                ok=done,
                 verdict=marker.value,
                 note=f"verdict read {(attempt + 1) * 20}s after the worker exited",
             )
             return marker
-    rep.add(
+    rep.add_held_end(
         StepName.POLL,
         ok=False,
         verdict=RunVerdict.WORKER_GONE.value,
@@ -831,7 +832,8 @@ def poll(
             marker, read_failed = None, True
             _log.info("marker read failed (%s), not treating as absent", exc)
         if marker is not None:
-            rep.add(StepName.POLL, ok=marker is RunVerdict.DONE_OK, verdict=marker.value)
+            done = marker is RunVerdict.DONE_OK
+            (rep.add if done else rep.add_held_end)(StepName.POLL, ok=done, verdict=marker.value)
             return marker
         # Progress is logged for the operator only. It is deliberately NOT a completion test:
         # a percentage that stops moving reads identically for finished and for aborted.
@@ -843,7 +845,7 @@ def poll(
         if alive is False:
             return _late_marker(guest, rep, sleep)
         sleep(300)
-    rep.add(
+    rep.add_held_end(
         StepName.POLL, ok=False, verdict=RunVerdict.TIMEOUT.value, note=f"no verdict within {hours} h - investigate"
     )
     return RunVerdict.TIMEOUT
@@ -973,7 +975,7 @@ def repair_sequence(
     # the earlier pass survived it.
     quiesce_windows_update(target, rep)
     if request.stage_only:
-        rep.add(
+        rep.add_held_end(
             StepName.STAGED,
             ok=True,
             root=drive.stage_root,

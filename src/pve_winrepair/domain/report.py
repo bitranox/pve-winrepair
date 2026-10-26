@@ -224,9 +224,10 @@ class Report:
 
         Args:
             vmid: The guest the run is about.
-            on_step: Called with each step as it is recorded, and again with the last step when
-                :meth:`ended_held` replaces it. Steps are frozen, so what the caller kept still
-                shows the step as it was when it was emitted.
+            on_step: Called with each step as it is recorded, and again with the last step only
+                when :meth:`ended_held` has to flag a step not recorded by :meth:`add_held_end`.
+                Steps are frozen, so what the caller kept still shows the step as it was when it
+                was emitted.
             held_at_start: Windows Update was already held when this run began (by an earlier run).
         """
         self.vmid = vmid
@@ -236,7 +237,18 @@ class Report:
 
     def add(self, step: StepName, *, ok: bool, **fields: StepValue) -> None:
         """Record a step, its fields in the order given, and hand it to ``on_step``."""
+        self._emit(Step.record(step, ok=ok, fields=fields))
+
+    def add_held_end(self, step: StepName, *, ok: bool, **fields: StepValue) -> None:
+        """Record the last step of a run whose verdict nobody applies (STAGED, a failed poll).
+
+        When Windows Update is held the step is flagged with the hold before it is handed to
+        ``on_step``, so the operator reads it once, complete.
+        """
         recorded = Step.record(step, ok=ok, fields=fields)
+        self._emit(recorded.held(WU_HELD_HINT) if self.wu_held else recorded)
+
+    def _emit(self, recorded: Step) -> None:
         self.steps.append(recorded)
         self._on_step(recorded)
 
@@ -259,10 +271,12 @@ class Report:
         """Flag the hold on the last step of a run that ended without a verdict worth applying.
 
         The poll's DONE-FAIL, WORKER_GONE and TIMEOUT are answers, not exceptions, so
-        :meth:`failure` never sees them; they leave Windows Update held all the same. The updated
-        step is handed to ``on_step`` again.
+        :meth:`failure` never sees them; they leave Windows Update held all the same. A last step
+        recorded by :meth:`add_held_end` already carries the hold and is left as it is; any other
+        is flagged here and handed to ``on_step`` again, so a path that recorded its last step with
+        :meth:`add` still shows the hold.
         """
-        if not self.wu_held or not self.steps:
+        if not self.wu_held or not self.steps or self.steps[-1].wu_held:
             return
         self.steps[-1] = self.steps[-1].held(WU_HELD_HINT)
         # The step was emitted before the hold was known; emit it again so the operator sees it.

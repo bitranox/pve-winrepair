@@ -105,6 +105,10 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 - A `lock-dirs` refusal prints an ACE's access mask as the unsigned value Windows stores
   (`mask 0xe0010000`); before, a mask holding a generic right read negative (`mask -0x1fff0000`).
   Which ACEs are refused is unchanged.
+- A `repair` that ends with Windows Update held and nothing to apply (`--stage-only`, or a poll
+  ending `STATE=DONE-FAIL`, `WORKER_GONE` or `TIMEOUT`) prints its last step once, with the hold
+  note. Before, and in 1.0.0, it printed that step twice on stderr, the second time with the note.
+  The `--json` steps are unchanged.
 
 
 ## [1.0.0] 2026-10-23 22:06:16

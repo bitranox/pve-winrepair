@@ -151,6 +151,27 @@ def test_a_step_keeps_the_order_its_keys_were_recorded_in_and_a_held_step_append
     assert rep.steps[2].note == f"no verdict - {WU_HELD_HINT}"
 
 
+def test_a_held_end_is_emitted_once_flagged_and_a_plain_last_step_is_flagged_and_emitted_again() -> None:
+    recorded: list[Step] = []
+    rep = Report(vmid=1, on_step=recorded.append, held_at_start=True)
+    rep.add_held_end(StepName.STAGED, ok=True, root="D:\\upgrade", note="setup not launched")
+    rep.ended_held()
+    assert recorded == rep.steps
+    assert list(rep.steps[0].model_dump()) == ["step", "ok", "root", "note", "wu_held"]
+    assert rep.steps[0].note == f"setup not launched - {WU_HELD_HINT}"
+    # The safety net: a last step recorded with add() still gets the hold, at the cost of a second line.
+    rep.add(StepName.POLL, ok=False, verdict=RunVerdict.TIMEOUT)
+    rep.ended_held()
+    assert [s.step for s in recorded] == [StepName.STAGED, StepName.POLL, StepName.POLL]
+    assert (recorded[1].wu_held, recorded[2].wu_held) == (None, True)
+
+
+def test_a_held_end_of_a_run_that_holds_nothing_is_recorded_as_given() -> None:
+    rep = Report(vmid=1)
+    rep.add_held_end(StepName.POLL, ok=False, verdict=RunVerdict.TIMEOUT)
+    assert _wire(rep.steps) == [{"step": "poll", "ok": False, "verdict": "TIMEOUT"}]
+
+
 def test_a_failure_step_carries_message_hold_and_guest_traceback_in_that_order() -> None:
     rep = Report(vmid=1, held_at_start=True)
     crash = InternalErrorAnswer(
@@ -1032,12 +1053,25 @@ def test_main_failed_poll_after_the_wu_hold_says_wu_is_still_held(
     assert "restore-wu" in str(last["note"])
 
 
-def test_on_step_sees_the_hold_flagged_on_the_failed_poll_it_already_received(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("state", "hours", "verdict"),
+    [
+        ([NO_LOG, NO_LOG, DONE_FAIL], 6.0, "STATE=DONE-FAIL"),
+        # The poll's first read finds no verdict and no SetupHost; it appears during the grace.
+        ([NO_LOG, NO_LOG, NO_LOG, DONE_FAIL], 6.0, "STATE=DONE-FAIL"),
+        ([NO_LOG], 6.0, "WORKER_GONE"),
+        ([NO_LOG], 0.0, "TIMEOUT"),
+    ],
+    ids=["done-fail", "late-done-fail", "worker-gone", "timeout"],
+)
+def test_on_step_receives_a_failed_poll_once_already_flagged_with_the_hold(
+    tmp_path: Path, state: list[Answer], hours: float, verdict: str
+) -> None:
     runner = agent_runner(FakePve())
-    runner.replies["state"] = [NO_LOG, NO_LOG, DONE_FAIL]
+    runner.replies["state"] = list(state)
     recorded: list[Step] = []
     result = run_repair(
-        RepairRequest(vmid=1, snapshot_name="pre_kb_test"),
+        RepairRequest(vmid=1, snapshot_name="pre_kb_test", hours=hours),
         make_node(runner, FakeClock()),
         repair=_repair_settings(_media(tmp_path)),
         guest=GUEST,
@@ -1045,12 +1079,10 @@ def test_on_step_sees_the_hold_flagged_on_the_failed_poll_it_already_received(tm
         on_step=recorded.append,
     )
     polls = [step for step in recorded if step.step is StepName.POLL]
-    assert len(polls) == 2
-    assert polls[0].wu_held is None
-    assert recorded[-1] is polls[1]
-    assert (polls[1].wu_held, polls[1].detail["verdict"]) == (True, "STATE=DONE-FAIL")
-    assert "restore-wu" in str(polls[1].note)
-    assert [step.step for step in recorded[:-1]] == [step.step for step in result.steps]
+    assert len(polls) == 1
+    assert (polls[0].wu_held, polls[0].detail["verdict"]) == (True, verdict)
+    assert "restore-wu" in str(polls[0].note)
+    assert recorded == list(result.steps)
 
 
 def test_main_done_ok_does_not_flag_the_hold_as_a_leftover(tmp_path: Path) -> None:
@@ -1323,10 +1355,8 @@ def test_a_stage_only_repair_ends_held_on_a_staged_step(tmp_path: Path) -> None:
     last = _wire(result.steps)[-1]
     assert (last["step"], last["ok"], last["wu_held"], last["root"]) == ("staged", True, True, "D:\\upgrade")
     assert str(last["note"]).endswith(f" - {WU_HELD_HINT}")
-    # Emitted once when recorded and once more with the hold flagged, as a failed poll is.
-    assert [s.step for s in recorded[-2:]] == [StepName.STAGED, StepName.STAGED]
-    assert recorded[-2].wu_held is None
-    assert recorded[-1] == result.steps[-1]
+    # Emitted once, already flagged: the run knows it holds Windows Update when it records the step.
+    assert recorded == list(result.steps)
 
 
 def test_a_stage_only_repair_leaves_no_receipt(tmp_path: Path) -> None:
