@@ -223,6 +223,18 @@ def test_apply_with_a_node_option_ssh_could_read_as_an_option_is_a_usage_error(t
 
 
 @NEEDS_A_POSIX_STATE_DIR
+def test_apply_with_an_empty_node_option_runs_on_this_machine_over_the_node_host_setting(tmp_path: Path) -> None:
+    config = _with_receipt(tmp_path)
+    config["node"] = {**config["node"], "host": NODE_LINK.host, "ssh_key": NODE_LINK.key}
+    runner = _runner()
+    run = run_cli([*APPLY, "--json", "--node", ""], config, runner)
+    assert (run.exit_code, json_envelope(run.stdout)["verdict"]) == (0, "VERIFIED")
+    # This machine is the node: plain qm, and no ssh to the [node] host.
+    assert any(call[0] == "qm" for call in runner.calls)
+    assert not any(NODE_LINK.target in call for call in runner.calls)
+
+
+@NEEDS_A_POSIX_STATE_DIR
 def test_apply_with_the_node_option_runs_every_qm_call_on_that_node(tmp_path: Path) -> None:
     config = _with_receipt(tmp_path)
     config["node"] = {**config["node"], "ssh_key": NODE_LINK.key, "known_hosts_file": NODE_LINK.known_hosts}

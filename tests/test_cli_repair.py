@@ -670,6 +670,31 @@ def test_the_node_option_names_the_node_the_run_drives(tmp_path: Path) -> None:
     assert runner.calls == [NODE_LINK.ssh_argv(["command", "-v", "qm"])]
 
 
+@NEEDS_A_POSIX_STATE_DIR
+def test_an_empty_node_option_runs_on_this_machine_over_the_node_host_setting(tmp_path: Path) -> None:
+    config = cli_config(tmp_path)
+    config["node"] = {**config["node"], "host": NODE_LINK.host, "ssh_key": NODE_LINK.key}
+    runner = agent_runner(FakePve())
+    run = run_cli(["repair", "--vmid", "1", "--json", "--node", ""], config, runner)
+    assert (run.exit_code, json_envelope(run.stdout)["verdict"]) == (0, "STATE=DONE-OK")
+    # This machine is the node: plain qm, and no ssh to the [node] host.
+    assert any(call[0] == "qm" for call in runner.calls)
+    assert not any(NODE_LINK.target in call for call in runner.calls)
+
+
+def test_an_empty_node_option_overrides_the_setting_to_no_link() -> None:
+    assert resolve_link(Settings(node=NodeSettings(host="pve1", ssh_key="/k")), "") is None
+
+
+@pytest.mark.parametrize("value", ["-oX", "a b", "root@pve1", " "])
+def test_a_non_empty_node_option_that_is_no_host_is_a_usage_error(tmp_path: Path, value: str) -> None:
+    runner = FakeRunner()
+    run = run_cli(["repair", "--vmid", "1", f"--node={value}"], cli_config(tmp_path), runner)
+    assert run.exit_code == 2
+    assert "Invalid value for '--node'" in run.stderr
+    assert runner.calls == []
+
+
 def test_no_node_host_anywhere_means_this_machine() -> None:
     assert resolve_link(Settings(), None) is None
 

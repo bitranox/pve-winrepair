@@ -81,9 +81,10 @@ class NodeHost(click.ParamType[str, str]):
     def convert(self, value: str, param: click.Parameter | None, ctx: click.Context | None) -> str:
         """The value unchanged, refused unless ssh can only read it as a host.
 
-        The empty string ``[node] host`` allows (no remote node) is refused: an option given names a node.
+        The empty string passes, as ``[node] host`` allows it (the shared pattern): ``--node ""`` means this
+        machine, also over a ``[node] host`` that names a node.
         """
-        if not value or not _NODE_HOST.fullmatch(value):
+        if not _NODE_HOST.fullmatch(value):
             self.fail(f"{value!r} is not a host name or IPv4 address.", param, ctx)
         return value
 

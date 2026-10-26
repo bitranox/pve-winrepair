@@ -147,8 +147,8 @@ otherwise.
 **`host`** (default `""`): the PVE node whose `qm` the tool drives over ssh. A host name or an IPv4
 address: a letter or digit first, and no space, `;` or `@`, so ssh can never read it as an option, a
 second word or a user. Empty means the machine running the tool is the node. `repair --node HOST`
-and `apply --node HOST` override it for one run; a node named either way needs `ssh_key`, or the
-run is refused before any call.
+and `apply --node HOST` override it for one run, and `--node ""` runs on this machine although `host`
+names a node; a node named either way needs `ssh_key`, or the run is refused before any call.
 
 **`ssh_user`** (default `"root"`): the account this machine logs in as on the node. Letters, digits,
 `_`, `.` and `-`, 1 to 64 characters, never starting with `-`.

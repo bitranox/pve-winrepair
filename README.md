@@ -183,7 +183,7 @@ SECTION.KEY=VALUE` (repeatable), `--env-file PATH`, `--traceback` / `--no-traceb
 | `--hours H`         | `6.0`                    | How long to poll for the verdict; a finite number above 0                                           |
 | `--stage-only`      | off                      | Stage the media and hold Windows Update, but neither gate the WIM nor launch setup (verdict STAGED) |
 | `--ip IP`           | from the agent           | The guest's IPv4 address, for a guest without the QEMU agent; implies the powered-off snapshot      |
-| `--node HOST`       | `[node] host`            | The PVE node to drive over ssh, the guests reached through it; with neither, this machine           |
+| `--node HOST`       | `[node] host`            | The PVE node to drive over ssh, guests reached through it; this machine with neither or `--node ""` |
 | `--receipt FILE`    | `[node] state_dir`       | The receipt file on this machine, made absolute in the current directory, instead of the per-VM one |
 | `--media M`         | `[repair] media_source`  | `node`: `[repair] media_dir` on the node; `local`: `[repair] local_media_dir` on this machine       |
 | `--stage-root X:`   | measured                 | The drive to stage on; by default a non-system fixed drive with room, else `C:`                     |
