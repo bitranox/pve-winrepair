@@ -8,6 +8,11 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ### Changed
 
+- Requires `lib_log_rich>=7.0.1` (was 6.5.7). The `[lib_log_rich]` settings are checked when the
+  configuration loads: a `console_theme` other than `classic`, `dark`, `neon` or `pastel`, or an
+  unknown console stream, format preset, Graylog protocol or queue policy, now stops the tool with
+  a configuration error (exit 78). Before, an unknown theme was accepted and the console printed
+  without colours. The shipped defaults are all valid.
 - The guest tool runs on `pwshpy==1.8.0` (was 1.6.0). `launch` registers its SYSTEM task through
   pwshpy's `register_scheduled_task` with task settings (no trigger, start and keep running on
   battery, 72 h limit, a second start ignored, hard terminate and start on demand allowed)

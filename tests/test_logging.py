@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import lib_log_rich.runtime
 import pytest
+from lib_log_rich.domain import ConsoleTheme
 from pydantic import ValidationError
 
 from pve_winrepair import __init__conf__
@@ -17,10 +18,17 @@ from pve_winrepair.adapters.logging.setup import LoggingConfigModel
 @pytest.mark.os_agnostic
 def test_the_section_validates_into_lib_log_rich_s_own_runtime_config() -> None:
     """The section is validated once, into the model lib_log_rich.init() takes."""
-    parsed = LoggingConfigModel.model_validate({"service": "test", "environment": "dev", "console_theme": "light"})
+    parsed = LoggingConfigModel.model_validate({"service": "test", "environment": "dev", "console_theme": "neon"})
 
     assert isinstance(parsed, lib_log_rich.runtime.RuntimeConfig)
-    assert (parsed.service, parsed.environment, parsed.console_theme) == ("test", "dev", "light")
+    assert (parsed.service, parsed.environment, parsed.console_theme) == ("test", "dev", ConsoleTheme.NEON)
+
+
+@pytest.mark.os_agnostic
+def test_a_console_theme_lib_log_rich_does_not_have_is_refused() -> None:
+    """An unknown theme fails validation instead of silently rendering without styles."""
+    with pytest.raises(ValidationError, match="console_theme"):
+        LoggingConfigModel.model_validate({"console_theme": "light"})
 
 
 @pytest.mark.os_agnostic

@@ -137,7 +137,7 @@ console_format_template = ""
 # Purpose: Rich color palette for console output
 # Type: string
 # Default: "dark"
-# Values: "classic", "dark", "neon", "pastel", or other Rich theme names
+# Values: "classic", "dark", "neon", "pastel" (any other name refuses the configuration)
 # Environment Variable: PVE_WINREPAIR___LIB_LOG_RICH__CONSOLE_THEME=dark
 # .env: LIB_LOG_RICH__CONSOLE_THEME=dark
 console_theme = "dark"

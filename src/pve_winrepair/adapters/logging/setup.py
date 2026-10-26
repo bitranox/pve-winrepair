@@ -60,7 +60,7 @@ class LoggingConfigModel(lib_log_rich.runtime.RuntimeConfig):
         ('myapp', 'staging')
 
         >>> default = LoggingConfigModel.model_validate({"service": "", "console_theme": None})
-        >>> default.service == __init__conf__.name, default.environment, default.console_theme
+        >>> default.service == __init__conf__.name, default.environment, default.console_theme.value
         (True, 'prod', 'dark')
     """
 
