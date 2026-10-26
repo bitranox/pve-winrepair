@@ -63,6 +63,8 @@ NODE_SCP_OPTIONS = [
 NODE_TRUST = '-o "UserKnownHostsFile=$known" -o GlobalKnownHostsFile=/dev/null -o StrictHostKeyChecking=yes'
 #: How it runs scp with ``[ssh] strict_host_key_checking = false``: no check, and no known_hosts read or written.
 NODE_NO_CHECK = "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o GlobalKnownHostsFile=/dev/null"
+#: The option every node scp gets first, in both modes: no KnownHostsCommand from the node's ssh config adds keys.
+NO_KNOWN_HOSTS_COMMAND = ["-o", "KnownHostsCommand=none"]
 #: A line for the guest that no longer matches it (rebuilt at the same address).
 STALE_KNOWN = f"# Host {GUEST_IP} found: line 1 \n{GUEST_IP} ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIStaleKey\n"
 
@@ -257,9 +259,9 @@ def test_the_node_script_hands_scp_the_guest_key_in_a_private_temp_file_it_remov
     assert seen["content"] == f"{GUEST_HOST_KEY}\n"
     assert int(str(seen["mode"])) & (stat.S_IRWXG | stat.S_IRWXO) == 0
     assert seen["argv"] == [
-        "-q", "-r", "-o", f"UserKnownHostsFile={known}", "-o", "GlobalKnownHostsFile=/dev/null",
-        "-o", "StrictHostKeyChecking=yes", *NODE_SCP_OPTIONS, "--", "setup.exe", "sources",
-        f"{USER}@{GUEST_IP}:D:\\upgrade\\",
+        "-q", "-r", *NO_KNOWN_HOSTS_COMMAND, "-o", f"UserKnownHostsFile={known}",
+        "-o", "GlobalKnownHostsFile=/dev/null", "-o", "StrictHostKeyChecking=yes", *NODE_SCP_OPTIONS,
+        "--", "setup.exe", "sources", f"{USER}@{GUEST_IP}:D:\\upgrade\\",
     ]  # fmt: skip
     assert Path(str(seen["cwd"])).resolve() == media.resolve()
     assert Path(known).parent.resolve() == scratch.resolve()
@@ -274,7 +276,7 @@ def test_without_strict_checking_the_node_script_runs_scp_unchecked_and_writes_n
 ) -> None:
     media, scratch, seen = _run_the_node_script(tmp_path, strict=False, scp_exit=scp_exit)
     assert seen["argv"] == [
-        "-q", "-r", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
+        "-q", "-r", *NO_KNOWN_HOSTS_COMMAND, "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
         "-o", "GlobalKnownHostsFile=/dev/null", *NODE_SCP_OPTIONS, "--", "setup.exe", "sources",
         f"{USER}@{GUEST_IP}:D:\\upgrade\\",
     ]  # fmt: skip

@@ -35,8 +35,10 @@ _CHECK = 'test -n "$SSH_AUTH_SOCK" || exit 10; test -d "$1" || exit 11; test -n 
 #: entry by glob, from inside the dir. Empty host keys mean no check (``[ssh] strict_host_key_checking``
 #: off): no known_hosts is read or written, nor any temporary file made. Otherwise the lines go to a
 #: private temporary file (umask 077), the only known_hosts scp consults (GlobalKnownHostsFile=/dev/null),
-#: strictly: they were checked on this machine. No exec: the EXIT trap removes the file once scp is done,
-#: and a signal exits through it as well; the script's status is scp's.
+#: strictly: they were checked on this machine. In both modes KnownHostsCommand=none comes first (ssh keeps
+#: an option's first value), so a KnownHostsCommand in the node's ssh config adds no key beside them.
+#: No exec: the EXIT trap removes the file once scp is done, and a signal exits through it as well; the
+#: script's status is scp's.
 _COPY = (
     "dir=$1; target=$2; keys=$3; shift 3; "
     'if test -z "$keys"; then '
@@ -45,7 +47,7 @@ _COPY = (
     'trap \'rm -f -- "$known"\' EXIT; trap "exit 129" HUP; trap "exit 130" INT; trap "exit 143" TERM; '
     'printf "%s\\n" "$keys" > "$known" || exit 1; '
     'set -- -o "UserKnownHostsFile=$known" -o GlobalKnownHostsFile=/dev/null -o StrictHostKeyChecking=yes "$@"; fi; '
-    'cd -- "$dir" || exit 1; scp -q -r "$@" -- * "$target"'
+    'cd -- "$dir" || exit 1; scp -q -r -o KnownHostsCommand=none "$@" -- * "$target"'
 )
 #: The node scp's options after the trust options :data:`_COPY` sets itself.
 _COPY_OPTIONS = (

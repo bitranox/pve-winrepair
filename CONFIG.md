@@ -99,8 +99,10 @@ one run.
 
 With a remote node, `"node"` has the node's own scp copy the media into the guest, logging in with
 the guest key from your ssh-agent (forwarded to the node). The node's own known_hosts files are
-neither read nor written. With `[ssh] strict_host_key_checking = true` the node checks the guest
-strictly against the guest's host key as THIS machine holds it: right before the copy, the tool
+neither read nor written, and its scp runs with `KnownHostsCommand=none`, so a `KnownHostsCommand`
+in the node's ssh config cannot add a key either. With `[ssh] strict_host_key_checking = true` the
+node checks the guest strictly against the guest's host key as THIS machine holds it: right before
+the copy, the tool
 reads the guest's lines from `[ssh] known_hosts_file` with `ssh-keygen -F <guest ip>` (a leading `~`
 expanded as ssh would) and hands them to the node in a temporary file it removes afterwards. The run
 has connected to the guest from here by then, so the line is normally there; when it is not, or
