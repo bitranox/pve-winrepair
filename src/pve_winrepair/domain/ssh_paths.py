@@ -80,13 +80,17 @@ def known_hosts_problem(path: str, *, through_jump: bool) -> str | None:
         'must not contain whitespace: ssh splits the value into several files'
         >>> known_hosts_problem("~/.ssh/known_hosts_%h", through_jump=False) is None
         True
+        >>> reason = known_hosts_problem("C:" + chr(9) + "emp" + chr(92) + "kh", through_jump=True)
+        >>> reason == key_path_problem("C:" + chr(9) + "emp" + chr(92) + "id_guest")
+        True
     """
     if not path:
         return "must not be empty"
-    if any(char.isspace() for char in path):
-        return "must not contain whitespace: ssh splits the value into several files"
+    # Before the whitespace check: a TAB is both, and only this reason names the TOML fix.
     if _has_control(path):
         return _CONTROL
+    if any(char.isspace() for char in path):
+        return "must not contain whitespace: ssh splits the value into several files"
     if '"' in path:
         return _QUOTE
     if through_jump and "%" in path:

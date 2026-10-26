@@ -602,6 +602,19 @@ _CONTROL_REASON = (
         ("ssh", "key", "C:" + chr(0x09) + "emp" + chr(0x5C) + "guest.key", f"ssh.key: {_CONTROL_REASON}"),
         ("node", "ssh_key", "/keys/node" + chr(0x0A) + ".key", f"node.ssh_key: {_CONTROL_REASON}"),
         ("ssh", "known_hosts_file", "/kh" + chr(0x08) + "x", f"ssh.known_hosts_file: {_CONTROL_REASON}"),
+        # The same TAB in a known_hosts path gets the control reason, not the whitespace one.
+        (
+            "ssh",
+            "known_hosts_file",
+            "C:" + chr(0x09) + "emp" + chr(0x5C) + "kh",
+            f"ssh.known_hosts_file: {_CONTROL_REASON}",
+        ),
+        (
+            "node",
+            "known_hosts_file",
+            "C:" + chr(0x09) + "emp" + chr(0x5C) + "kh",
+            f"node.known_hosts_file: {_CONTROL_REASON}",
+        ),
     ],
 )
 def test_an_ssh_path_no_quoting_carries_is_refused_at_load(
