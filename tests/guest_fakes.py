@@ -122,13 +122,16 @@ def make_guest(runner: Runner, tool_dir: Path | None = None) -> Guest:
     return Guest(GUEST_IP, ssh_settings=SSH, tool_dir=tool_dir or TOOL_DIR, runner=runner)
 
 
-def make_node(runner: Runner, clock: FakeClock | None = None, *, link: NodeLink | None = None) -> Node:
-    """A node reaching its guests with :data:`SSH` through ``runner``; ``clock`` (default: a fresh one) waits.
+def make_node(
+    runner: Runner, clock: FakeClock | None = None, *, link: NodeLink | None = None, ssh: SshSettings = SSH
+) -> Node:
+    """A node reaching its guests with ``ssh`` (default :data:`SSH`) through ``runner``; ``clock`` waits.
 
-    ``link``: a remote node (:data:`NODE_LINK`) whose ``qm`` and guest calls go over ssh; default: this machine.
+    ``clock`` defaults to a fresh one. ``link``: a remote node (:data:`NODE_LINK`) whose ``qm`` and guest calls
+    go over ssh; default: this machine.
     """
     clock = clock or FakeClock()
-    return Node(ssh=SSH, link=link, runner=runner, clock=clock.time, sleep=clock.sleep, tool_dir=TOOL_DIR)
+    return Node(ssh=ssh, link=link, runner=runner, clock=clock.time, sleep=clock.sleep, tool_dir=TOOL_DIR)
 
 
 def locked(*, present: bool, stage_root: str | None = None) -> LockDirsReport:

@@ -28,6 +28,7 @@ from guest_fakes import (
     NIC_MACS,
     NO_LOG,
     NODE_LINK,
+    SSH,
     TOOL_DIR,
     TOOL_PATH,
     USER,
@@ -72,7 +73,7 @@ from pve_winrepair.domain.envelope import (
 from pve_winrepair.domain.guest_answers import StateVerdict
 from pve_winrepair.domain.receipt import BuildPair, RepairReceipt
 from pve_winrepair.domain.report import Report, RunExit, RunResult, RunVerdict, Step, StepName
-from pve_winrepair.domain.settings import GuestSettings, RepairSettings
+from pve_winrepair.domain.settings import GuestSettings, RepairSettings, SshSettings
 from pve_winrepair_guest.probes import NicMacReport, SetupReport
 from pve_winrepair_guest.upgrade import LaunchReport, LockDirsReport, LockDirsVerdict, TaskCleanup, TaskCleanupAction
 
@@ -866,12 +867,13 @@ def _run(
     receipts: FileReceiptStore | None = None,
     link: NodeLink | None = None,
     media: MediaChoice = MediaChoice.NODE,
+    ssh: SshSettings = SSH,
 ) -> tuple[RunResult, list[dict[str, object]]]:
     """Run the whole repair (not stage-only by default) on a fake node; return the result and its steps.
 
     ``media_dir`` is both ``[repair] media_dir`` and ``local_media_dir``; ``media`` picks which one the run
     stages from. The receipts go to ``receipts``, by default a state directory beside ``media_dir``;
-    ``link`` makes the node a remote one (default: this machine).
+    ``link`` makes the node a remote one (default: this machine); ``ssh`` is its ``[ssh]`` section.
     """
     address = None if ip is None else IPv4Address(ip)
     request = RepairRequest(
@@ -879,7 +881,7 @@ def _run(
     )
     result = run_repair(
         request,
-        make_node(runner, FakeClock(), link=link),
+        make_node(runner, FakeClock(), link=link, ssh=ssh),
         repair=_repair_settings(media_dir),
         guest=GUEST,
         receipts=receipts or FileReceiptStore(media_dir.parent / "state"),
@@ -919,18 +921,25 @@ def test_main_runs_the_whole_agent_path_to_done_ok(tmp_path: Path, link: NodeLin
         assert all(call[1:3] == proxy for call in runner.calls if route(call) != "qm")
 
 
-def test_a_remote_run_stages_the_nodes_media_on_the_node(tmp_path: Path) -> None:
+@pytest.mark.parametrize("strict", [True, False], ids=["strict", "not-strict"])
+def test_a_remote_run_stages_the_nodes_media_on_the_node(tmp_path: Path, strict: bool) -> None:
     node_side = {"ssh-add": Reply(0, "256 k\n"), "ssh-keygen": Reply(0, GUEST_KNOWN), "sh": Reply(0)}
     runner = agent_runner(FakePve(), **node_side)
-    result, _steps = _run(runner, _media(tmp_path), link=NODE_LINK, media=MediaChoice.NODE)
+    ssh = SSH.model_copy(update={"strict_host_key_checking": strict})
+    result, _steps = _run(runner, _media(tmp_path), link=NODE_LINK, media=MediaChoice.NODE, ssh=ssh)
     assert (result.exit, result.verdict) == (RunExit.OK, "STATE=DONE-OK")
     node_calls = [shlex.split(c[-1])[0] for c in runner.calls if c[:2] == ["ssh", "-A"]]
     assert node_calls == ["sh", "sh"]  # the media check, then the node-side copy
     copy = [i for i, c in enumerate(runner.calls) if c[:2] == ["ssh", "-A"]][-1]
-    # The guest key the copy trusts is read here after the push connected to the guest, right before the copy.
-    pushes = [i for i, c in enumerate(runner.calls) if route(c) == "scp"]
-    assert route(runner.calls[copy - 1]) == "ssh-keygen" and pushes and pushes[0] < copy - 1
-    assert shlex.split(runner.calls[copy][-1])[6] == GUEST_HOST_KEY
+    keygen = [i for i, c in enumerate(runner.calls) if route(c) == "ssh-keygen"]
+    if strict:
+        # The guest key the copy trusts is read here after the push connected to the guest, right before the copy.
+        pushes = [i for i, c in enumerate(runner.calls) if route(c) == "scp"]
+        assert keygen == [copy - 1] and pushes and pushes[0] < copy - 1
+        assert shlex.split(runner.calls[copy][-1])[6] == GUEST_HOST_KEY
+    else:
+        # No check on either side: nothing read here, and the empty host-key word tells the node script so.
+        assert keygen == [] and shlex.split(runner.calls[copy][-1])[6] == ""
     assert runner.timeouts[copy] == 5400  # [repair] stage_timeout_minutes, as for local media
     # Straight to the node: a ProxyCommand through the node itself would never connect.
     assert not any(w.startswith("ProxyCommand=") for w in runner.calls[copy])
