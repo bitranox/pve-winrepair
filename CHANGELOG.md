@@ -38,11 +38,12 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ### Changed
 
-- Requires `lib_log_rich>=7.0.1` (was 6.5.7). The `[lib_log_rich]` settings are checked when the
-  configuration loads: a `console_theme` other than `classic`, `dark`, `neon` or `pastel`, or an
-  unknown console stream, format preset, Graylog protocol or queue policy, now stops the tool with
-  a configuration error (exit 78). Before, an unknown theme was accepted and the console printed
-  without colours. The shipped defaults are all valid.
+- Requires `lib_log_rich>=7.0.1` (was 6.5.7). With the raised floor, a `[lib_log_rich]
+  console_theme` other than `classic`, `dark`, `neon` or `pastel` stops the tool when the
+  configuration loads (exit 78), and a section with several invalid settings reports every one
+  of them. A 1.0.0 install that resolved lib_log_rich below 7.0.1 accepted an unknown theme and
+  reported only the first invalid setting; an unknown console stream, format preset, Graylog
+  protocol or queue policy already stopped 1.0.0. The shipped defaults are all valid.
 - The guest tool runs on `pwshpy==1.8.0` (was 1.6.0). `launch` registers its SYSTEM task through
   pwshpy's `register_scheduled_task` with task settings (no trigger, start and keep running on
   battery, 72 h limit, a second start ignored, hard terminate and start on demand allowed)
@@ -73,8 +74,6 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   `docker ps` line whose name or status is not text.
 - A guest agent address whose type is neither `ipv4` nor `ipv6` ends the run as an internal error
   instead of being skipped.
-- A `[lib_log_rich]` section with several invalid settings reports every one of them, not only
-  the first.
 - New load-time refusals (exit 78, before any call) that a configuration accepted by 1.0.0 can
   hit:
   - `[ssh] known_hosts_file` that is empty, or holds whitespace or `"`. ssh's option parser split a
