@@ -9,7 +9,6 @@ would get.
 
 from __future__ import annotations
 
-import json
 import os
 import shlex
 import stat
@@ -29,6 +28,7 @@ from guest_fakes import (
     Reply,
     make_guest,
 )
+from pydantic import BaseModel, ConfigDict
 
 from pve_winrepair.adapters.media import LocalMedia, NodeMedia
 from pve_winrepair.application.ports import TransferTimeoutError
@@ -216,7 +216,20 @@ sys.exit(int(os.environ.get("SCP_EXIT", "0")))
 """
 
 
-def _run_the_node_script(tmp_path: Path, *, strict: bool, scp_exit: int) -> tuple[Path, Path, dict[str, object]]:
+class _ScpSaw(BaseModel):
+    """What the recording scp saw: its argv, the known_hosts file it was handed, and the temp dir's names."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
+
+    argv: list[str]
+    known: str
+    content: str
+    mode: int
+    cwd: str
+    tmp: list[str]
+
+
+def _run_the_node_script(tmp_path: Path, *, strict: bool, scp_exit: int) -> tuple[Path, Path, _ScpSaw]:
     """Run the node-side copy's recorded words under a real ``sh`` with a recording scp first on PATH.
 
     Returns the media directory, the script's temp directory and what the scp saw.
@@ -248,8 +261,7 @@ def _run_the_node_script(tmp_path: Path, *, strict: bool, scp_exit: int) -> tupl
     }
     done = subprocess.run(words, env=env, capture_output=True, text=True, encoding="utf-8", check=False)  # noqa: S603
     assert (done.returncode, done.stderr) == (scp_exit, "")
-    seen: dict[str, object] = json.loads(record.read_text(encoding="utf-8"))
-    return media, scratch, seen
+    return media, scratch, _ScpSaw.model_validate_json(record.read_text(encoding="utf-8"))
 
 
 @pytest.mark.os_posix
@@ -258,17 +270,17 @@ def test_the_node_script_hands_scp_the_guest_key_in_a_private_temp_file_it_remov
     tmp_path: Path, scp_exit: int
 ) -> None:
     media, scratch, seen = _run_the_node_script(tmp_path, strict=True, scp_exit=scp_exit)
-    known = str(seen["known"])
-    assert seen["content"] == f"{GUEST_HOST_KEY}\n"
-    assert int(str(seen["mode"])) & (stat.S_IRWXG | stat.S_IRWXO) == 0
-    assert seen["argv"] == [
+    known = seen.known
+    assert seen.content == f"{GUEST_HOST_KEY}\n"
+    assert seen.mode & (stat.S_IRWXG | stat.S_IRWXO) == 0
+    assert seen.argv == [
         "-q", "-r", *NO_KNOWN_HOSTS_COMMAND, "-o", f"UserKnownHostsFile={known}",
         "-o", "GlobalKnownHostsFile=/dev/null", "-o", "StrictHostKeyChecking=yes", *NODE_SCP_OPTIONS,
         "--", "setup.exe", "sources", f"{USER}@{GUEST_IP}:D:\\upgrade\\",
     ]  # fmt: skip
-    assert Path(str(seen["cwd"])).resolve() == media.resolve()
+    assert Path(seen.cwd).resolve() == media.resolve()
     assert Path(known).parent.resolve() == scratch.resolve()
-    assert seen["tmp"] == [Path(known).name]  # the key file, and only it, while scp ran
+    assert seen.tmp == [Path(known).name]  # the key file, and only it, while scp ran
     assert list(scratch.iterdir()) == []  # the temp file is gone on this exit path too
 
 
@@ -278,14 +290,14 @@ def test_without_strict_checking_the_node_script_runs_scp_unchecked_and_writes_n
     tmp_path: Path, scp_exit: int
 ) -> None:
     media, scratch, seen = _run_the_node_script(tmp_path, strict=False, scp_exit=scp_exit)
-    assert seen["argv"] == [
+    assert seen.argv == [
         "-q", "-r", *NO_KNOWN_HOSTS_COMMAND, "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
         "-o", "GlobalKnownHostsFile=/dev/null", *NODE_SCP_OPTIONS, "--", "setup.exe", "sources",
         f"{USER}@{GUEST_IP}:D:\\upgrade\\",
     ]  # fmt: skip
-    assert Path(str(seen["cwd"])).resolve() == media.resolve()
+    assert Path(seen.cwd).resolve() == media.resolve()
     # No temp file while scp ran, and none after: nothing was ever created there.
-    assert seen["tmp"] == [] and list(scratch.iterdir()) == []
+    assert seen.tmp == [] and list(scratch.iterdir()) == []
 
 
 def test_a_node_copy_that_times_out_raises_the_typed_timeout() -> None:
