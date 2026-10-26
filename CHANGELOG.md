@@ -18,9 +18,9 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   has no `qm` is refused before any VM call (exit 1), and so is a node named without
   `[node] ssh_key`. README "From a workstation" walks through it. These `[node]` keys are checked
   when the configuration loads, even when no node is used, and a refused value stops the tool
-  with exit 78: `host` (letters, digits, `.` and `-`, so `_` is refused), `ssh_user`, `ssh_key`
-  (no `"`, `%` or control character) and `known_hosts_file` (not empty; no whitespace, `"`, `%` or
-  control character).
+  with exit 78: `host` (letters, digits, `.` and `-`, so `_` is refused), `ssh_user` (1 to 64
+  letters, digits, `_`, `.` and `-`, not starting with `-`), `ssh_key` (no `"`, `%` or control
+  character) and `known_hosts_file` (not empty; no whitespace, `"`, `%` or control character).
 - `repair --media node|local` and `[repair] media_source` (default `"node"`): `node` stages
   `[repair] media_dir` on the node, `local` stages `[repair] local_media_dir` from the machine
   running the tool. With a remote node, `node` has the node's own scp copy the media into the
