@@ -164,9 +164,9 @@ class NodeMedia:
         try:
             return self.runner(argv, timeout)
         except subprocess.TimeoutExpired as exc:
-            raise TransferTimeoutError(f"media transfer: timed out after {timeout:g} s") from exc
+            raise TransferTimeoutError(f"timed out after {timeout:g} s") from exc
         except OSError as exc:
-            return subprocess.CompletedProcess(argv, 255, "", f"media transfer: could not run ssh: {exc}")
+            return subprocess.CompletedProcess(argv, 255, "", f"could not run ssh: {exc}")
 
     def _guest_host_keys(self, ip: str) -> list[str] | str:
         """The guest's lines in this machine's ``[ssh] known_hosts_file``, or why there are none to hand over."""

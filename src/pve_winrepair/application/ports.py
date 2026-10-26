@@ -42,6 +42,8 @@ class TransferTimeoutError(RuntimeError):
 
     Raised rather than returned as a failed process: only a copy that ran out of time is helped by
     a longer ``[repair] stage_timeout_minutes``, so the caller must tell it from any other failure.
+    The message says only how long the copy waited (``timed out after 5400 s``), like the stderr an
+    adapter makes up for a copy that could not start: the caller says what failed.
     """
 
 

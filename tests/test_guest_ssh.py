@@ -644,13 +644,13 @@ def test_run_state_that_cannot_be_read_raises_instead_of_reading_as_idle(reply: 
 def test_copy_to_that_cannot_start_is_a_failed_process() -> None:
     runner = FakeRunner().on("scp", OSError("no scp"))
     proc = _guest(runner).copy_to(["/media/setup.exe"], "D:\\upgrade\\", timeout=5400)
-    assert (proc.returncode, proc.stderr) == (255, "media transfer: could not run scp: no scp")
+    assert (proc.returncode, proc.stderr) == (255, "could not run scp: no scp")
 
 
 def test_copy_to_that_times_out_raises_the_typed_timeout() -> None:
     # The caller names stage_timeout_minutes for a timeout only, so it must not read like any failure.
     runner = FakeRunner().on("scp", subprocess.TimeoutExpired(["scp"], 5400))
-    with pytest.raises(TransferTimeoutError, match=r"^media transfer: timed out after 5400 s$"):
+    with pytest.raises(TransferTimeoutError, match=r"^timed out after 5400 s$"):
         _guest(runner).copy_to(["/media/setup.exe"], "D:\\upgrade\\", timeout=5400)
 
 

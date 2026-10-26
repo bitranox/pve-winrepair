@@ -667,10 +667,24 @@ def test_stage_media_copies_every_media_entry_into_the_root(tmp_path: Path) -> N
 def test_stage_media_transfer_timeout_refuses_as_a_failed_transfer(tmp_path: Path) -> None:
     (tmp_path / "setup.exe").write_bytes(b"MZ")
     runner = FakeRunner().on("scp", subprocess.TimeoutExpired(["scp"], 5400))
-    with pytest.raises(RepairError, match=r"^media transfer failed: media transfer: timed out after 5400 s"):
+    with pytest.raises(RepairError) as caught:
         repair.stage_media(
             make_guest(runner), Report(vmid=1), DriveLetter.DRIVE_D, media=LocalMedia(tmp_path), timeout_minutes=90
         )
+    # The whole refusal: what failed is said once, by the caller.
+    assert str(caught.value) == (
+        "media transfer failed: timed out after 5400 s (the copy may take [repair] stage_timeout_minutes = 90)"
+    )
+
+
+def test_stage_media_whose_copy_cannot_start_names_the_tool_once(tmp_path: Path) -> None:
+    (tmp_path / "setup.exe").write_bytes(b"MZ")
+    runner = FakeRunner().on("scp", OSError("no scp"))
+    with pytest.raises(RepairError) as caught:
+        repair.stage_media(
+            make_guest(runner), Report(vmid=1), DriveLetter.DRIVE_D, media=LocalMedia(tmp_path), timeout_minutes=90
+        )
+    assert str(caught.value) == "media transfer failed rc=255: could not run scp: no scp"
 
 
 def test_stage_media_failed_copy_refuses_without_the_timeout_hint(tmp_path: Path) -> None:

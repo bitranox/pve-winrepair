@@ -535,6 +535,6 @@ class Guest:
         try:
             return self.runner(argv, timeout)
         except subprocess.TimeoutExpired as exc:
-            raise TransferTimeoutError(f"media transfer: timed out after {timeout:g} s") from exc
+            raise TransferTimeoutError(f"timed out after {timeout:g} s") from exc
         except OSError as exc:
-            return subprocess.CompletedProcess(argv, 255, "", f"media transfer: could not run {argv[0]}: {exc}")
+            return subprocess.CompletedProcess(argv, 255, "", f"could not run {argv[0]}: {exc}")

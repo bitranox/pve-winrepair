@@ -135,6 +135,10 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   ending `STATE=DONE-FAIL`, `WORKER_GONE` or `TIMEOUT`) prints its last step once, with the hold
   note. Before, and in 1.0.0, it printed that step twice on stderr, the second time with the note.
   The `--json` steps are unchanged.
+- A media copy that timed out or could not start says `media transfer` once, as in
+  `media transfer failed: timed out after 5400 s (...)` and
+  `media transfer failed rc=255: could not run scp: <reason>`. Before, and in 1.0.0, the refusal
+  named it twice (`media transfer failed rc=255: media transfer: timed out after 5400 s`).
 
 
 ## [1.0.0] 2026-10-23 22:06:16

@@ -307,7 +307,7 @@ def test_without_strict_checking_the_node_script_runs_scp_unchecked_and_writes_n
 
 def test_a_node_copy_that_times_out_raises_the_typed_timeout() -> None:
     runner = FakeRunner().on("ssh-keygen", Reply(0, GUEST_KNOWN)).on("sh", subprocess.TimeoutExpired(["ssh"], 5400))
-    with pytest.raises(TransferTimeoutError, match=r"^media transfer: timed out after 5400 s$"):
+    with pytest.raises(TransferTimeoutError, match=r"^timed out after 5400 s$"):
         _node_media(runner).copy_into(make_guest(runner), "D:\\upgrade\\", timeout=5400)
 
 
@@ -316,7 +316,7 @@ def test_a_node_copy_whose_ssh_cannot_start_is_a_failed_transfer() -> None:
     proc = _node_media(runner).copy_into(make_guest(runner), "D:\\upgrade\\", timeout=5400)
     assert (proc.returncode, proc.stderr) == (
         255,
-        "media transfer: could not run ssh: No such file or directory: 'ssh'",
+        "could not run ssh: No such file or directory: 'ssh'",
     )
 
 
