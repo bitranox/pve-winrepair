@@ -293,6 +293,19 @@ def test_read_acl_reads_a_null_dacl_as_none() -> None:
     assert lockdown.read_acl(security, "x") == AclReading(path="x", owner=USERS, protected=False, aces=None)
 
 
+def test_read_acl_reads_a_mask_with_its_high_bit_set_as_the_unsigned_access_mask() -> None:
+    # pywin32 hands an ACCESS_MASK back as a signed C long: GENERIC_READ | GENERIC_WRITE |
+    # GENERIC_EXECUTE | DELETE (0xE0010000) arrives as -0x1FFF0000, and a refusal printed it so.
+    security = FakeSecurity()
+    acl = Acl(aces=[((0, 0x1B), -0x1FFF0000, Sid(USERS))])
+    security.objects[r"C:\upgrade"] = descriptor(Sid(ADMINS), acl, 0)
+
+    reading = lockdown.read_acl(security, r"C:\upgrade")
+
+    assert reading.aces == (Ace(sid=USERS, kind=0, flags=0x1B, mask=0xE0010000),)
+    assert "(type 0, flags 0x1b, mask 0xe0010000)" in "; ".join(lockdown.exact_lock_problems(reading))
+
+
 @dataclass
 class _TextFlagsAcl(Acl):
     """A PyACL whose one ACE carries its flags as text, a shape pywin32 never hands back."""

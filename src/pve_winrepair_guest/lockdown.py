@@ -616,7 +616,9 @@ def _ace(security: Win32Security, entry: tuple[object, ...]) -> Ace:
             sid = entry[-1]
         case _:
             raise OSError(f"unexpected ACE shape from pywin32: {entry!r}")
-    return Ace(sid=security.ConvertSidToStringSid(cast("Sid", sid)), kind=kind, flags=flags, mask=mask)
+    # pywin32 returns the ACCESS_MASK (a DWORD) as a signed C long, so a mask with the high bit set
+    # (a generic right) is negative; the bit tests read the same, a refusal would print -0x1fff0000.
+    return Ace(sid=security.ConvertSidToStringSid(cast("Sid", sid)), kind=kind, flags=flags, mask=mask & 0xFFFFFFFF)
 
 
 def read_acl(security: Win32Security, path: str) -> AclReading:

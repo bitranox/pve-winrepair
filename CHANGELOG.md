@@ -98,6 +98,9 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 - ssh, scp, ssh-keygen and ssh-add no longer read the caller's stdin, so a shell loop such as
   `while read v; do pve-winrepair repair --vmid "$v"; done < list` runs every VM in the list
   (before, the first VM's ssh read the rest of the list; with or without `--node`).
+- A `lock-dirs` refusal prints an ACE's access mask as the unsigned value Windows stores
+  (`mask 0xe0010000`); before, a mask holding a generic right read negative (`mask -0x1fff0000`).
+  Which ACEs are refused is unchanged.
 
 
 ## [1.0.0] 2026-10-23 22:06:16
