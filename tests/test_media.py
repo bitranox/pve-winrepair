@@ -128,6 +128,7 @@ def test_the_node_copies_with_the_forwarded_key_trusting_the_guest_key_read_here
     assert runner.timeouts == [10, 5400]
     # Strict on the node: the key was checked here already.
     assert NODE_TRUST in remote[2]
+    assert "-o KnownHostsCommand=none" in remote[2]
     assert not any(w.startswith(("StrictHostKeyChecking", "UserKnownHostsFile", "IdentitiesOnly")) for w in remote[3:])
 
 
@@ -148,6 +149,7 @@ def test_without_strict_checking_the_node_copy_reads_no_key_here_and_checks_none
         ["sh", "-c", remote[2], "sh", MEDIA, target, "", *NODE_SCP_OPTIONS], forward_agent=True
     )
     assert NODE_NO_CHECK in remote[2]
+    assert "-o KnownHostsCommand=none" in remote[2]
 
 
 def test_a_leading_tilde_in_the_guest_known_hosts_is_expanded_as_ssh_does(monkeypatch: pytest.MonkeyPatch) -> None:
