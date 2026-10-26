@@ -167,12 +167,14 @@ def run(cmd: Sequence[str], timeout: float) -> subprocess.CompletedProcess[str]:
     """Run a command, capturing stdout and stderr SEPARATELY as UTF-8 text.
 
     Separate on purpose: ssh's own warnings go to stderr and must never splice into the
-    envelope line on stdout.
+    envelope line on stdout. The child's stdin is empty: no command here reads input, and an
+    inherited stdin would let ssh swallow the rest of a list a shell loop feeds the tool.
     """
     # An argv list, never a shell. Every word bound for the guest either passed check_argument or is
     # a fixed string of this module (the certutil and powershell paths, the encoded profile probe).
     return subprocess.run(  # noqa: S603 - argv list, no shell  # nosec B603
         list(cmd),
+        stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
         timeout=timeout,

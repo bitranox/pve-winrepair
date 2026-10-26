@@ -1,19 +1,23 @@
 """Tests for the guest ssh adapter: the argv it builds, the push and its hashes, the profile copy.
 
-Every call goes through the injected runner (``guest_fakes.FakeRunner``); nothing reaches ssh.
-The envelopes come from the guest tool's own ``envelope`` module and data models. How an answer is
-read is tested in ``test_envelope.py``, the node bundle in ``test_node.py``.
+Every call goes through the injected runner (``guest_fakes.FakeRunner``); nothing reaches ssh. The
+production runner itself is tested once, with a real Python child in place of ssh. The envelopes
+come from the guest tool's own ``envelope`` module and data models. How an answer is read is tested
+in ``test_envelope.py``, the node bundle in ``test_node.py``.
 """
 
 from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import ntpath
+import os
 import re
 import subprocess
+import sys
 from ipaddress import IPv4Address
-from typing import TYPE_CHECKING
+from pathlib import Path
 from unittest.mock import ANY
 
 import guest_fakes
@@ -65,9 +69,6 @@ from pve_winrepair.domain.settings import SshSettings
 from pve_winrepair_guest import lockdown
 from pve_winrepair_guest.probes import SetupReport, StateLog
 from pve_winrepair_guest.upgrade import LockDirsReport, LockDirsVerdict
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 KEY = "/keys/test.key"
 SSH = SshSettings(key=KEY, user=USER)
@@ -695,3 +696,35 @@ def test_ssh_and_scp_argv_carry_the_options_in_that_order() -> None:
         ["ssh", "-i", "/k", *opts, "admin@192.0.2.10", "hostname"],
         ["scp", "-q", "-i", "/k", *opts, "-r", "a", "admin@192.0.2.10:D:\\x\\"],
     ]
+
+
+# --- the production runner -------------------------------------------------------------------
+
+
+def test_a_child_of_the_runner_never_reads_the_callers_stdin(tmp_path: Path) -> None:
+    # `while read v; do pve-winrepair repair --vmid "$v"; done < list`: an ssh that inherits the loop's
+    # stdin swallows the rest of the list. The caller is its own process, fed the rest of a list on
+    # stdin, because pytest's stdin is no pipe: through the real runner it starts a child that reads
+    # ITS stdin, then reads its own, and prints both as JSON.
+    src = Path(guest_ssh.__file__).resolve().parents[2]
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join(filter(None, [str(src), os.environ.get("PYTHONPATH")]))}
+    caller = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import json, sys\n"
+            "from pve_winrepair.adapters.guest_ssh import run\n"
+            "child = run([sys.executable, '-c', 'import sys; sys.stdout.write(sys.stdin.read())'], 30)\n"
+            "print(json.dumps({'child': child.stdout, 'left': sys.stdin.read()}))\n",
+        ],
+        input="102\n103\n",
+        capture_output=True,
+        timeout=60,
+        check=False,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
+        cwd=tmp_path,
+    )
+    assert caller.returncode == 0, caller.stderr
+    assert json.loads(caller.stdout) == {"child": "", "left": "102\n103\n"}
