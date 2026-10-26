@@ -41,8 +41,8 @@ if TYPE_CHECKING:
 
 __all__ = ["Node", "run"]
 
-#: Seconds the preflight waits for the node; the shorter ``ConnectTimeout`` among
-#: :class:`~pve_winrepair.domain.node_link.NodeLink`'s ssh options ends a dead connect first.
+#: Seconds the preflight waits for the node; :class:`~pve_winrepair.domain.node_link.NodeLink`'s
+#: ``ConnectTimeout=20``, shorter than this, ends a dead connect first.
 _PREFLIGHT_TIMEOUT = 30
 
 

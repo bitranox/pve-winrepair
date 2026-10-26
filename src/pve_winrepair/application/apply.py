@@ -14,11 +14,11 @@ for instance by a hard power-off - check the guest), RUN_FAILED (``STATE=DONE-FA
 (no state log).
 
 After the apply reboot the tool runs only from a fresh copy in the ssh user's profile whose bytes
-were checked against the node's digest (``stage_tool``), never from ``C:\winrepair``: the upgrade
-may have changed that directory's lock, and no SYSTEM task starts from it again. Its lock state is
-reported as the informational ``winrepair_lock`` step and never repaired; a changed lock does not
-stop the restore of Windows Update. The profile copy is deleted at the end on every path
-(``remove_profile_copy``).
+were checked against the digest of the tool this install ships (``stage_tool``), never from
+``C:\winrepair``: the upgrade may have changed that directory's lock, and no SYSTEM task starts
+from it again. Its lock state is reported as the informational ``winrepair_lock`` step and never
+repaired; a changed lock does not stop the restore of Windows Update. The profile copy is deleted
+at the end on every path (``remove_profile_copy``).
 
 The build it verifies is the one the repair run's prepare step measured from the staged image and
 recorded in the VM's receipt (:class:`ReceiptStore`). The receipt is read first, before any node or

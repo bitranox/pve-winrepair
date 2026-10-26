@@ -1,10 +1,11 @@
 r"""Talk to the winrepair guest tool over ssh: push it, run one subcommand, read its JSON envelope.
 
-The ssh and scp side of a guest call, run ON the PVE node by the repair and apply-and-verify
-drivers: :class:`Guest` builds every argv (:func:`ssh_options` from the ``[ssh]`` settings), runs it
-through its runner, and hands the finished process to
-:func:`~pve_winrepair.domain.envelope.parse_answer`, which owns the answer contract and the error
-types.
+The ssh and scp side of a guest call, run by the repair and apply-and-verify drivers on the machine
+the tool runs on: the PVE node itself, or a workstation that reaches the guest through the node
+(``ProxyCommand``, see :class:`~pve_winrepair.domain.node_link.NodeLink`). :class:`Guest` builds
+every argv (:func:`ssh_options` from the ``[ssh]`` settings), runs it through its runner, and hands
+the finished process to :func:`~pve_winrepair.domain.envelope.parse_answer`, which owns the answer
+contract and the error types.
 
 The tool lives on the guest under a content address,
 ``C:\winrepair\winrepair_guest-<first 16 hex of its sha256>.ps1``. A SYSTEM upgrade run executes
@@ -16,13 +17,13 @@ executes.
 ``C:\winrepair`` is locked to SYSTEM and Administrators before the tool is ever copied into it: a
 directory created under ``C:\`` is open to every local user until then, and the tool runs as an
 elevated admin and as SYSTEM. The tool itself does the locking (``lock-dirs``), so every push first
-puts it in the ssh user's profile, checks the copy's bytes against the node's digest, and runs it
-from there (see :func:`push_tool`). Before that copy is made, the node reads the profile's security
-descriptor with the guest's own ``powershell.exe`` and refuses unless only SYSTEM, Administrators
-and the ssh user can write it: anyone else who could would be able to swap the copy between its hash
-and its run (see :func:`stage_tool`). After the apply reboot the apply-and-verify driver runs the
-tool from such a verified profile copy only (:meth:`Guest.stage_tool`), never from
-``C:\winrepair``, whose lock the upgrade may have changed.
+puts it in the ssh user's profile, checks the copy's bytes against the digest of the tool this
+package ships, and runs it from there (see :func:`push_tool`). Before that copy is made, the tool
+reads the profile's security descriptor with the guest's own ``powershell.exe`` and refuses unless
+only SYSTEM, Administrators and the ssh user can write it: anyone else who could would be able to
+swap the copy between its hash and its run (see :func:`stage_tool`). After the apply reboot the
+apply-and-verify driver runs the tool from such a verified profile copy only
+(:meth:`Guest.stage_tool`), never from ``C:\winrepair``, whose lock the upgrade may have changed.
 
 Settings:
     The key, the user and the host-key options come from the ``[ssh]`` section
@@ -168,8 +169,8 @@ def run(cmd: Sequence[str], timeout: float) -> subprocess.CompletedProcess[str]:
     """Run a command, capturing stdout and stderr SEPARATELY as UTF-8 text.
 
     Separate on purpose: ssh's own warnings go to stderr and must never splice into the
-    envelope line on stdout. The child's stdin is empty: no command here reads input, and an
-    inherited stdin would let ssh swallow the rest of a list a shell loop feeds the tool.
+    envelope line on stdout. The child's stdin is empty: no command this runner starts reads input,
+    and an inherited stdin would let ssh swallow the rest of a list a shell loop feeds the tool.
     """
     # An argv list, never a shell. Every word bound for the guest either passed check_argument or is
     # a fixed string of this module (the certutil and powershell paths, the encoded profile probe).
@@ -244,7 +245,7 @@ def ask_guest(
 
     Raises:
         UnsafeArgumentError: Before ssh, see :func:`check_argument`.
-        GuestPushError: The packed tool is missing on this node, so its guest path is unknown.
+        GuestPushError: The packed tool is missing from this install, so its guest path is unknown.
         GuestNoAnswerError, GuestInternalError, GuestProtocolError: See :func:`parse_answer`.
     """
     argv = _ssh_argv(guest.ip, guest.ssh_settings, tool_argv(guest.tool_path, command, args))
@@ -321,7 +322,7 @@ def _verify(runner: Runner, ip: str, ssh: SshSettings, path: str, tool: PackedTo
     if digest != tool.sha256:
         label = "the profile copy" if path == tool.staged else "the copy in place"
         raise GuestPushError(
-            f"{label} {path} hashes to {digest} on the guest, expected {tool.sha256} (the node's "
+            f"{label} {path} hashes to {digest} on the guest, expected {tool.sha256} (this install's "
             f"{tool.source.name}): refused, it is not run"
         )
 
@@ -396,7 +397,7 @@ def stage_tool(
     First the profile's security descriptor is read on the guest: a profile anyone but SYSTEM,
     Administrators and the ssh user can write is refused before anything is copied, since such a
     principal could swap the copy between its hash and its run. The copy is then hashed on the guest
-    against the node's digest before anything runs it, so a profile that is not what it should be
+    against the shipped tool's digest before anything runs it, so a profile that is not what it should be
     cannot hand an elevated run other bytes. On a failure after the copy it is deleted again (see
     :func:`remove_staged`); on success the caller deletes it.
 
@@ -423,8 +424,8 @@ def push_tool(
     r"""Put ``tool`` at its content address on the guest, into a ``C:\winrepair`` locked beforehand.
 
     The tool first goes to the ssh user's profile under its plain name (ssh and scp start there, and
-    only SYSTEM, Administrators and that user may write it), is hashed there against the node's
-    digest (:func:`stage_tool`), and runs ``lock-dirs`` from there: that creates ``C:\winrepair``
+    only SYSTEM, Administrators and that user may write it), is hashed there against the shipped
+    tool's digest (:func:`stage_tool`), and runs ``lock-dirs`` from there: that creates ``C:\winrepair``
     with the lock in place before anything is copied in, and checks a tool already at the content
     address against its name. Only then is the profile copy copied in, beside the final name, and
     renamed into place, so a cut copy never sits under a name a run executes; the copy in place is
@@ -498,7 +499,7 @@ class Guest:
         """
         staged = stage_tool(self.ip, self.packed, ssh=self.ssh_settings, runner=self.runner)
         guest = replace(self, profile_copy=staged)
-        guest.__dict__["_packed"] = self.packed  # the digest just verified, not a re-read of the node file
+        guest.__dict__["_packed"] = self.packed  # the digest just verified, not a re-read of the shipped file
         return guest
 
     def remove_profile_copy(self) -> str | None:

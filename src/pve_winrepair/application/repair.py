@@ -1,6 +1,7 @@
 r"""Repair one Windows guest whose cumulative update fails, by an in-place repair upgrade.
 
-Runs ON the PVE node that hosts the guest - any of them. Drives the whole sequence:
+Runs on the PVE node that hosts the guest (any of them), or on a workstation that drives that node
+over ssh (:class:`~pve_winrepair.domain.node_link.NodeLink`). Drives the whole sequence:
 snapshot -> ensure vTPM -> lock the stage root -> stage the installation media as a DIRECTORY ->
 gate the WIM -> waive the compat block -> launch setup from a SYSTEM task -> poll to a verdict.
 
