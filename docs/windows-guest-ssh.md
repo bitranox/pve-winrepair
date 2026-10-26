@@ -81,8 +81,8 @@ the group itself is called something else. Keep the block as it is.
 Add the public key (the `.pub` file next to the private key in `[ssh] key`, one line that
 starts with `ssh-ed25519` or `ssh-rsa`) to `C:\ProgramData\ssh\administrators_authorized_keys`,
 one key per line. If the file already exists, its last line must end with a line break, or the new
-key is glued onto that line and both keys break (a file saved in Notepad often lacks it); read it
-back afterwards with `Get-Content $keys` and look for one key per line. Paste the whole line between
+key is glued onto that line and both keys break (some editors save a file whose last line has no
+line break); read it back afterwards with `Get-Content $keys` and look for one key per line. Paste the whole line between
 the single quotes:
 
 ```powershell
@@ -299,9 +299,10 @@ icacls.exe $env:USERPROFILE /remove:g '*S-1-5-32-545'
 ```
 
 `/remove` removes only an entry set on the profile itself. One the profile inherits from
-`C:\Users` (marked `(I)` in icacls' listing, `ID` among the entry's flags in the SDDL) stays; run
-`icacls.exe $env:USERPROFILE /inheritance:d` first, which turns the inherited entries into the
-profile's own, and the `/remove` above then takes it out. Read the descriptor back afterwards. The
+`C:\Users` (marked `(I)` in icacls' listing, `ID` among the entry's flags in the SDDL) stays, and
+icacls still exits 0; run `icacls.exe $env:USERPROFILE /inheritance:d` first, which turns the
+inherited entries into the profile's own, and the `/remove` above then takes it out. Read the
+descriptor back afterwards: the exit code does not show whether anything was removed. The
 full rules are in [README.md](../README.md#how-it-gets-onto-the-guest).
 
 ## Microsoft documentation
