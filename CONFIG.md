@@ -193,7 +193,7 @@ neither checked nor used, the path is made absolute (a relative one against the 
 with its symbolic links resolved, the file's own directory is checked the same way, and a receipt
 read from the file is still refused when it names another VM; `repair` refuses before any VM call to
 run on a file holding another VM's receipt, or on one that exists but is no valid receipt (that file
-is left alone; an invalid per-VM file in `state_dir` is replaced). On Windows, how that resolving
+is left alone; an invalid per-VM file in `state_dir` is removed like a previous receipt). On Windows, how that resolving
 treats a mapped network drive (whether `V:\...` comes back as its UNC path) has not been measured.
 
 Give each run that runs at the same time its own `--receipt` file. That check is made once, at the
