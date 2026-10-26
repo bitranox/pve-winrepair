@@ -73,10 +73,21 @@ ssh files a guest's key under the guest's IP address (`%h` is that address too).
 drives nodes of several sites through one file mixes their guests: when a guest uses a private
 address that a guest of another site used before, ssh refuses it as "REMOTE HOST IDENTIFICATION HAS
 CHANGED" with strict checking on (the run fails closed), and with it off connects anyway. Give each
-site a profile with its own file instead: the profile's configuration (for example
-`~/.config/pve-winrepair/profile/site-b/config.toml`) sets
-`known_hosts_file = "~/.ssh/known_hosts_site_b"`, and `pve-winrepair --profile site-b repair ...`
-reads it (see [Profiles](#profiles)).
+site a profile with its own file instead, and run that site with
+`pve-winrepair --profile site-b repair ...`. A profile does not inherit the plain user
+configuration: with `--profile site-b` the file `~/.config/pve-winrepair/config.toml` is not read at
+all (see [Profiles](#profiles)). So the profile's file,
+`~/.config/pve-winrepair/profile/site-b/config.toml`, holds the site's whole configuration
+(`[node] host`, `ssh_key` and `state_dir`, `[ssh] key`, the `[repair]` media directories), and
+among it this key under its section:
+
+```toml
+[ssh]
+known_hosts_file = "~/.ssh/known_hosts_site_b"
+```
+
+A profile file holding only that key loses every setting of the plain user configuration:
+`[node] host` then reads `""`, as if it were never set.
 
 ### `[guest]`
 
