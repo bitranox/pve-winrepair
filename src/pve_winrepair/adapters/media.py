@@ -34,8 +34,10 @@ _CHECK = 'test -n "$SSH_AUTH_SOCK" || exit 10; test -d "$1" || exit 11; test -n 
 #: The node-side copy, run as ``sh -c <it> sh <dir> <target> <guest host keys> <scp options...>``: every
 #: entry by glob, from inside the dir. Empty host keys mean no check (``[ssh] strict_host_key_checking``
 #: off): no known_hosts is read or written, nor any temporary file made. Otherwise the lines go to a
-#: private temporary file (umask 077), the only known_hosts scp consults (GlobalKnownHostsFile=/dev/null),
-#: strictly: they were checked on this machine. In both modes KnownHostsCommand=none comes first (ssh keeps
+#: private temporary file (umask 077) in ``${TMPDIR:-/tmp}``, the only known_hosts scp consults
+#: (GlobalKnownHostsFile=/dev/null), strictly: they were checked on this machine. The explicit mktemp
+#: template is what puts it there everywhere: a bare ``mktemp`` picks its own directory, and BSD's
+#: (macOS) ignores TMPDIR. In both modes KnownHostsCommand=none comes first (ssh keeps
 #: an option's first value), so a KnownHostsCommand in the node's ssh config adds no key beside them.
 #: No exec: the EXIT trap removes the file once scp is done, and a signal exits through it as well; the
 #: script's status is scp's.
@@ -43,7 +45,7 @@ _COPY = (
     "dir=$1; target=$2; keys=$3; shift 3; "
     'if test -z "$keys"; then '
     'set -- -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o GlobalKnownHostsFile=/dev/null "$@"; '
-    "else umask 077; known=$(mktemp) || exit 1; "
+    'else umask 077; known=$(mktemp "${TMPDIR:-/tmp}/pvewr-known.XXXXXX") || exit 1; '
     'trap \'rm -f -- "$known"\' EXIT; trap "exit 129" HUP; trap "exit 130" INT; trap "exit 143" TERM; '
     'printf "%s\\n" "$keys" > "$known" || exit 1; '
     'set -- -o "UserKnownHostsFile=$known" -o GlobalKnownHostsFile=/dev/null -o StrictHostKeyChecking=yes "$@"; fi; '
