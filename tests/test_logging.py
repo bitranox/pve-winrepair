@@ -8,11 +8,12 @@ from __future__ import annotations
 
 import lib_log_rich.runtime
 import pytest
+from lib_layered_config import Config
 from lib_log_rich.domain import ConsoleTheme
 from pydantic import ValidationError
 
 from pve_winrepair import __init__conf__
-from pve_winrepair.adapters.logging.setup import LoggingConfigModel
+from pve_winrepair.adapters.logging.setup import InvalidLoggingConfigError, LoggingConfigModel, check_logging_config
 
 
 @pytest.mark.os_agnostic
@@ -32,11 +33,20 @@ def test_a_console_theme_lib_log_rich_does_not_have_is_refused() -> None:
 
 
 @pytest.mark.os_agnostic
-def test_a_key_lib_log_rich_does_not_know_is_ignored() -> None:
-    """An unknown key is dropped, as lib_log_rich's RuntimeConfig drops it."""
-    parsed = LoggingConfigModel.model_validate({"custom_field": "value"})
+@pytest.mark.parametrize(
+    ("section", "problem"),
+    [
+        ({"custom_field": "value"}, "lib_log_rich.custom_field: Extra inputs are not permitted"),
+        ({"payload_limits": {"bogus": 3}}, "lib_log_rich.payload_limits.bogus: Extra inputs are not permitted"),
+    ],
+    ids=["top-level", "payload-limits"],
+)
+def test_a_key_lib_log_rich_does_not_know_is_refused_naming_the_key(section: dict[str, object], problem: str) -> None:
+    """An unknown key is refused, as lib_log_rich's RuntimeConfig refuses it, in one line naming the key."""
+    with pytest.raises(InvalidLoggingConfigError) as refused:
+        check_logging_config(Config({"lib_log_rich": section}, {}))
 
-    assert "custom_field" not in parsed.model_dump()
+    assert refused.value.problems == [problem]
 
 
 @pytest.mark.os_agnostic

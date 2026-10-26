@@ -25,7 +25,11 @@ media_dir = "/var/lib/vz/winmedia/win11"
 `repair` and `apply` validate all four sections before they do anything: an unknown key or a refused
 value stops them with exit 78 and one `Error: <section>.<key>: <reason>` line per problem, for
 example `Error: node.state_dir: must be an absolute path on this machine`. `config` checks them the
-same way after it has shown them, and exits 78 with the same lines.
+same way after it has shown them, and exits 78 with the same lines. The logging section
+`[lib_log_rich]` is checked too: an unknown key there (also in `[lib_log_rich.payload_limits]`) or a
+refused value stops every command that reads the configuration, `config` included, with exit 78
+and one `Error: lib_log_rich.<key>: <reason>` line per problem, for example
+`Error: lib_log_rich.custom_field: Extra inputs are not permitted`.
 
 ---
 

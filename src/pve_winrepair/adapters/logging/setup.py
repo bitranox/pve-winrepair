@@ -51,8 +51,8 @@ class LoggingConfigModel(lib_log_rich.runtime.RuntimeConfig):
     The section is the runtime configuration as written, so it is validated once, into the
     library's model, with three differences from that model: ``service`` defaults to the
     package name (also when it is empty), ``environment`` defaults to ``prod``, and a setting
-    written as null keeps lib_log_rich's default. A key the library does not know is ignored,
-    as the library ignores it.
+    written as null keeps lib_log_rich's default. A key the library does not know, also one
+    inside ``payload_limits``, is refused, as the library refuses it.
 
     Example:
         >>> model = LoggingConfigModel.model_validate({"service": "myapp", "environment": "staging"})
@@ -103,7 +103,8 @@ def _build_runtime_config(config: Config) -> lib_log_rich.runtime.RuntimeConfig:
         Fully configured runtime settings ready for lib_log_rich.init().
 
     Raises:
-        ValidationError: The section holds a value of the wrong type.
+        ValidationError: The section holds a value of the wrong type or a key
+            lib_log_rich does not know.
 
     Note:
         Configuration is read from the [lib_log_rich] section. All parameters

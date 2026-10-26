@@ -41,12 +41,18 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ### Changed
 
-- Requires `lib_log_rich>=7.3.0` (was 6.5.7). With the raised floor, a `[lib_log_rich]
+- Requires `lib_log_rich>=8.0.1` (was 6.5.7). With the raised floor, a `[lib_log_rich]
   console_theme` other than `classic`, `dark`, `neon` or `pastel` stops the tool when the
   configuration loads (exit 78), and a section with several invalid settings reports every one
   of them. A 1.0.0 install that resolved lib_log_rich below 7.0.1 accepted an unknown theme and
   reported only the first invalid setting; an unknown console stream, format preset, Graylog
   protocol or queue policy already stopped 1.0.0. The shipped defaults are all valid.
+- An unknown key in `[lib_log_rich]`, or in its `payload_limits` table, is refused: every command
+  that reads the configuration stops with exit 78 and one line such as
+  `Error: lib_log_rich.custom_field: Extra inputs are not permitted`. A 1.0.0 install that
+  resolved lib_log_rich below 8.0.0 dropped such a key silently, so a misspelled logging setting
+  left its default in place; the raised lib_log_rich floor makes the refusal certain, and
+  pve-winrepair reports it like its own configuration problems.
 - The guest tool runs on `pwshpy==1.8.0` (was 1.6.0). `launch` registers its SYSTEM task through
   pwshpy's `register_scheduled_task` with task settings (no trigger, start and keep running on
   battery, 72 h limit, a second start ignored, hard terminate and start on demand allowed)

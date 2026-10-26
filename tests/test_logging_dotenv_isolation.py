@@ -189,6 +189,30 @@ def test_each_refused_logging_setting_gets_its_own_line(tmp_path: Path) -> None:
 
 
 @pytest.mark.os_agnostic
+@pytest.mark.parametrize(
+    ("override", "line"),
+    [
+        ("lib_log_rich.custom_field=x", "Error: lib_log_rich.custom_field: Extra inputs are not permitted"),
+        (
+            "lib_log_rich.payload_limits.bogus=3",
+            "Error: lib_log_rich.payload_limits.bogus: Extra inputs are not permitted",
+        ),
+    ],
+    ids=["top-level", "payload-limits"],
+)
+def test_an_unknown_logging_key_is_a_configuration_error_naming_the_key(
+    tmp_path: Path, override: str, line: str
+) -> None:
+    """A key lib_log_rich does not know is refused like a refused value: one line, exit 78, no traceback."""
+    result = _run(tmp_path, "--set", override, "config")
+
+    assert result.returncode == 78, result.stderr
+    assert [text for text in result.stderr.splitlines() if text.startswith("Error:")] == [line]
+    assert "Traceback" not in result.stderr
+    assert "pydantic.dev" not in result.stderr
+
+
+@pytest.mark.os_agnostic
 def test_a_value_only_lib_log_rich_itself_refuses_is_a_configuration_error_too(tmp_path: Path) -> None:
     """``queue_maxsize = 0`` passes the type check and is refused by lib_log_rich's own range check."""
     env = {f"{PREFIX}___LIB_LOG_RICH__QUEUE_MAXSIZE": "0"}

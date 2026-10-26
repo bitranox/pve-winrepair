@@ -79,9 +79,9 @@ def parse_override(raw: str) -> ConfigOverride:
         >>> override.value
         'DEBUG'
 
-        >>> override = parse_override("lib_log_rich.payload_limits.max_chars=8192")
+        >>> override = parse_override("lib_log_rich.payload_limits.message_max_chars=8192")
         >>> override.key_path
-        ('payload_limits', 'max_chars')
+        ('payload_limits', 'message_max_chars')
         >>> override.value
         8192
 

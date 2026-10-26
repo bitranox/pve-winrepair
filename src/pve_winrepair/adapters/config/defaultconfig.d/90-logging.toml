@@ -36,6 +36,9 @@
 # Precedence (lowest to highest):
 #   defaults -> app config -> host config -> user config -> .env file -> env vars
 #
+# An unknown key (also in [lib_log_rich.payload_limits]) or a refused value stops every
+# command that reads these settings, naming lib_log_rich.<key>.
+#
 # IMPORTANT: Never commit .env files containing secrets to version control
 #
 [lib_log_rich]
