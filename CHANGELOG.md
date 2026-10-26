@@ -41,7 +41,7 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ### Changed
 
-- Requires `lib_log_rich>=7.1.0` (was 6.5.7). With the raised floor, a `[lib_log_rich]
+- Requires `lib_log_rich>=7.3.0` (was 6.5.7). With the raised floor, a `[lib_log_rich]
   console_theme` other than `classic`, `dark`, `neon` or `pastel` stops the tool when the
   configuration loads (exit 78), and a section with several invalid settings reports every one
   of them. A 1.0.0 install that resolved lib_log_rich below 7.0.1 accepted an unknown theme and

@@ -11,7 +11,7 @@ dependencies = [
     "lib_cli_exit_tools>=2.4.1",
     # At least 7.0.1: settings parse into enums, so an unknown console_theme is refused at load and a section
     # reports every invalid setting; validate_config (config --profile's check) refuses what init() does.
-    "lib_log_rich>=7.1.0",
+    "lib_log_rich>=7.3.0",
     "python-dotenv>=1.2.4",
     "lib_layered_config>=7.3.0",
     "pydantic>=2.14.1",
