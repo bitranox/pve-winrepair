@@ -244,7 +244,10 @@ it runs out, the tool ends its ssh and the run stops, but the command that ssh s
 the node: `qm snapshot` can still finish, and the node's `scp` can keep writing into the guest's
 stage root. Before you retry such a run, check on the node that nothing of it is still running: the
 VM's tasks in the PVE web UI (`qm listsnapshot <vmid>` lists a snapshot that finished meanwhile),
-and `ps -ef | grep '[s]cp '` for a copy to the guest.
+and, for a copy to the guest, `pgrep -af '[s]cp .*@<guest ip>:'` with the guest's address: the node
+runs other copies too, and this one names that address in its target (the brackets keep the pattern
+from matching the shell that runs it, when you send the command over ssh). No output means none is
+left.
 
 ---
 
