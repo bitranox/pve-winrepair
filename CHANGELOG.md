@@ -6,6 +6,30 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+### Added
+
+- `repair` and `apply` can run on a workstation (Linux, macOS or Windows) and drive a remote PVE
+  node over ssh. `[node] host`, or `--node HOST` for one run, names the node; `--node ""` runs on
+  this machine although `[node] host` is set. The tool logs in to the node as `[node] ssh_user`
+  (default `root`) with `[node] ssh_key`, checks the node's host key strictly against
+  `[node] known_hosts_file` (default `~/.ssh/known_hosts`), runs `qm` there, and reaches the
+  guests through the node with a `ProxyCommand` that logs in with the node key, so the guest key
+  is never offered to the node. A node that does not answer, refuses the key or its host key, or
+  has no `qm` is refused before any VM call (exit 1), and so is a node named without
+  `[node] ssh_key`. README "From a workstation" walks through it.
+- `repair --media node|local` and `[repair] media_source` (default `"node"`): `node` stages
+  `[repair] media_dir` on the node, `local` stages `[repair] local_media_dir` from the machine
+  running the tool. With a remote node, `node` has the node's own scp copy the media into the
+  guest, logging in with the guest key from this machine's ssh-agent, forwarded for that copy
+  only. Before any VM call the run refuses unconfigured, missing or empty media and, for a remote
+  `node`, no reachable ssh-agent, an agent holding no key, or a node that did not receive it.
+- `[repair] stage_timeout_minutes` (default 90, a whole number from 1 to 1440): how long the media
+  copy to the guest may take; it was a fixed 90 minutes.
+- `repair --receipt FILE` and `apply --receipt FILE`: one receipt file on this machine instead of
+  `receipt-<vmid>.json` in `[node] state_dir`, made absolute against the current directory with
+  its symbolic links resolved. `repair` refuses (exit 1), before any VM call, a file that holds
+  another VM's receipt or that exists but is no valid receipt; that file is left as it is.
+
 ### Changed
 
 - Requires `lib_log_rich>=7.0.1` (was 6.5.7). The `[lib_log_rich]` settings are checked when the
@@ -45,6 +69,30 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   instead of being skipped.
 - A `[lib_log_rich]` section with several invalid settings reports every one of them, not only
   the first.
+- New load-time refusals (exit 78, before any call) that a configuration accepted by 1.0.0 can
+  hit:
+  - `[ssh] known_hosts_file` that is empty, or holds whitespace or `"`. ssh's option parser split a
+    spaced value into several files, and an empty one made every ssh fail. A `%` token stays
+    allowed there.
+  - On Windows, `[node] state_dir` without a drive, such as the former default
+    `/var/lib/pve-winrepair`: the directory must be absolute on the machine running the tool. The
+    Windows default is now `%LOCALAPPDATA%\pve-winrepair`, and with `LOCALAPPDATA` unset and no
+    `state_dir` the setting is refused by name. On POSIX the rule is unchanged (a relative path,
+    `""` and a leading `~` were refused before); the message now reads `must be an absolute path on
+    this machine`.
+  - The new `[node]` keys are checked even when no node is used: `host` (letters, digits, `.` and
+    `-`, so `_` is refused), `ssh_user`, `ssh_key` (no `"` or `%`) and `known_hosts_file` (not
+    empty; no whitespace, `"` or `%`). An environment override such as
+    `PVE_WINREPAIR___NODE__HOST=pve_1` therefore stops every `repair` and `apply`.
+- `repair` refuses (exit 1), before any VM call, a `receipt-<vmid>.json` in `[node] state_dir`
+  that holds another VM's receipt; before, it removed it, and that VM's `apply` then had no
+  receipt. A per-VM file that is no valid receipt is still replaced.
+
+### Fixed
+
+- ssh, scp, ssh-keygen and ssh-add no longer read the caller's stdin, so a shell loop such as
+  `while read v; do pve-winrepair repair --vmid "$v"; done < list` runs every VM in the list
+  (before, the first VM's ssh read the rest of the list; with or without `--node`).
 
 
 ## [1.0.0] 2026-10-23 22:06:16

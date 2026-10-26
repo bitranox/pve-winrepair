@@ -2,10 +2,16 @@
 # pve-winrepair - node CLI settings
 # ==============================================================================
 #
-# Put the values for your site in the app layer, /etc/pve-winrepair/config.toml on the
-# Proxmox node (precedence and the other layers: see defaultconfig.toml). An unknown key
-# or a refused value stops every command that reads these settings, naming
-# <section>.<key>.
+# Put the values for your site on the machine that runs the tool (precedence and the other
+# layers: see defaultconfig.toml):
+#   - on the Proxmox node itself, in the app layer, /etc/pve-winrepair/config.toml;
+#   - on a workstation that drives a node over ssh ([node] host below), usually in the user
+#     layer: ~/.config/pve-winrepair/config.toml on Linux,
+#     ~/Library/Application Support/bitranox/pve-winrepair/config.toml on macOS,
+#     %APPDATA%\bitranox\pve-winrepair\config.toml on Windows.
+# Either way the tool reads only the files of the machine it runs on, never the node's when
+# it drives a remote one. An unknown key or a refused value stops every command that reads
+# these settings, naming <section>.<key>.
 #
 # Environment Variable format: PVE_WINREPAIR___<SECTION>__<KEY>=<VALUE>, for example
 #   PVE_WINREPAIR___SSH__KEY=/root/.ssh/id_guest
@@ -77,8 +83,9 @@ expected_runners = 0
 
 # Purpose: Directory on the node that holds the Windows installation media, unpacked as on
 #          the ISO (not the ISO file): setup.exe and sources\install.wim at its top level.
-#          `repair` copies everything in it to the guest's stage root.
-# Type: string (path); required by `repair`
+#          `repair` copies its entries to the guest's stage root (a remote node's own copy
+#          skips names starting with .).
+# Type: string (path); required by `repair` when media_source = "node"
 # Default: "" (not configured)
 # Environment Variable: PVE_WINREPAIR___REPAIR__MEDIA_DIR=/srv/media
 # Note: read when media_source = "node"

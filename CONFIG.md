@@ -222,7 +222,7 @@ through that string); a space is fine.
 
 **`known_hosts_file`** (default `"~/.ssh/known_hosts"`): the known_hosts file the remote node's host
 key is checked against, passed to ssh as written (ssh expands a leading `~`). The check is strict:
-a node whose key is missing from the file, or has changed, is refused before any call, so add the
+a node whose key is missing from the file, or has changed, is refused before any VM call, so add the
 node's key there first. It is not `[ssh] known_hosts_file`, which holds the guests' keys; the jump
 through the node to a guest checks the node against this file too. An empty value, whitespace, `"`
 and `%` are refused at load: ssh splits the value at whitespace, and expands a `%` token once more

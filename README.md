@@ -20,7 +20,8 @@ installation media of the same edition replaces the component store instead of p
 keeps the applications, settings and data.
 
 `pve-winrepair` runs that upgrade from the Proxmox node over ssh, without anyone logging in to the
-guest. It takes two commands. `pve-winrepair repair --vmid N` prepares and starts the upgrade:
+guest, or from a workstation that drives the node over ssh ([From a workstation](#from-a-workstation)).
+It takes two commands. `pve-winrepair repair --vmid N` prepares and starts the upgrade:
 
 1. It refuses a guest on which an upgrade run is still live. With `--ip`, it first refuses a guest
    that is not the VM: one of the MACs of the VM's `netN` devices in `qm config` must be among the
@@ -43,12 +44,14 @@ guest. It takes two commands. `pve-winrepair repair --vmid N` prepares and start
    such drive it uses `C:\upgrade`, but only when `C:` has room for both the media and the upgrade.
    Whichever drive it stages on, `C:` always needs `[repair] system_free_gb` free for the upgrade
    itself. The directory is created already locked to SYSTEM and Administrators, and the installation
-   media are then copied from the node into it. A staging directory that exists already and is
+   media are then copied into it, from the node (or, with `--media local`, from the machine running
+   the tool). A staging directory that exists already and is
    exactly locked is reused, and the copy goes over what is in it: files of other media stay. Remove
    it (`rd /s /q X:\upgrade`, as an administrator) before staging different media.
 6. It gates on the WIM: `sources\install.wim` must be readable and its image 1 must not be older than
    the build the guest runs (the build number first, then the servicing build). The image's build,
-   with the build and the InstallDate the guest runs at that moment, goes into a receipt on the node.
+   with the build and the InstallDate the guest runs at that moment, goes into a receipt on the
+   machine running the tool.
 7. It launches setup.exe from a SYSTEM scheduled task (ssh kills a process tree that outlives its
    connection, and setup runs for hours) and polls the run's own state log until it reports
    `STATE=DONE-OK` or `STATE=DONE-FAIL`.
@@ -74,6 +77,10 @@ On the Proxmox VE node:
 - A directory with the installation media, unpacked as on the ISO: `setup.exe` and
   `sources\install.wim` at its top level. Use media of the guest's edition and language; setup keeps
   the applications only then. The WIM gate refuses media older than the guest's build.
+
+To drive the node from a workstation instead, see [From a workstation](#from-a-workstation): uv
+and the tool then run on the workstation, and the node needs an ssh login for the tool and, unless
+the media come from the workstation, the media directory.
 
 On the Windows guest (Windows 10 or 11):
 
@@ -158,6 +165,139 @@ A persistent install works too (`uv tool install --exclude-newer "7 days" pve-wi
 
    It ends with `vm 100: VERIFIED` once the new build is in place and Windows Update is released.
 
+## From a workstation
+
+`repair` and `apply` can also run on a Linux, macOS or Windows workstation that drives the node over
+ssh. `[node] host` names the node; `--node HOST` overrides it for one run, and `--node ""` runs on
+this machine although `[node] host` is set. The tool then runs each `qm` command on the node over
+ssh and reaches the guests through it: every guest ssh and scp goes through a `ProxyCommand`
+(`ssh -W`) that logs in to the node with the node key, so the guest key is never offered to the
+node. The node needs no pve-winrepair install. Before any VM call the run checks that the node
+answers, accepts the key, has a known host key and has `qm`, and is refused (exit 1) otherwise.
+
+What the workstation needs (the `[node]` settings in detail: [CONFIG.md](CONFIG.md#node)):
+
+- uv and the tool, as in [Install and run](#install-and-run), and the OpenSSH client: `ssh` and
+  `scp`, plus `ssh-add` and `ssh-keygen` for `--media node`.
+- `[node] ssh_key`, the private key this machine logs in to the node with, as `[node] ssh_user`
+  (`root` by default: the commands call `qm`). It is not `[ssh] key`, the key for the guests. A run
+  that names a node without `ssh_key` is refused before any call.
+- The node's host key in `[node] known_hosts_file` (default `~/.ssh/known_hosts`). It is always
+  checked strictly: a node whose key is missing from the file or has changed is refused before any
+  VM call, so log in to the node once by hand and compare its fingerprint first. On Windows such a
+  refusal has been seen to end as `no answer within 30 s` instead of ssh's own message.
+- With `[ssh] strict_host_key_checking = true` (the default), each guest's host key in THIS
+  machine's `[ssh] known_hosts_file`: the guest logins start here. Record it as in [Check the login
+  from the node](docs/windows-guest-ssh.md#4-check-the-login-from-the-node), run on the workstation
+  with `-o ProxyCommand="ssh -i ~/.ssh/id_pve_node -W %h:%p root@pve1"` added so the login goes
+  through the node.
+- A receipt directory it can write, `[node] state_dir`: by default `/var/lib/pve-winrepair` on
+  Linux and macOS, which an account other than root cannot create, so set it there, and
+  `%LOCALAPPDATA%\pve-winrepair` on Windows.
+
+The media come from `--media node|local` (default `[repair] media_source`, `"node"`; details in
+[CONFIG.md](CONFIG.md#repair)):
+
+- `node` stages `[repair] media_dir` on the node. The node's own scp copies it into the guest and
+  logs in there with the guest key from THIS machine's ssh-agent, forwarded to the node for that
+  copy only, so the key is never stored on the node. `ssh-add` the guest key first; the node's sshd
+  must allow agent forwarding (`AllowAgentForwarding`, on by default). With strict host key
+  checking, the guest's line from this machine's `[ssh] known_hosts_file` is handed to the node for
+  the copy, so a `%` token in that path (`known_hosts_%h`) refuses `node`; without it the node
+  checks no key. Names starting with `.` in `media_dir` are not copied.
+- `local` stages `[repair] local_media_dir` from this machine, through the node, so the whole media
+  cross the workstation's link. `[repair] stage_timeout_minutes` (default 90, 1 to 1440) bounds the
+  copy either way; raise it for a slow link.
+
+The receipt stays on the machine running the tool: `receipt-<vmid>.json` in `[node] state_dir`, or
+the file `--receipt FILE` names, made absolute against the current directory. Give `apply` the same
+file, and give runs that run at the same time a file each
+([The repair receipt](#the-repair-receipt)).
+
+A time limit ends only this machine's side of a node call: `qm snapshot` or the node's media copy
+can go on running on the node after the run has stopped. Check the node before you retry such a run
+([CONFIG.md](CONFIG.md#node) says what to look at).
+
+ssh files a guest's host key under its IP address, so one `[ssh] known_hosts_file` shared by the
+nodes of several sites mixes their guests: with strict checking on, a private address reused by
+another site's guest is refused as "REMOTE HOST IDENTIFICATION HAS CHANGED". Give each site a profile with its own file and run it as
+`pve-winrepair --profile site-b repair ...`; a profile does not inherit the plain user
+configuration, so its file holds the site's whole configuration ([CONFIG.md](CONFIG.md#ssh)).
+
+### Example: Linux
+
+`~/.config/pve-winrepair/config.toml`:
+
+```toml
+[node]
+host = "pve1"
+ssh_key = "~/.ssh/id_pve_node"                      # this machine's key for the node
+state_dir = "/home/op/.local/state/pve-winrepair"   # absolute, no ~
+
+[ssh]
+key = "~/.ssh/id_guest"                             # the key for the guests
+user = "admin"
+known_hosts_file = "~/.ssh/known_hosts_guests"
+
+[guest]
+subnet = "192.0.2.0/24"
+
+[repair]
+media_dir = "/var/lib/vz/winmedia/win11"            # on the node, for --media node
+local_media_dir = "/home/op/winmedia/win11"         # on this machine, for --media local
+```
+
+```bash
+ssh-add ~/.ssh/id_guest     # the node's media copy logs in to the guest with it
+pve-winrepair config        # check what the tool reads
+pve-winrepair repair --vmid 100
+pve-winrepair apply --vmid 100 --ip 192.0.2.10
+
+# Media from this machine, and the receipt in a file of its own:
+pve-winrepair repair --vmid 101 --media local --receipt ~/pvewr/vm101.json
+pve-winrepair apply --vmid 101 --ip 192.0.2.11 --receipt ~/pvewr/vm101.json
+```
+
+### Example: Windows
+
+`%APPDATA%\bitranox\pve-winrepair\config.toml`. In a double-quoted TOML string every backslash is
+doubled (or write the path in single quotes, see [CONFIG.md](CONFIG.md#settings)); a space in a key
+path is fine, a known_hosts path must have none:
+
+```toml
+[node]
+host = "pve1"
+ssh_key = "C:\\Users\\op\\pve keys\\id_pve_node"
+known_hosts_file = "C:\\Users\\op\\.ssh\\known_hosts_nodes"
+
+[ssh]
+key = "C:\\Users\\op\\pve keys\\id_guest"
+user = "admin"
+known_hosts_file = "C:\\Users\\op\\.ssh\\known_hosts_guests"
+
+[guest]
+subnet = "192.0.2.0/24"
+
+[repair]
+media_dir = "/var/lib/vz/winmedia/win11"
+```
+
+`[node] state_dir` keeps its Windows default. In PowerShell:
+
+```powershell
+# Once, as an administrator, if the OpenSSH agent service is not running:
+Set-Service ssh-agent -StartupType Automatic
+Start-Service ssh-agent
+
+ssh-add "C:\Users\op\pve keys\id_guest"
+pve-winrepair repair --vmid 100
+pve-winrepair apply --vmid 100 --ip 192.0.2.10
+```
+
+Settings of this shape, given as environment variables, have run a `--stage-only` repair with
+`--media node` from Windows (OpenSSH for Windows 10.0p2), the node and guest keys in directories
+whose names hold a space.
+
 ## CLI reference
 
 Options given before the command apply to every command: `--version`, `--profile NAME`, `--set
@@ -176,19 +316,19 @@ SECTION.KEY=VALUE` (repeatable), `--env-file PATH`, `--traceback` / `--no-traceb
 
 `repair` options:
 
-| Option              | Default                  | Meaning                                                                                             |
-|---------------------|--------------------------|-----------------------------------------------------------------------------------------------------|
-| `--vmid N`          | required                 | The guest's VMID on the node                                                                        |
-| `--snapshot-name S` | `[repair] snapshot_name` | The snapshot to take; an existing snapshot of that name is reused                                   |
-| `--hours H`         | `6.0`                    | How long to poll for the verdict; a finite number above 0                                           |
-| `--stage-only`      | off                      | Stage the media and hold Windows Update, but neither gate the WIM nor launch setup (verdict STAGED) |
-| `--ip IP`           | from the agent           | The guest's IPv4 address, for a guest without the QEMU agent; implies the powered-off snapshot      |
-| `--node HOST`       | `[node] host`            | The PVE node to drive over ssh, guests reached through it; this machine with neither or `--node ""` |
-| `--receipt FILE`    | `[node] state_dir`       | The receipt file on this machine, made absolute in the current directory, instead of the per-VM one |
-| `--media M`         | `[repair] media_source`  | `node`: `[repair] media_dir` on the node; `local`: `[repair] local_media_dir` on this machine       |
-| `--stage-root X:`   | measured                 | The drive to stage on; by default a non-system fixed drive with room, else `C:`                     |
-| `--tpm-storage S`   | the guest disk's storage | The PVE storage ID for a new vTPM volume                                                            |
-| `--json`            | off                      | Print a JSON envelope on stdout                                                                     |
+| Option              | Default                                     | Meaning                                                                                                |
+|---------------------|---------------------------------------------|--------------------------------------------------------------------------------------------------------|
+| `--vmid N`          | required                                    | The guest's VMID on the node                                                                           |
+| `--snapshot-name S` | `[repair] snapshot_name`                    | The snapshot to take; an existing snapshot of that name is reused                                      |
+| `--hours H`         | `6.0`                                       | How long to poll for the verdict; a finite number above 0                                              |
+| `--stage-only`      | off                                         | Stage the media and hold Windows Update, but neither gate the WIM nor launch setup (verdict STAGED)    |
+| `--ip IP`           | from the agent                              | The guest's IPv4 address, for a guest without the QEMU agent; implies the powered-off snapshot         |
+| `--node HOST`       | `[node] host`                               | The PVE node to drive over ssh, guests reached through it; this machine with neither or `--node ""`    |
+| `--receipt FILE`    | `receipt-<vmid>.json` in `[node] state_dir` | A receipt file on this machine instead, made absolute in the current directory; one per concurrent run |
+| `--media M`         | `[repair] media_source`                     | `node`: `[repair] media_dir` on the node; `local`: `[repair] local_media_dir` on this machine          |
+| `--stage-root X:`   | measured                                    | The drive to stage on; by default a non-system fixed drive with room, else `C:`                        |
+| `--tpm-storage S`   | the guest disk's storage                    | The PVE storage ID for a new vTPM volume                                                               |
+| `--json`            | off                                         | Print a JSON envelope on stdout                                                                        |
 
 `apply` takes `--vmid N` and `--ip IP` (both required), `--node HOST` and `--receipt FILE` (as for
 `repair`; give `apply` the file the repair wrote), `--apply-minutes M` (default `90.0`: how long
@@ -216,30 +356,31 @@ may not write); [CONFIG.md](CONFIG.md) has them.
 
 ## Configuration
 
-The settings live in `/etc/pve-winrepair/config.toml` on the node. [CONFIG.md](CONFIG.md) explains
-every key, the other layers and the environment overrides.
+On the node the settings live in `/etc/pve-winrepair/config.toml`; on a workstation that drives a
+node, in that machine's own configuration ([From a workstation](#from-a-workstation)).
+[CONFIG.md](CONFIG.md) explains every key, the other layers and the environment overrides.
 
-| Key                              | Default                | Meaning                                                            |
-|----------------------------------|------------------------|--------------------------------------------------------------------|
-| `[ssh] key`                      | `""` (required)        | Private key the node logs in to the guests with                    |
-| `[ssh] user`                     | `"Administrator"`      | Administrator account on the guest                                 |
-| `[ssh] strict_host_key_checking` | `true`                 | Refuse an unknown or changed guest host key                        |
-| `[ssh] known_hosts_file`         | `"~/.ssh/known_hosts"` | known_hosts file for the guests                                    |
-| `[guest] subnet`                 | `""`                   | The LAN the guest's address is picked from (set it)                |
-| `[guest] runner_tasks`           | `[]`                   | Values for the guest tool's `verify-runners --task`                |
-| `[guest] expected_runners`       | `0`                    | Value for the guest tool's `verify-runners --expected`             |
-| `[repair] media_dir`             | `""` (required)        | Directory on the node with the unpacked installation media         |
-| `[repair] media_source`          | `"node"`               | Media from `media_dir` (`"node"`) or `local_media_dir` (`"local"`) |
-| `[repair] local_media_dir`       | `""`                   | This machine's copy of the media, for `media_source = "local"`     |
-| `[repair] stage_timeout_minutes` | `90`                   | Minutes the media copy to the guest may take (1 to 1440)           |
-| `[repair] snapshot_name`         | `"pre_winrepair"`      | Snapshot taken before the repair                                   |
-| `[repair] stage_free_gb`         | `15.0`                 | Free GiB the staging drive needs                                   |
-| `[repair] system_free_gb`        | `25.0`                 | Free GiB `C:` needs                                                |
-| `[node] state_dir`               | per OS (see CONFIG.md) | Where the repair receipts are kept                                 |
-| `[node] host`                    | `""`                   | PVE node to drive over ssh; empty: this machine                    |
-| `[node] ssh_user`                | `"root"`               | Account this machine logs in as on the node                        |
-| `[node] ssh_key`                 | `""`                   | Private key for the node (required with a node host)               |
-| `[node] known_hosts_file`        | `"~/.ssh/known_hosts"` | known_hosts file the node's host key is checked against            |
+| Key                              | Default                | Meaning                                                                                            |
+|----------------------------------|------------------------|----------------------------------------------------------------------------------------------------|
+| `[ssh] key`                      | `""` (required)        | Private key the tool logs in to the guests with                                                    |
+| `[ssh] user`                     | `"Administrator"`      | Administrator account on the guest                                                                 |
+| `[ssh] strict_host_key_checking` | `true`                 | Refuse an unknown or changed guest host key                                                        |
+| `[ssh] known_hosts_file`         | `"~/.ssh/known_hosts"` | known_hosts file for the guests                                                                    |
+| `[guest] subnet`                 | `""`                   | The LAN the guest's address is picked from (set it)                                                |
+| `[guest] runner_tasks`           | `[]`                   | Values for the guest tool's `verify-runners --task`                                                |
+| `[guest] expected_runners`       | `0`                    | Value for the guest tool's `verify-runners --expected`                                             |
+| `[repair] media_dir`             | `""`                   | Directory on the node with the unpacked installation media (required with `media_source = "node"`) |
+| `[repair] media_source`          | `"node"`               | Media from `media_dir` (`"node"`) or `local_media_dir` (`"local"`)                                 |
+| `[repair] local_media_dir`       | `""`                   | This machine's copy of the media, for `media_source = "local"`                                     |
+| `[repair] stage_timeout_minutes` | `90`                   | Minutes the media copy to the guest may take (1 to 1440)                                           |
+| `[repair] snapshot_name`         | `"pre_winrepair"`      | Snapshot taken before the repair                                                                   |
+| `[repair] stage_free_gb`         | `15.0`                 | Free GiB the staging drive needs                                                                   |
+| `[repair] system_free_gb`        | `25.0`                 | Free GiB `C:` needs                                                                                |
+| `[node] state_dir`               | per OS (see CONFIG.md) | Where the repair receipts are kept                                                                 |
+| `[node] host`                    | `""`                   | PVE node to drive over ssh; empty: this machine                                                    |
+| `[node] ssh_user`                | `"root"`               | Account this machine logs in as on the node                                                        |
+| `[node] ssh_key`                 | `""`                   | Private key for the node (required with a node host)                                               |
+| `[node] known_hosts_file`        | `"~/.ssh/known_hosts"` | known_hosts file the node's host key is checked against                                            |
 
 Any key can be overridden for one run with `PVE_WINREPAIR___<SECTION>__<KEY>`. The usual case is a
 guest that refuses the configured key:
