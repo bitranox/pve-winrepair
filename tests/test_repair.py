@@ -868,16 +868,24 @@ def _run(
     link: NodeLink | None = None,
     media: MediaChoice = MediaChoice.NODE,
     ssh: SshSettings = SSH,
+    tpm_storage: str | None = None,
 ) -> tuple[RunResult, list[dict[str, object]]]:
     """Run the whole repair (not stage-only by default) on a fake node; return the result and its steps.
 
     ``media_dir`` is both ``[repair] media_dir`` and ``local_media_dir``; ``media`` picks which one the run
     stages from. The receipts go to ``receipts``, by default a state directory beside ``media_dir``;
-    ``link`` makes the node a remote one (default: this machine); ``ssh`` is its ``[ssh]`` section.
+    ``link`` makes the node a remote one (default: this machine); ``ssh`` is its ``[ssh]`` section;
+    ``tpm_storage`` is ``--tpm-storage``.
     """
     address = None if ip is None else IPv4Address(ip)
     request = RepairRequest(
-        vmid=1, snapshot_name="pre_kb_test", hours=hours, ip=address, stage_only=stage_only, media=media
+        vmid=1,
+        snapshot_name="pre_kb_test",
+        hours=hours,
+        ip=address,
+        stage_only=stage_only,
+        media=media,
+        tpm_storage=tpm_storage,
     )
     result = run_repair(
         request,
@@ -1536,6 +1544,28 @@ def test_a_qm_config_that_cannot_be_read_is_refused(tmp_path: Path) -> None:
     result, steps = _run(runner, _media(tmp_path), ip=GUEST_IP, stage_only=True)
     assert (result.exit, result.verdict) == (RunExit.REFUSED, "ERROR")
     assert steps[-1]["message"] == "cannot read qm config 1 to bind the guest at 192.0.2.10 to it: rc=2: no such VM"
+
+
+@pytest.mark.parametrize("tpm_storage", [None, "tpmstore"])
+@pytest.mark.parametrize("status", ["running", "stopped"])
+def test_a_qm_config_that_cannot_be_read_refuses_the_vtpm_step_before_it_stops_the_vm(
+    tmp_path: Path, status: str, tpm_storage: str | None
+) -> None:
+    # With --tpm-storage nothing else needs the config, so a misread would stop the VM and add a vTPM.
+    pve = FakePve(status)
+
+    def qm(cmd: list[str]) -> Reply:
+        return Reply(2, "", "ipcc_send_rec[1] failed: Connection refused\n") if cmd[1] == "config" else pve(cmd)
+
+    runner = agent_runner(pve, qm=qm)
+    result, steps = _run(runner, _media(tmp_path), tpm_storage=tpm_storage)
+    assert (result.exit, result.verdict) == (RunExit.REFUSED, "ERROR")
+    # A running VM reached through the agent has its Windows Update held by then; the hint follows.
+    assert str(steps[-1]["message"]).startswith(
+        "cannot read qm config 1 to check its vTPM: rc=2: ipcc_send_rec[1] failed: Connection refused"
+    )
+    assert [label for label in call_labels(runner.calls) if label.split()[-1] in MUTATING_QM] == []
+    assert pve.status == status
 
 
 def test_a_mac_the_guest_reports_that_is_not_a_mac_is_a_protocol_error(tmp_path: Path) -> None:

@@ -88,6 +88,10 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 - `repair` refuses (exit 1), before any VM call, a `receipt-<vmid>.json` in `[node] state_dir`
   that holds another VM's receipt; before, it removed it, and that VM's `apply` then had no
   receipt. A per-VM file that is no valid receipt is still replaced.
+- `repair` refuses (exit 1) when `qm config` fails at the vTPM step, quoting qm's output, before
+  the VM is shut down or changed. Before, and in 1.0.0, the failed read was taken as a config
+  with no TPM: without `--tpm-storage` the run stopped with "cannot determine storage", and with
+  `--tpm-storage` it shut the guest down and added a vTPM it may already have had.
 
 ### Fixed
 

@@ -50,7 +50,7 @@ from pve_winrepair.application.guest_state import read_guest_build, read_run_sta
 from pve_winrepair.application.vm import VmStatus, VmStatusError, vm_status, wait_status
 from pve_winrepair.domain.addresses import AmbiguousAddressError, lan_address
 from pve_winrepair.domain.enums import DriveLetter, MediaChoice
-from pve_winrepair.domain.envelope import PROBE_TIMEOUT, READ_FAILURES, GuestCallError
+from pve_winrepair.domain.envelope import PROBE_TIMEOUT, READ_FAILURES, GuestCallError, snippet
 from pve_winrepair.domain.guest_answers import (
     DrivesAnswer,
     GuestCommand,
@@ -253,9 +253,17 @@ def ensure_vtpm(node: NodePort, vmid: int, rep: Report, storage: str | None = No
 
     The MoSetup waiver covers an UNSUPPORTED TPM, not an ABSENT one, so a guest without
     tpmstate0 needs real vTPM hardware before the upgrade can start.
+
+    Raises:
+        RepairError: ``qm config`` failed, before the VM is stopped or changed: its empty output
+            reads as a config with no TPM, which would stop the guest and add one it may have.
     """
-    # The exit code is not consulted: a failed read parses as a config with no TPM and no disk.
-    config = node.vm_config(vmid).config
+    read = node.vm_config(vmid)
+    if read.returncode != 0:
+        raise RepairError(
+            f"cannot read qm config {vmid} to check its vTPM: rc={read.returncode}: {snippet(read.output)}"
+        )
+    config = read.config
     if config.tpmstate:
         rep.add(StepName.VTPM, ok=True, note="already present")
         return False
