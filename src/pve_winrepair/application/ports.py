@@ -233,7 +233,9 @@ class ReceiptStore(Protocol):
     def other_vm(self, vmid: int) -> int | None:
         """The VM the receipt at ``path(vmid)`` names when that is not ``vmid``.
 
-        None when there is no receipt there, it names ``vmid``, or it cannot be read or parsed.
+        None when there is no receipt there or it names ``vmid``; None as well when the store's own per-VM
+        file cannot be read or parsed. A ``ReceiptError`` when the operator named the file (``--receipt``)
+        and it exists but is no valid receipt: it may be any file, so it is left alone.
         """
         ...
 
@@ -242,7 +244,10 @@ class ReceiptStore(Protocol):
         ...
 
     def delete(self, vmid: int) -> None:
-        """Remove the receipt of ``vmid``; an absent one is fine, one that cannot be removed a ``ReceiptError``."""
+        """Remove the receipt of ``vmid``; an absent one is fine, one that cannot be removed a ``ReceiptError``.
+
+        An operator-named file (``--receipt``) that is no valid receipt is never removed: ``ReceiptError``.
+        """
         ...
 
 

@@ -7,6 +7,7 @@ reads back from disk, so a round trip through the filesystem is the contract.
 from __future__ import annotations
 
 import json
+import os
 import stat
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
@@ -139,12 +140,63 @@ def test_other_vm_is_none_without_a_file_and_for_the_same_vm(tmp_path: Path) -> 
     assert store.other_vm(8) is None
 
 
-@pytest.mark.parametrize("content", [b"{not json", b"\xff\xfe{", b'{"vmid": 7}'], ids=["json", "utf8", "fields"])
-def test_other_vm_is_none_for_a_file_that_is_no_valid_receipt(tmp_path: Path, content: bytes) -> None:
-    # An unreadable or invalid file keeps today's behaviour: the repair removes it later.
-    file = tmp_path / "r.json"
+NO_RECEIPTS = pytest.mark.parametrize(
+    "content",
+    [b"{not json", b"\xff\xfe{", b'{"vmid": 7}', b'[node]\nhost = "pve1"\n'],
+    ids=["json", "utf8", "fields", "toml"],
+)
+
+
+@NO_RECEIPTS
+def test_other_vm_is_none_for_a_per_vm_file_that_is_no_valid_receipt(tmp_path: Path, content: bytes) -> None:
+    # The store's own receipt-<vmid>.json names no VM whose receipt could be lost: the repair removes it later.
+    store = FileReceiptStore(tmp_path)
+    store.path(8).write_bytes(content)
+    assert store.other_vm(8) is None
+
+
+@NO_RECEIPTS
+def test_other_vm_refuses_a_receipt_file_given_that_is_no_valid_receipt(tmp_path: Path, content: bytes) -> None:
+    # An operator-named file may be anything (a config, a key): it is never treated as a stale receipt.
+    file = tmp_path / "config.toml"
     file.write_bytes(content)
-    assert FileReceiptStore(tmp_path, file).other_vm(8) is None
+    with pytest.raises(ReceiptError) as caught:
+        FileReceiptStore(tmp_path, file).other_vm(8)
+    assert str(caught.value).startswith(f"--receipt {file} is not a repair receipt, so it is left alone - ")
+    assert file.read_bytes() == content
+
+
+@NO_RECEIPTS
+def test_delete_refuses_a_receipt_file_given_that_is_no_valid_receipt(tmp_path: Path, content: bytes) -> None:
+    file = tmp_path / "config.toml"
+    file.write_bytes(content)
+    with pytest.raises(ReceiptError, match=r"is not a repair receipt, so it is left alone"):
+        FileReceiptStore(tmp_path, file).delete(8)
+    assert file.read_bytes() == content
+
+
+@pytest.mark.os_posix
+def test_other_vm_refuses_a_receipt_file_given_that_cannot_be_read(tmp_path: Path) -> None:
+    file = tmp_path / "r.json"
+    FileReceiptStore(tmp_path, file).write(_receipt(vmid=8))
+    file.chmod(0o000)
+    try:
+        if os.access(file, os.R_OK):
+            pytest.skip("running as root: a 0000 file is still readable")
+        with pytest.raises(ReceiptError, match=r"^--receipt .* is not a repair receipt, so it is left alone - "):
+            FileReceiptStore(tmp_path, file).other_vm(8)
+    finally:
+        file.chmod(0o600)
+    assert FileReceiptStore(tmp_path, file).read(8) == _receipt(vmid=8)
+
+
+def test_delete_removes_a_receipt_file_given_that_holds_a_receipt(tmp_path: Path) -> None:
+    file = tmp_path / "r.json"
+    store = FileReceiptStore(tmp_path / "unused", file)
+    store.write(_receipt(vmid=8))
+    store.delete(8)
+    assert not file.exists()
+    store.delete(8)  # absent: still fine
 
 
 def test_other_vm_is_none_below_a_regular_file(tmp_path: Path) -> None:

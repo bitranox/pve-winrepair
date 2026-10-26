@@ -358,8 +358,10 @@ relative `--receipt` path is made absolute in the current directory, and the `re
 that path: give `apply` the same file, from the same directory or as the absolute path. A repair
 whose receipt file holds another VM's receipt is refused (exit 1) before any VM call, since
 removing it would leave that VM's apply without a receipt: apply that VM first, or use another
-`--receipt` file or delete the old one. The file is replaced atomically and only its owner can read
-it (0600, in a 0700 directory when `pve-winrepair` creates the directory).
+`--receipt` file or delete the old one. A `--receipt` file that exists but is no valid receipt (a
+config file named by mistake, say) is refused the same way and left as it is: only the per-VM file
+in `state_dir` is replaced when it is not a receipt. The file is replaced atomically and only its
+owner can read it (0600, in a 0700 directory when `pve-winrepair` creates the directory).
 
 ## Guest tool subcommands
 

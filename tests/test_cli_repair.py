@@ -128,6 +128,40 @@ def test_a_receipt_file_holding_another_vm_is_refused_before_any_call(tmp_path: 
 
 
 @NEEDS_A_POSIX_STATE_DIR
+@pytest.mark.parametrize(
+    ("name", "content"),
+    [("config.toml", b'[node]\nhost = "pve1"\n'), ("r.json", b"{not json"), ("r.json", b"\xff\xfe{")],
+    ids=["toml", "json", "utf8"],
+)
+def test_a_receipt_file_that_is_no_receipt_is_refused_before_any_call_and_kept(
+    tmp_path: Path, name: str, content: bytes
+) -> None:
+    file = tmp_path / name
+    file.write_bytes(content)
+    runner = agent_runner(FakePve())
+    argv = ["repair", "--vmid", "101", "--stage-only", "--receipt", str(file), "--json"]
+    run = run_cli(argv, cli_config(tmp_path), runner)
+    envelope = json_envelope(run.stdout)
+    assert (run.exit_code, envelope["verdict"]) == (1, "ERROR")
+    assert str(envelope_steps(envelope)[-1]["message"]).startswith(
+        f"--receipt {file} is not a repair receipt, so it is left alone - "
+    )
+    assert runner.calls == []
+    assert file.read_bytes() == content
+
+
+@NEEDS_A_POSIX_STATE_DIR
+def test_a_per_vm_receipt_that_is_no_receipt_is_removed_by_a_stage_only_repair(tmp_path: Path) -> None:
+    # The store's own receipt-<vmid>.json keeps its behaviour: it names no VM, the run removes it.
+    stale = tmp_path / "state" / "receipt-1.json"
+    stale.parent.mkdir()
+    stale.write_text("{not json", encoding="utf-8")
+    run = run_cli(["repair", "--vmid", "1", "--stage-only", "--json"], cli_config(tmp_path), agent_runner(FakePve()))
+    assert (run.exit_code, json_envelope(run.stdout)["verdict"]) == (0, "STAGED")
+    assert not stale.exists()
+
+
+@NEEDS_A_POSIX_STATE_DIR
 def test_a_receipt_file_below_a_regular_file_is_refused_before_any_call(tmp_path: Path) -> None:
     blocker = tmp_path / "a-file"
     blocker.write_text("", encoding="utf-8")

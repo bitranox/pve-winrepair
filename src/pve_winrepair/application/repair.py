@@ -19,7 +19,8 @@ Once prepare has measured the staged image, its build is recorded in the VM's re
 runs at that moment (``build_before``); apply verifies against it. The previous receipt is removed
 once the last live-run guard passed, so a run that stops before prepare leaves none. A receipt file
 holding another VM's receipt (one ``--receipt`` file shared by two VMs) refuses the run before any
-VM call (:func:`refuse_another_vms_receipt`): removing it would lose that VM's unapplied receipt.
+VM call (:func:`refuse_another_vms_receipt`): removing it would lose that VM's unapplied receipt. So
+does a ``--receipt`` file that exists and is no valid receipt: it may be any file, and is left alone.
 
 With ``ip`` (no agent) the guest at that address must be the VM: a MAC of its ``qm config`` network
 devices must be one of the guest's adapters (:func:`check_guest_is_vm`). On a running VM that is
@@ -637,10 +638,14 @@ def refuse_another_vms_receipt(receipts: ReceiptStore, vmid: int) -> None:
     """Refuse a run whose receipt file holds another VM's receipt, before any VM call.
 
     The run would remove that receipt (:func:`forget_receipt`), and without it the other VM's apply
-    refuses and its Windows Update hold stays. A file that cannot be read or is no valid receipt
-    names no other VM and is removed later as before.
+    refuses and its Windows Update hold stays. A per-VM file that cannot be read or is no valid receipt
+    names no other VM and is removed later as before; a ``--receipt`` file that is none is refused here
+    (``ReceiptError``), since it may be any file of the operator's and must be left alone.
     """
-    other = receipts.other_vm(vmid)
+    try:
+        other = receipts.other_vm(vmid)
+    except ReceiptError as exc:
+        raise RepairError(str(exc)) from exc
     if other is not None:
         raise RepairError(
             f"the receipt file {receipts.path(vmid)} holds VM {other}'s receipt: apply VM {other} first, "

@@ -2,7 +2,9 @@
 
 ``repair --receipt FILE`` and ``apply --receipt FILE`` name one file instead, used for whichever VM
 the run is for; a receipt read from it is still refused when it names another VM, and
-:meth:`FileReceiptStore.other_vm` tells a repair which VM's receipt it would remove.
+:meth:`FileReceiptStore.other_vm` tells a repair which VM's receipt it would remove. Such a file is
+the operator's choice and may be any file, so one that exists and is no valid receipt is refused
+rather than removed: only the store's own per-VM file is replaced when it is not a receipt.
 
 A receipt is written to a temporary file in the same directory and moved over the old one with
 ``os.replace``, so a reader sees the previous receipt or the new one, never a half-written file. The
@@ -78,13 +80,21 @@ class FileReceiptStore:
     def other_vm(self, vmid: int) -> int | None:
         """The VM the receipt file of ``vmid`` names when that is another VM, else None.
 
-        None as well when there is no file or it cannot be read or is not a valid receipt: such a
-        file names no VM whose receipt could be lost, and a repair removes it later as before.
+        None as well when there is no file, and when the per-VM file cannot be read or is not a valid
+        receipt: that file names no VM whose receipt could be lost, and a repair removes it later.
+
+        Raises:
+            ReceiptError: The ``--receipt`` file exists but cannot be read or is not a valid receipt:
+                it may be any file of the operator's, so it is never treated as a stale receipt.
         """
-        try:
-            receipt = self._load(self.path(vmid))
-        except ReceiptError:
-            return None
+        path = self.path(vmid)
+        if self._file is not None:
+            receipt = self._load_given(path)
+        else:
+            try:
+                receipt = self._load(path)
+            except ReceiptError:
+                return None
         if receipt is None or receipt.vmid == vmid:
             return None
         return receipt.vmid
@@ -93,15 +103,34 @@ class FileReceiptStore:
         """Remove the receipt of ``vmid``; a receipt that does not exist is fine.
 
         Raises:
-            ReceiptError: The receipt exists and could not be removed.
+            ReceiptError: The receipt exists and could not be removed, or the ``--receipt`` file
+                exists but is no valid receipt (it is left alone).
         """
         path = self.path(vmid)
+        if self._file is not None:
+            # Checked again here, not only by other_vm: whatever calls delete, an operator-named file
+            # that is not a receipt (a config, a key) is never removed.
+            self._load_given(path)
         try:
             path.unlink()
         except (FileNotFoundError, NotADirectoryError):
             return
         except OSError as exc:
             raise ReceiptError(f"cannot remove the repair receipt {path}: {_cause(exc)}") from exc
+
+    @classmethod
+    def _load_given(cls, path: Path) -> RepairReceipt | None:
+        """The receipt in the ``--receipt`` file ``path`` whichever VM it names, or None when there is no file.
+
+        Raises:
+            ReceiptError: The file exists but cannot be read or is not a valid receipt, saying it is left alone.
+        """
+        try:
+            return cls._load(path)
+        except ReceiptError as exc:
+            raise ReceiptError(
+                f"--receipt {path} is not a repair receipt, so it is left alone - name another file ({exc})"
+            ) from exc
 
     @staticmethod
     def _load(path: Path) -> RepairReceipt | None:

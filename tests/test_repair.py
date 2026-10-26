@@ -1350,16 +1350,29 @@ def test_a_receipt_file_holding_another_vm_refuses_the_repair_before_any_call(tm
     assert file.read_bytes() == before
 
 
-def test_a_receipt_file_that_is_no_valid_receipt_is_replaced_by_the_repair(tmp_path: Path) -> None:
-    # Nothing in it names another VM, so the repair runs as before: the file is removed, then rewritten.
-    file = tmp_path / "r.json"
-    file.write_text("{not json", encoding="utf-8")
-    store = FileReceiptStore(tmp_path / "state", file)
+def test_a_per_vm_receipt_that_is_no_valid_receipt_is_replaced_by_the_repair(tmp_path: Path) -> None:
+    # The store's own receipt-1.json names no other VM, so the repair runs as before: removed, then rewritten.
+    store = FileReceiptStore(tmp_path / "state")
+    store.path(1).parent.mkdir()
+    store.path(1).write_text("{not json", encoding="utf-8")
     result, _steps = _run(agent_runner(FakePve()), _media(tmp_path), receipts=store)
     assert (result.exit, result.verdict) == (RunExit.OK, "STATE=DONE-OK")
     written = store.read(1)
     assert written is not None
     assert written.vmid == 1
+
+
+def test_a_receipt_file_given_that_is_no_valid_receipt_refuses_the_repair_before_any_call(tmp_path: Path) -> None:
+    # An operator-named file may be any file (a config): the run must never remove it as a stale receipt.
+    file = tmp_path / "config.toml"
+    file.write_text('[node]\nhost = "pve1"\n', encoding="utf-8")
+    store = FileReceiptStore(tmp_path / "state", file)
+    runner = agent_runner(FakePve())
+    result, steps = _run(runner, _media(tmp_path), receipts=store)
+    assert (result.exit, result.verdict) == (RunExit.REFUSED, "ERROR")
+    assert str(steps[-1]["message"]).startswith(f"--receipt {file} is not a repair receipt, so it is left alone - ")
+    assert runner.calls == []
+    assert file.read_text(encoding="utf-8") == '[node]\nhost = "pve1"\n'
 
 
 def test_a_receipt_that_cannot_be_removed_refuses_the_repair_before_staging(tmp_path: Path) -> None:
