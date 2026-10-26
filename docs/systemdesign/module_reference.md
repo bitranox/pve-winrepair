@@ -21,7 +21,7 @@ moves or removes a module, a CLI option or a public name.
 - `src/pve_winrepair/domain/receipt.py`  -  `RepairReceipt`, the image build a repair's prepare step measured with the guest's `build_before` and `install_date_before` (all required; `same_build`), `GuestBuild` (CurrentBuild, UBR, InstallDate; `from_answer`), `BuildPair` (`build_before`, stored as the array `[build, ubr]`), and `ReceiptError`
 - `src/pve_winrepair/domain/report.py`  -  `Report` collects a run's steps and hands each to `on_step`; `RunExit`, `RunResult`, `RunVerdict`, the `Step` model with its `StepName`; flags a run that leaves Windows Update held
 - `src/pve_winrepair/domain/settings.py`  -  Node CLI settings models (`SshSettings`, `GuestSettings`, `RepairSettings`, `NodeSettings`, `Settings`), the `SnapshotName` type and `default_state_dir` (the per-OS `[node] state_dir` default); see Settings below
-- `src/pve_winrepair/domain/ssh_paths.py`  -  `known_hosts_problem` and `jump_key_problem`: why ssh would misread a known_hosts or node-key path (empty, whitespace, `"`, a `%` token that the jump expands once more), or None; the reason never repeats the value
+- `src/pve_winrepair/domain/ssh_paths.py`  -  `known_hosts_problem`, `jump_key_problem` and `key_path_problem`: why ssh would misread a known_hosts or key path (empty, whitespace, a control character, `"`, a `%` token that the jump expands once more), or None; the reason never repeats the value
 - `src/pve_winrepair/domain/vm_config.py`  -  `parse_vm_config` reads `qm config` once into a `VmConfig` (its `VmDisk`s with storage and `DiskMedia`, a `tpmstate0`, a launcher `--tpm`, the `netN` MACs); `VmConfigRead` is one such call with its exit code; `parse_snapshot_names` reads `qm listsnapshot`; `parse_snapshot_result` reads a `qm snapshot` call into a `SnapshotResult` (exit code, stderr, whether PVE froze the guest filesystem)
 
 ### Application Layer
@@ -409,12 +409,12 @@ are `adapters/config/defaultconfig.d/20-winrepair.toml` (the defaults layer, key
 
 ### `[ssh]`  -  `SshSettings`
 
-| Field                      | Type   | Default                | Rule                                                                                                                           |
-|----------------------------|--------|------------------------|--------------------------------------------------------------------------------------------------------------------------------|
-| `key`                      | `str`  | `""`                   | private key path; empty = not configured                                                                                       |
-| `user`                     | `str`  | `"Administrator"`      | `[A-Za-z0-9_.-]{1,64}`                                                                                                         |
-| `strict_host_key_checking` | `bool` | `true`                 | the ssh adapter passes `yes` or `no`                                                                                           |
-| `known_hosts_file`         | `str`  | `"~/.ssh/known_hosts"` | passed to ssh as written; a leading `~` is expanded by ssh, not here; empty, whitespace and `"` refused (`%` tokens are ssh's) |
+| Field                      | Type   | Default                | Rule                                                                                                                                               |
+|----------------------------|--------|------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------|
+| `key`                      | `str`  | `""`                   | private key path; empty = not configured; a control character refused                                                                              |
+| `user`                     | `str`  | `"Administrator"`      | `[A-Za-z0-9_.-]{1,64}`                                                                                                                             |
+| `strict_host_key_checking` | `bool` | `true`                 | the ssh adapter passes `yes` or `no`                                                                                                               |
+| `known_hosts_file`         | `str`  | `"~/.ssh/known_hosts"` | passed to ssh as written; a leading `~` is expanded by ssh, not here; empty, whitespace, control characters and `"` refused (`%` tokens are ssh's) |
 
 ### `[guest]`  -  `GuestSettings`
 
@@ -443,8 +443,8 @@ are `adapters/config/defaultconfig.d/20-winrepair.toml` (the defaults layer, key
 | `state_dir`        | `Path` | `default_state_dir()`  | where receipts are kept; absolute on the machine running the tool ("", relative and `~` refused); default per OS (`/var/lib/pve-winrepair` on POSIX, `%LOCALAPPDATA%\pve-winrepair` on Windows); a non-root Linux or macOS workstation sets it |
 | `host`             | `str`  | `""`                   | the PVE node to drive over ssh, a DNS name or IPv4 address (`NODE_HOST_PATTERN`: letters, digits, `.`, `-`; no `_`); empty = this machine is the node                                                                                          |
 | `ssh_user`         | `str`  | `"root"`               | `[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}` (never a leading `-`)                                                                                                                                                                                       |
-| `ssh_key`          | `str`  | `""`                   | private key this machine logs in to the node with, passed to ssh as written; empty = not configured; `"` and `%` refused (the `ProxyCommand` carries neither)                                                                                  |
-| `known_hosts_file` | `str`  | `"~/.ssh/known_hosts"` | the known_hosts file the node's host key is checked against (strictly), passed to ssh as written; a leading `~` is expanded by ssh; empty, whitespace, `"` and `%` refused                                                                     |
+| `ssh_key`          | `str`  | `""`                   | private key this machine logs in to the node with, passed to ssh as written; empty = not configured; `"`, `%` and control characters refused (the `ProxyCommand` carries no `"` or `%`)                                                        |
+| `known_hosts_file` | `str`  | `"~/.ssh/known_hosts"` | the known_hosts file the node's host key is checked against (strictly), passed to ssh as written; a leading `~` is expanded by ssh; empty, whitespace, control characters, `"` and `%` refused                                                 |
 
 ---
 

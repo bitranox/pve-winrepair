@@ -21,7 +21,8 @@
 # refuses to run until it is set.
 #
 # A Windows path goes in single quotes, 'C:\Users\op\.ssh\id_pve_node', or with every
-# backslash doubled: in double quotes "\U" does not load and "\t" becomes a tab.
+# backslash doubled: in double quotes "\U" does not load and "\t" becomes a tab, which a
+# key or known_hosts path refuses at load.
 
 [ssh]
 

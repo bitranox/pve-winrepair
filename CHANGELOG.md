@@ -19,7 +19,8 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   `[node] ssh_key`. README "From a workstation" walks through it. These `[node]` keys are checked
   when the configuration loads, even when no node is used, and a refused value stops the tool
   with exit 78: `host` (letters, digits, `.` and `-`, so `_` is refused), `ssh_user`, `ssh_key`
-  (no `"` or `%`) and `known_hosts_file` (not empty; no whitespace, `"` or `%`).
+  (no `"`, `%` or control character) and `known_hosts_file` (not empty; no whitespace, `"`, `%` or
+  control character).
 - `repair --media node|local` and `[repair] media_source` (default `"node"`): `node` stages
   `[repair] media_dir` on the node, `local` stages `[repair] local_media_dir` from the machine
   running the tool. With a remote node, `node` has the node's own scp copy the media into the
@@ -79,6 +80,9 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   - `[ssh] known_hosts_file` that is empty, or holds whitespace or `"`. ssh's option parser split a
     spaced value into several files, and an empty one made every ssh fail. A `%` token stays
     allowed there.
+  - `[ssh] key` or `[ssh] known_hosts_file` holding a control character, such as the tab a Windows
+    path like `"C:\temp\..."` gets in a double-quoted TOML string. Before, ssh failed on a file
+    that does not exist, for the guest key only once the run reached the guest.
   - On Windows, `[node] state_dir` without a drive, such as the former default
     `/var/lib/pve-winrepair`: the directory must be absolute on the machine running the tool. The
     Windows default is now `%LOCALAPPDATA%\pve-winrepair`, and with `LOCALAPPDATA` unset and no

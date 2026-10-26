@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Annotated, Final
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
 
 from pve_winrepair.domain.enums import MediaChoice
-from pve_winrepair.domain.ssh_paths import jump_key_problem, known_hosts_problem
+from pve_winrepair.domain.ssh_paths import jump_key_problem, key_path_problem, known_hosts_problem
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -104,6 +104,11 @@ class SshSettings(BaseModel):
     # Kept as written: ssh expands a leading "~" itself, so the node passes the text unchanged. What
     # ssh would misread is refused instead (ssh_paths): its option parser splits the value at whitespace.
     known_hosts_file: str = "~/.ssh/known_hosts"
+
+    @field_validator("key")
+    @classmethod
+    def _key_is_meant_as_written(cls, value: str) -> str:
+        return _unless(key_path_problem(value), value)
 
     @field_validator("known_hosts_file")
     @classmethod

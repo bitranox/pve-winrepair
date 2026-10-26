@@ -37,8 +37,10 @@ it refuses to run until it is set.
 Write a Windows path (on a workstation that runs the tool on Windows) as a TOML literal string in
 single quotes, `ssh_key = 'C:\Users\op\.ssh\id_pve_node'`, or double every backslash,
 `ssh_key = "C:\\Users\\op\\.ssh\\id_pve_node"`. In a double-quoted string a backslash starts an
-escape: `"C:\Users\..."` does not load (`\U` is no valid escape; the file "is not valid TOML", exit
-78), and `"C:\temp\..."` loads with a tab where `\t` stood.
+escape: `"C:\Users\..."` does not load (`\U` must be followed by eight hex digits; the file "is not
+valid TOML", exit 78), and `"C:\temp\..."` loads with a tab where `\t` stood (`\b`, `\f`, `\n` and
+`\r` turn into control characters the same way). A key or known_hosts path holding a control
+character is refused when the configuration loads (exit 78).
 
 ### `[ssh]`
 

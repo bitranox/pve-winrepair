@@ -506,6 +506,11 @@ def test_a_node_ssh_user_starting_with_a_dash_is_refused(config_factory: Callabl
 
 #: The refusal reason for a "%" in a path that travels through the jump to a guest.
 _PERCENT_REASON = "must not contain %: ssh expands it as a token, once more through the jump to a guest"
+#: The refusal reason for a control character in an ssh path.
+_CONTROL_REASON = (
+    "must not contain a control character (in a double-quoted TOML string a backslash starts an escape "
+    "such as \\t: write a Windows path in single quotes)"
+)
 
 
 @pytest.mark.os_agnostic
@@ -533,6 +538,10 @@ _PERCENT_REASON = "must not contain %: ssh expands it as a token, once more thro
             "ssh.known_hosts_file: must not contain whitespace: ssh splits the value into several files",
         ),
         ("ssh", "known_hosts_file", "", "ssh.known_hosts_file: must not be empty"),
+        # What a Windows path in a double-quoted TOML string becomes: "C:\temp\..." holds a TAB.
+        ("ssh", "key", "C:" + chr(0x09) + "emp" + chr(0x5C) + "guest.key", f"ssh.key: {_CONTROL_REASON}"),
+        ("node", "ssh_key", "/keys/node" + chr(0x0A) + ".key", f"node.ssh_key: {_CONTROL_REASON}"),
+        ("ssh", "known_hosts_file", "/kh" + chr(0x08) + "x", f"ssh.known_hosts_file: {_CONTROL_REASON}"),
     ],
 )
 def test_an_ssh_path_no_quoting_carries_is_refused_at_load(
