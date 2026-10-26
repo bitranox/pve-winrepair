@@ -45,12 +45,17 @@ escape: `"C:\Users\..."` does not load (`\U` is no valid escape; the file "is no
 The guest side of these settings (OpenSSH, the key file and its ACL) is set up as described in
 [Preparing a Windows guest for SSH key access](docs/windows-guest-ssh.md).
 
-**`key`** (default `""`): the private key file the node logs in to the guests with. Required by
+**`key`** (default `""`): the private key file the tool logs in to the guests with, a path on the
+machine the tool runs on. That is the node itself, or a workstation that logs in to the guests
+through the node (see [`[node]`](#node)). With `--media node` on a remote node, the node's own copy
+into the guest uses this key from this machine's ssh-agent, so `ssh-add` it first. Required by
 `repair` and `apply`, which refuse to start without it. A guest that refuses this key is reached by
 overriding it for one run: `PVE_WINREPAIR___SSH__KEY=/root/.ssh/id_other_guest pve-winrepair ...`.
 
-**`user`** (default `"Administrator"`): the account the node logs in as. It must be an administrator
-on the guest. Letters, digits, `_`, `.` and `-`, 1 to 64 characters; no `DOMAIN\` part.
+**`user`** (default `"Administrator"`): the account the tool logs in as on the guests, from the
+machine it runs on; the node's media copy with `--media node` logs in as it too. It must be an
+administrator on the guest. Letters, digits, `_`, `.` and `-`, 1 to 64 characters; no `DOMAIN\`
+part.
 
 **`strict_host_key_checking`** (default `true`): passed to ssh as `StrictHostKeyChecking=yes`, or
 `no` when false. Keep it true. Set it false only for internal guests that are cloned and rebuilt
@@ -77,9 +82,10 @@ site a profile with its own file instead, and run that site with
 `pve-winrepair --profile site-b repair ...`. A profile does not inherit the plain user
 configuration: with `--profile site-b` the file `~/.config/pve-winrepair/config.toml` is not read at
 all (see [Profiles](#profiles)). So the profile's file,
-`~/.config/pve-winrepair/profile/site-b/config.toml`, holds the site's whole configuration
-(`[node] host`, `ssh_key` and `state_dir`, `[ssh] key`, the `[repair]` media directories), and
-among it this key under its section:
+`~/.config/pve-winrepair/profile/site-b/config.toml`, holds the site's whole configuration: every
+key you set in `config.toml`, for example `[node] host`, `ssh_key` and `state_dir`, `[ssh] key`
+and `user`, `[guest] subnet` and the `[repair]` media directories. Among them goes this key under
+its section:
 
 ```toml
 [ssh]
@@ -148,8 +154,7 @@ a remote node a `[ssh] known_hosts_file` such as `~/.ssh/known_hosts_%h` makes `
 no host key either, as this machine does not: the tool reads nothing from `[ssh] known_hosts_file`
 for the copy, and the node's scp runs with `StrictHostKeyChecking=no` and `/dev/null` for both
 known_hosts files, so a rebuilt guest with a new key is copied to, and nothing is written on the
-node. Both settings were run against a real node from Linux, `true` also from Windows (OpenSSH for
-Windows 10.0p2); with `false` the node's root known_hosts was unchanged afterwards.
+node.
 
 **`local_media_dir`** (default `""`): this machine's copy of the installation media, laid out like
 `media_dir` (`setup.exe` and `sources/install.wim` at its top level). Required when `media_source`

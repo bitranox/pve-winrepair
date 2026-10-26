@@ -129,7 +129,8 @@ def check_node(settings: Settings, receipt: Path | None = None) -> None:
     """
     if not settings.ssh.key:
         raise PreflightError(
-            "[ssh] key is not configured: set it to the private key the node logs in to the guests with"
+            "[ssh] key is not configured: set it to the private key the tool logs in to the guests with, "
+            "a file on this machine"
         )
     if receipt is not None:
         blocker = _not_a_directory(receipt.parent)

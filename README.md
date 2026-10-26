@@ -140,7 +140,7 @@ A persistent install works too (`uv tool install --exclude-newer "7 days" pve-wi
 
    ```toml
    [ssh]
-   key = "/root/.ssh/id_guest"     # the private key the node logs in to the guests with
+   key = "/root/.ssh/id_guest"     # the private key the tool logs in to the guests with
    user = "admin"                  # an administrator account on the guest
 
    [guest]
@@ -220,9 +220,10 @@ can go on running on the node after the run has stopped. Check the node before y
 
 ssh files a guest's host key under its IP address, so one `[ssh] known_hosts_file` shared by the
 nodes of several sites mixes their guests: with strict checking on, a private address reused by
-another site's guest is refused as "REMOTE HOST IDENTIFICATION HAS CHANGED". Give each site a profile with its own file and run it as
-`pve-winrepair --profile site-b repair ...`; a profile does not inherit the plain user
-configuration, so its file holds the site's whole configuration ([CONFIG.md](CONFIG.md#ssh)).
+another site's guest is refused as "REMOTE HOST IDENTIFICATION HAS CHANGED". Give each site a
+profile with its own file and run it as `pve-winrepair --profile site-b repair ...`; a profile does
+not inherit the plain user configuration, so its file holds the site's whole configuration
+([CONFIG.md](CONFIG.md#ssh)).
 
 ### Example: Linux
 
@@ -293,10 +294,6 @@ ssh-add "C:\Users\op\pve keys\id_guest"
 pve-winrepair repair --vmid 100
 pve-winrepair apply --vmid 100 --ip 192.0.2.10
 ```
-
-Settings of this shape, given as environment variables, have run a `--stage-only` repair with
-`--media node` from Windows (OpenSSH for Windows 10.0p2), the node and guest keys in directories
-whose names hold a space.
 
 ## CLI reference
 

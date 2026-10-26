@@ -1,9 +1,10 @@
 # Preparing a Windows guest for SSH key access
 
-`pve-winrepair` reaches every guest from the Proxmox node over ssh, logging in with a key as an
-administrator. So before the first `repair`, the guest needs a running OpenSSH server and the
-node's public key in the place sshd looks for an administrator's key. This page sets that up on
-Windows 10, Windows 11 and Windows Server 2019 or newer.
+`pve-winrepair` reaches every guest over ssh, logging in with the key in `[ssh] key` as an
+administrator: from the Proxmox node when it runs there, or from a workstation through the node.
+So before the first `repair`, the guest needs a running OpenSSH server and that key's public half
+in the place sshd looks for an administrator's key. This page sets that up on Windows 10,
+Windows 11 and Windows Server 2019 or newer.
 
 Run every guest command below in Windows PowerShell 5.1, started with "Run as administrator".
 
@@ -60,7 +61,7 @@ New-NetFirewallRule -Name OpenSSH-Server-In-TCP -DisplayName 'OpenSSH Server (ss
 
 If a rule exists but is disabled, enable it by its name (`Enable-NetFirewallRule -Name <name>`).
 
-## 2. Put the node's public key on the guest
+## 2. Put the public key on the guest
 
 pve-winrepair logs in as `[ssh] user`, which is `Administrator` by default and must be a member of
 the local Administrators group: the repair runs elevated work on the guest.
@@ -77,7 +78,7 @@ Match Group administrators
 The group name in that block is written in English and still applies on a localised Windows, where
 the group itself is called something else. Keep the block as it is.
 
-Add the node's public key (the `.pub` file next to the private key in `[ssh] key`, one line that
+Add the public key (the `.pub` file next to the private key in `[ssh] key`, one line that
 starts with `ssh-ed25519` or `ssh-rsa`) to `C:\ProgramData\ssh\administrators_authorized_keys`,
 one key per line. Paste the whole line between the single quotes:
 
@@ -150,10 +151,10 @@ Do not set a different default shell for sshd (the `DefaultShell` value under
 
 ## 4. Check the login from the node
 
-The node keeps the guests' host keys in `[ssh] known_hosts_file` and, with the default
-`strict_host_key_checking = true`, refuses a guest whose key is not in that file yet. Record the key
-once, with the same file and the same address pve-winrepair will use (the address the QEMU guest
-agent reports, or the one you pass with `--ip`).
+The machine that runs pve-winrepair keeps the guests' host keys in `[ssh] known_hosts_file` and,
+with the default `strict_host_key_checking = true`, refuses a guest whose key is not in that file
+yet. Record the key once, with the same file and the same address pve-winrepair will use (the
+address the QEMU guest agent reports, or the one you pass with `--ip`).
 
 On the guest, print its host key fingerprint:
 
@@ -162,7 +163,8 @@ ssh-keygen -l -f "$env:ProgramData\ssh\ssh_host_ed25519_key.pub"
 ```
 
 On the node, log in once and let ssh add the key, then compare what it stored with the guest's
-fingerprint:
+fingerprint. When pve-winrepair runs on a workstation, do this on the workstation through the node,
+as [From a workstation](../README.md#from-a-workstation) shows:
 
 ```bash
 ssh -i /root/.ssh/id_guest -o BatchMode=yes -o PreferredAuthentications=publickey \
@@ -179,7 +181,7 @@ failure. If the two fingerprints differ, remove the entry (`ssh-keygen -R 192.0.
 The settings that have to match what you just did, all in `[ssh]` (details in
 [CONFIG.md](../CONFIG.md#ssh)):
 
-- `key`: the private key the node logs in with. Required.
+- `key`: the private key the tool logs in with, a file on the machine it runs on. Required.
 - `user`: the administrator account, `Administrator` by default.
 - `known_hosts_file`: the file the host key went into above.
 - `strict_host_key_checking`: keep it `true`.

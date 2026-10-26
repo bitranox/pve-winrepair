@@ -25,13 +25,16 @@
 
 [ssh]
 
-# Purpose: Private key file the node uses to log in to the guest over ssh
-# Type: string (path); required by the commands that reach a guest
+# Purpose: Private key file the tool logs in to the guest with over ssh, from the machine it runs
+#          on: the node itself, or a workstation through the node ([node] host)
+# Type: string (path on the machine the tool runs on); required by the commands that reach a guest
 # Default: "" (not configured)
 # Environment Variable: PVE_WINREPAIR___SSH__KEY=/root/.ssh/id_guest
+# Note: with --media node on a remote node, the node's copy into the guest uses this key from this
+#       machine's ssh-agent (ssh-add it first)
 key = ""
 
-# Purpose: Account the node logs in as on the guest
+# Purpose: Account the tool logs in as on the guest (the node's --media node copy uses it too)
 # Type: string; letters, digits and _ . - only, 1 to 64 characters (no DOMAIN\ part)
 # Default: "Administrator"
 # Environment Variable: PVE_WINREPAIR___SSH__USER=admin
