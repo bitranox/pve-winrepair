@@ -138,8 +138,12 @@ _PREFIX = __init__conf__.LAYEREDCONF_SLUG.upper().replace("-", "_")
 _HOMES = ("HOME", "USERPROFILE", "XDG_CONFIG_HOME", "APPDATA", "LOCALAPPDATA")
 
 
-def _config_json(tmp_path: Path, *options: str) -> dict[str, Any]:
-    """Run the real ``config --format json`` with every configuration location under ``tmp_path``."""
+def _config_json(tmp_path: Path, *options: str, unknown_section: str | None = None) -> dict[str, Any]:
+    """Run the real ``config --format json`` with every configuration location under ``tmp_path``.
+
+    ``unknown_section`` names a section the options add that the tool does not read: ``config``
+    still shows it, then exits 78 naming it.
+    """
     env = {k: v for k, v in os.environ.items() if not k.startswith((_PREFIX, "LOG_", "LIB_LAYERED_CONFIG"))}
     env.update(dict.fromkeys(_HOMES, str(tmp_path)))
     completed = subprocess.run(  # noqa: S603 - fixed argv: this interpreter running this package
@@ -152,7 +156,11 @@ def _config_json(tmp_path: Path, *options: str) -> dict[str, Any]:
         errors="replace",
         check=False,
     )
-    assert completed.returncode == 0, completed.stderr
+    if unknown_section is None:
+        assert completed.returncode == 0, completed.stderr
+    else:
+        assert completed.returncode == 78, completed.stderr
+        assert f"Error: {unknown_section}: not a section pve-winrepair reads (" in completed.stderr
     return cast("dict[str, Any]", json.loads(completed.stdout))
 
 
@@ -171,7 +179,7 @@ def test_config_shows_the_logging_key_counts_and_still_redacts_the_password(
     tmp_path: Path, options: tuple[str, ...]
 ) -> None:
     """``*_max_keys`` are counts whose names only look secret; a password stays hidden."""
-    shown = _config_json(tmp_path, "--set", "remote.password=hunter2", *options)
+    shown = _config_json(tmp_path, "--set", "remote.password=hunter2", *options, unknown_section="remote")
 
     assert _value(shown, "lib_log_rich.payload_limits.context_max_keys") == (30 if options else 20)
     assert _value(shown, "lib_log_rich.payload_limits.extra_max_keys") == 25

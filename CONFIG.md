@@ -24,12 +24,14 @@ media_dir = "/var/lib/vz/winmedia/win11"
 `pve-winrepair config` shows the merged result and, for each value, the layer and file it came from.
 `repair` and `apply` validate all four sections before they do anything: an unknown key or a refused
 value stops them with exit 78 and one `Error: <section>.<key>: <reason>` line per problem, for
-example `Error: node.state_dir: must be an absolute path on this machine`. `config` checks them the
-same way after it has shown them, and exits 78 with the same lines. The logging section
-`[lib_log_rich]` is checked too: an unknown key there (also in `[lib_log_rich.payload_limits]`) or a
-refused value stops every command that reads the configuration, `config` included, with exit 78
-and one `Error: lib_log_rich.<key>: <reason>` line per problem, for example
-`Error: lib_log_rich.custom_field: Extra inputs are not permitted`.
+example `Error: node.state_dir: must be an absolute path on this machine`. A top-level section
+other than these four, `[lib_log_rich]` and `[lib_layered_config]` is refused the same way, with an
+`Error: <section>: not a section pve-winrepair reads (...)` line, so a misspelt `[repiar]` stops the
+command instead of being skipped. `config` checks them the same way after it has shown them, and
+exits 78 with the same lines. The logging section `[lib_log_rich]` is checked too: an unknown key
+there (also in `[lib_log_rich.payload_limits]`) or a refused value stops every command that reads
+the configuration, `config` included, with exit 78 and one `Error: lib_log_rich.<key>: <reason>`
+line per problem, for example `Error: lib_log_rich.custom_field: Extra inputs are not permitted`.
 
 ---
 
@@ -727,6 +729,13 @@ A `.env` file holds overrides as `SECTION__KEY=value` lines (no prefix), plus li
 REPAIR__SNAPSHOT_NAME=pre_repair_2
 LOG_CONSOLE_LEVEL=DEBUG
 ```
+
+A line that keeps the environment prefix, such as `PVE_WINREPAIR___SSH__KEY=/root/.ssh/id_guest`,
+does not set `[ssh] key`: the loader reads it as a section `pve_winrepair`, which the tool does not
+read, so `config`, `repair` and `apply` stop with exit 78 and an `Error: pve_winrepair: ...` line
+saying that `.env` lines take `SECTION__KEY` without the `PVE_WINREPAIR___` prefix. The same goes
+for any other `SECTION__KEY` line whose section the tool does not read. A line without `__`, such
+as `LOG_CONSOLE_LEVEL` above, is no section and is not refused.
 
 By default, the configuration loader reads ONE `.env` as its `.env` layer: the first one from the
 current directory up to the filesystem root (past any `pyproject.toml` or `.git`, so a checkout

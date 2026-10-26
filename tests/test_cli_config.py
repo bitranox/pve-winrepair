@@ -20,6 +20,14 @@ if TYPE_CHECKING:
     from lib_layered_config import Config
 
 
+def _assert_shown_then_refused_as_unknown(result: Result, *sections: str) -> None:
+    """``config`` shows a section the tool does not read, then exits 78 naming it and nothing else."""
+    errors = [line for line in result.stderr.splitlines() if line.startswith("Error: ")]
+    assert result.exit_code == 78, result.output
+    assert [line.removeprefix("Error: ").split(":", 1)[0] for line in errors] == list(sections)
+    assert all(": not a section pve-winrepair reads (" in line for line in errors)
+
+
 @pytest.mark.os_agnostic
 def test_when_config_is_invoked_it_displays_configuration(
     cli_runner: CliRunner,
@@ -89,7 +97,7 @@ def test_when_config_is_invoked_with_mocked_data_it_displays_sections(
 
     result: Result = cli_runner.invoke(cli_mod.cli, ["config"], obj=factory)
 
-    assert result.exit_code == 0
+    _assert_shown_then_refused_as_unknown(result, "test_section")
     assert "test_section" in result.output
     assert "setting1" in result.output
     assert "value1" in result.output
@@ -112,7 +120,7 @@ def test_when_config_is_invoked_with_json_format_and_section_it_shows_section(
 
     result: Result = cli_runner.invoke(cli_mod.cli, ["config", "--format", "json", "--section", "remote"], obj=factory)
 
-    assert result.exit_code == 0
+    _assert_shown_then_refused_as_unknown(result, "remote")
     assert "remote" in result.output
     assert "hosts" in result.output
     assert "host.test.com:22" in result.output
@@ -159,7 +167,7 @@ def test_when_config_is_invoked_with_section_showing_complex_values(
 
     result: Result = cli_runner.invoke(cli_mod.cli, ["config", "--section", "remote"], obj=factory)
 
-    assert result.exit_code == 0
+    _assert_shown_then_refused_as_unknown(result, "remote")
     assert "[remote]" in result.output
     assert "hosts" in result.output
     assert "host1.test.com:22" in result.output
@@ -190,7 +198,7 @@ def test_when_config_shows_all_sections_with_complex_values(
 
     result: Result = cli_runner.invoke(cli_mod.cli, ["config"], obj=factory)
 
-    assert result.exit_code == 0
+    _assert_shown_then_refused_as_unknown(result, "remote", "logging")
     assert "[remote]" in result.output
     assert "[logging]" in result.output
     assert "hosts" in result.output
@@ -393,7 +401,7 @@ def test_when_config_is_invoked_with_profile_it_passes_profile_to_get_config(
 ) -> None:
     """Verify config command passes --profile to get_config."""
     captured_profiles: list[str | None] = []
-    config = config_factory({"test_section": {"key": "value"}})
+    config = config_factory({"repair": {"snapshot_name": "pre_staging"}})
 
     factory = inject_config_with_profile_capture(config, captured_profiles)
 
@@ -411,7 +419,7 @@ def test_when_config_is_invoked_without_profile_it_passes_none(
 ) -> None:
     """Verify config command passes None when no --profile specified."""
     captured_profiles: list[str | None] = []
-    config = config_factory({"test_section": {"key": "value"}})
+    config = config_factory({"repair": {"snapshot_name": "pre_staging"}})
 
     factory = inject_config_with_profile_capture(config, captured_profiles)
 
@@ -461,7 +469,7 @@ def test_when_config_displays_human_format_it_redacts_password(
 
     result: Result = cli_runner.invoke(cli_mod.cli, ["config"], obj=factory)
 
-    assert result.exit_code == 0
+    _assert_shown_then_refused_as_unknown(result, "remote")
     assert "super_secret_123" not in result.output
     assert "***REDACTED***" in result.output
     assert "owner" in result.output
@@ -485,7 +493,7 @@ def test_when_config_displays_json_format_it_redacts_password(
 
     result: Result = cli_runner.invoke(cli_mod.cli, ["config", "--format", "json"], obj=factory)
 
-    assert result.exit_code == 0
+    _assert_shown_then_refused_as_unknown(result, "remote")
     assert "super_secret_123" not in result.stdout
     assert "***REDACTED***" in result.stdout
     assert "owner" in result.stdout
@@ -508,7 +516,7 @@ def test_when_config_displays_non_sensitive_values_it_shows_them(
 
     result: Result = cli_runner.invoke(cli_mod.cli, ["config"], obj=factory)
 
-    assert result.exit_code == 0
+    _assert_shown_then_refused_as_unknown(result, "logging")
     assert "DEBUG" in result.output
     assert "my_app" in result.output
     assert "***REDACTED***" not in result.output
@@ -532,7 +540,7 @@ def test_when_config_displays_token_and_secret_keys_it_redacts_them(
 
     result: Result = cli_runner.invoke(cli_mod.cli, ["config"], obj=factory)
 
-    assert result.exit_code == 0
+    _assert_shown_then_refused_as_unknown(result, "auth")
     assert "tok_abc123" not in result.output
     assert "sec_xyz789" not in result.output
     assert "admin" in result.output
@@ -558,7 +566,7 @@ def test_when_config_displays_password_in_list_of_dicts_it_redacts(
 
     result: Result = cli_runner.invoke(cli_mod.cli, ["config", "--format", "json"], obj=factory)
 
-    assert result.exit_code == 0
+    _assert_shown_then_refused_as_unknown(result, "connections")
     assert "secret123" not in result.stdout
     assert "secret456" not in result.stdout
     assert "primary.example.com" in result.stdout
@@ -807,7 +815,7 @@ def test_when_config_subcommand_profile_reloads_it_preserves_root_set_overrides(
     The subcommand-level profile triggers a config reload. The root-level
     --set overrides must be reapplied to the new config.
     """
-    base_config = config_factory({"section": {"key": "original"}})
+    base_config = config_factory({"repair": {"snapshot_name": "original"}})
 
     # get_config is called twice: first in root.py, second in config.py (profile reload)
     call_count = {"value": 0}
@@ -820,7 +828,7 @@ def test_when_config_subcommand_profile_reloads_it_preserves_root_set_overrides(
 
     result: Result = cli_runner.invoke(
         cli_mod.cli,
-        ["--set", "section.key=overridden", "config", "--profile", "test", "--format", "json"],
+        ["--set", "repair.snapshot_name=overridden", "config", "--profile", "test", "--format", "json"],
         obj=production_factory,
     )
 
@@ -837,11 +845,11 @@ def test_when_config_subcommand_has_no_profile_it_uses_stored_config_with_overri
     config_cli_context: Callable[[dict[str, Any]], Callable[[], Any]],
 ) -> None:
     """Without subcommand --profile, config uses already-overridden config from context."""
-    factory = config_cli_context({"section": {"key": "original"}})
+    factory = config_cli_context({"repair": {"snapshot_name": "original"}})
 
     result: Result = cli_runner.invoke(
         cli_mod.cli,
-        ["--set", "section.key=overridden", "config", "--format", "json"],
+        ["--set", "repair.snapshot_name=overridden", "config", "--format", "json"],
         obj=factory,
     )
 

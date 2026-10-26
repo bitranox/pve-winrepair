@@ -90,7 +90,8 @@ def cli_config(ctx: click.Context, output_format: OutputFormat, section: str | N
     Precedence: defaults -> app -> host -> user -> dotenv -> env
 
     The [ssh] [guest] [repair] [node] settings are then checked the way repair and
-    apply load them: each refused value gets an Error line and the command exits 78.
+    apply load them: each refused value, and each section the tool does not read,
+    gets an Error line and the command exits 78.
 
     \f
     Example:

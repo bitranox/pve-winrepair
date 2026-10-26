@@ -97,6 +97,14 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
     `state_dir` the setting is refused by name. On POSIX the rule is unchanged (a relative path,
     `""` and a leading `~` were refused before); the message now reads `must be an absolute path on
     this machine`.
+  - A top-level section other than `[ssh]`, `[guest]`, `[repair]`, `[node]`, `[lib_log_rich]` and
+    `[lib_layered_config]`, from any layer: one `Error: <section>: not a section pve-winrepair reads
+    (...)` line each, beside the lines for refused values, in `config`, `repair` and `apply`.
+    1.0.0 ignored such a section, so a misspelt `[repiar]` was skipped without a word, and a `.env`
+    line written with the environment prefix (`PVE_WINREPAIR___SSH__KEY=...`, which the loader
+    reads as a section `pve_winrepair`) set nothing; that section's line adds that `.env` lines take
+    `SECTION__KEY` without the `PVE_WINREPAIR___` prefix. A top-level key that is no table, such as
+    a `.env` line without `__` (`LOG_CONSOLE_LEVEL=DEBUG`), still loads.
 - `repair` refuses (exit 1), before any VM call, a `receipt-<vmid>.json` in `[node] state_dir`
   that holds another VM's receipt; before, it removed it, and that VM's `apply` then had no
   receipt. A per-VM file that is no valid receipt is still removed, like any previous receipt, once

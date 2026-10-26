@@ -342,6 +342,25 @@ def test_a_non_utf8_env_file_is_a_configuration_error_naming_the_file(
 
 
 @pytest.mark.os_agnostic
+@pytest.mark.parametrize("args", NEEDS_CONFIG.values(), ids=NEEDS_CONFIG.keys())
+def test_a_prefixed_env_file_line_stops_every_command_that_reads_the_settings(
+    cli_runner: CliRunner, isolated_layers: Path, args: list[str]
+) -> None:
+    """``PVE_WINREPAIR___SSH__KEY`` in a ``.env`` builds a section nothing reads; each command names it."""
+    env_file = isolated_layers / "node.env"
+    env_file.write_text("PVE_WINREPAIR___SSH__KEY=/k\n", encoding="utf-8")
+    services = dataclasses.replace(build_testing(), get_config=build_production().get_config)
+
+    result = cli_runner.invoke(cli_mod.cli, ["--env-file", str(env_file), *args], obj=lambda: services)
+
+    error_lines = [line for line in result.stderr.splitlines() if line.startswith("Error:")]
+    assert result.exit_code == 78, result.output
+    assert len(error_lines) == 1, result.stderr
+    assert error_lines[0].startswith("Error: pve_winrepair: not a section pve-winrepair reads (")
+    assert error_lines[0].endswith("; .env lines take SECTION__KEY without the PVE_WINREPAIR___ prefix")
+
+
+@pytest.mark.os_agnostic
 def test_traceback_shows_why_the_config_did_not_load(cli_runner: CliRunner, managed_traceback_state: None) -> None:
     def get_config(**_kwargs: Any) -> Config:
         try:

@@ -39,6 +39,9 @@ if TYPE_CHECKING:
 #: The env prefix lib_layered_config reads for this application.
 _ENV_PREFIX = "PVE_WINREPAIR___"
 
+#: The four sections the settings read, then the two the libraries read, in the order a refusal names them.
+_OWNED_SECTIONS = ("ssh", "guest", "repair", "node", "lib_log_rich", "lib_layered_config")
+
 
 def _refusal(config: Config) -> str:
     with pytest.raises(SettingsError) as caught:
@@ -168,6 +171,63 @@ def test_a_bad_value_is_refused_naming_its_field(
     text = _refusal(config_factory({section: values}))
 
     assert text.split(":", 1)[0] == field
+
+
+@pytest.mark.os_agnostic
+def test_an_unknown_section_is_refused_naming_the_sections_read(
+    config_factory: Callable[[dict[str, Any]], Config],
+) -> None:
+    text = _refusal(config_factory({"repiar": {"snapshot_name": "x"}}))
+
+    assert text == f"repiar: not a section pve-winrepair reads (it reads {', '.join(_OWNED_SECTIONS)})"
+
+
+@pytest.mark.os_agnostic
+def test_the_section_a_prefixed_dotenv_line_lands_in_is_refused_with_the_dotenv_hint(
+    config_factory: Callable[[dict[str, Any]], Config],
+) -> None:
+    # The shape lib_layered_config builds from the .env line PVE_WINREPAIR___SSH__KEY=/k.
+    text = _refusal(config_factory({"pve_winrepair": {"_ssh": {"key": "/k"}}}))
+
+    assert text.startswith("pve_winrepair: not a section pve-winrepair reads (it reads ssh, ")
+    assert text.endswith("; .env lines take SECTION__KEY without the PVE_WINREPAIR___ prefix")
+    assert "/k" not in text
+
+
+@pytest.mark.os_agnostic
+def test_every_unknown_section_and_every_refused_field_are_named_at_once(
+    config_factory: Callable[[dict[str, Any]], Config],
+) -> None:
+    config = config_factory({"repiar": {}, "ssh": {"keyy": "x"}, "pve_winrepair": {}})
+
+    with pytest.raises(SettingsError) as caught:
+        load_settings(config)
+
+    assert [line.split(":", 1)[0] for line in caught.value.lines] == ["repiar", "pve_winrepair", "ssh.keyy"]
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("section", _OWNED_SECTIONS)
+def test_each_section_the_shipped_defaults_define_is_accepted(
+    config_factory: Callable[[dict[str, Any]], Config], section: str
+) -> None:
+    assert load_settings(config_factory({section: {}})) == Settings()
+
+
+@pytest.mark.os_agnostic
+def test_a_top_level_key_that_is_not_a_table_is_not_a_section_and_loads(
+    config_factory: Callable[[dict[str, Any]], Config],
+) -> None:
+    # The shape a .env line without a section separator takes: lib_log_rich's documented
+    # LOG_CONSOLE_LEVEL=DEBUG, or another tool's CODECOV_TOKEN= in a checkout's .env.
+    config = config_factory({"log_console_level": "DEBUG", "codecov_token": ""})
+
+    assert load_settings(config) == Settings()
+
+
+@pytest.mark.os_agnostic
+def test_the_accepted_sections_are_the_ones_the_shipped_defaults_define(isolated_layers: Path) -> None:
+    assert set(get_config().as_dict()) == set(_OWNED_SECTIONS)
 
 
 @pytest.mark.os_agnostic
@@ -649,3 +709,40 @@ def test_the_env_variable_overrides_the_app_file_key(
     assert "layer:env" in out_b
     assert "/file/key" not in out_b
     assert load_settings(get_config()).ssh.key == "/env/key"
+
+
+@pytest.mark.os_agnostic
+def test_a_prefixed_dotenv_line_exits_78_with_the_hint_and_the_bare_line_sets_the_key(
+    isolated_layers: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    dotenv = isolated_layers / "node.env"
+    dotenv.write_text(f"{_ENV_PREFIX}SSH__KEY=/k\n", encoding="utf-8")
+    argv = ["--env-file", str(dotenv), "config", "--section", "ssh"]
+
+    exit_a = main(argv, services_factory=build_production)
+    err_a = capsys.readouterr().err
+    assert exit_a == 78
+    assert "Error: pve_winrepair: not a section pve-winrepair reads (" in err_a
+    assert ".env lines take SECTION__KEY without the PVE_WINREPAIR___ prefix" in err_a
+
+    get_config.cache_clear()
+    dotenv.write_text("SSH__KEY=/k\n", encoding="utf-8")
+    exit_b = main(argv, services_factory=build_production)
+    captured = capsys.readouterr()
+    assert exit_b == 0, captured.err
+    assert "Error:" not in captured.err
+    assert load_settings(get_config(dotenv_path=str(dotenv))).ssh.key == "/k"
+
+
+@pytest.mark.os_agnostic
+def test_a_dotenv_line_without_a_section_still_loads(isolated_layers: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    dotenv = isolated_layers / "checkout.env"
+    dotenv.write_text("CODECOV_TOKEN=\nREPAIR__SNAPSHOT_NAME=pre_repair_2\n", encoding="utf-8")
+    # Premise: the line without a separator arrives as a top-level key, beside the sections.
+    assert get_config(dotenv_path=str(dotenv)).as_dict()["codecov_token"] == ""
+
+    exit_code = main(["--env-file", str(dotenv), "config", "--section", "repair"], services_factory=build_production)
+
+    captured = capsys.readouterr()
+    assert exit_code == 0, captured.err
+    assert "pre_repair_2" in captured.out

@@ -401,7 +401,11 @@ Raises `ValueError` with descriptive message on invalid input.
 because lib_layered_config reads an unquoted digit-only `.env` or environment value as an int.
 `adapters/config/settings.py` `load_settings(config)` validates the four sections of a loaded
 `Config` (an absent section takes its defaults) and raises `SettingsError(ValueError)` with one
-`<section>.<field>: <reason>` line per problem, never echoing the refused value. The shipped defaults
+`<section>.<field>: <reason>` line per problem, never echoing the refused value. A top-level section
+(a table; a top-level scalar, such as a `.env` line without `__`, is left alone) outside those four (`SECTIONS`) and the two the libraries read (`LIBRARY_SECTIONS`: `lib_log_rich`,
+`lib_layered_config`) gets a `<section>: not a section pve-winrepair reads (...)` line in the same
+error, ahead of the field lines; for `pve_winrepair`, the section a `.env` line written with the
+environment prefix lands in, the line adds that `.env` lines take `SECTION__KEY`. The shipped defaults
 are `adapters/config/defaultconfig.d/20-winrepair.toml` (the defaults layer, keys active; the copy
 `config-deploy` writes has them commented out); an empty `ssh.key`, `repair.media_dir` or
 `repair.local_media_dir` loads and means "not configured". Override one key per run with

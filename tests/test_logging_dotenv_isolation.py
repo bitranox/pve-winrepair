@@ -137,7 +137,12 @@ def test_a_prefixed_line_in_the_cwd_dotenv_does_not_reach_a_profile_reload(tmp_p
 
     result = _run(tmp_path, "config", "--profile", "production", "--format", "json", "--section", "lib_log_rich")
 
-    assert result.returncode == 0, result.stderr
+    # The prefixed line builds a section nothing reads, so config names it after showing the section.
+    errors = [line for line in result.stderr.splitlines() if line.startswith("Error:")]
+    assert result.returncode == 78, result.stderr
+    assert len(errors) == 1, result.stderr
+    assert errors[0].startswith("Error: pve_winrepair: not a section pve-winrepair reads (")
+    assert '"lib_log_rich"' in result.stdout
     assert "leaked-service" not in result.stdout
 
 

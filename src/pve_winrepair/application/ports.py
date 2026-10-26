@@ -108,8 +108,8 @@ class CheckLoggingConfig(Protocol):
 class LoadSettings(Protocol):
     """Validate the node CLI's sections of a loaded configuration into typed settings.
 
-    Raises ``SettingsError`` (one ``<section>.<field>: <reason>`` line per problem) for a value the
-    settings refuse.
+    Raises ``SettingsError`` (one ``<section>.<field>: <reason>`` or ``<section>: <reason>`` line per
+    problem) for a value the settings refuse or a top-level section nothing reads.
     """
 
     def __call__(self, config: Config, /) -> Settings: ...

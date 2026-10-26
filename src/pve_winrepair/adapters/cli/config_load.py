@@ -19,7 +19,7 @@ Contents:
     * :func:`check_logging` - the same refusal for a configuration loaded after logging started.
     * :func:`require_config` - the configuration, or exit 78 naming the failure.
     * :func:`require_settings` - its ``[ssh] [guest] [repair] [node]`` settings, or exit 78 naming
-      every refused value.
+      every refused value and every section nothing reads.
     * :func:`report_load_failure` - one line per problem, after the traceback on request.
     * :func:`echo_load_traceback` - the loader's traceback alone, for a caller with its own line.
 """
@@ -212,8 +212,9 @@ def require_settings(ctx: click.Context, cli_ctx: CLIContext, config: Config) ->
         The ``[ssh] [guest] [repair] [node]`` settings.
 
     Raises:
-        click.exceptions.Exit: A section holds an unknown key or a refused value; one
-            ``Error: <section>.<field>: <reason>`` line per problem goes to stderr first.
+        click.exceptions.Exit: A section holds an unknown key or a refused value, or the
+            configuration holds a section nothing reads; one ``Error: <section>.<field>: <reason>``
+            or ``Error: <section>: <reason>`` line per problem goes to stderr first.
     """
     try:
         return cli_ctx.services.load_settings(config)
