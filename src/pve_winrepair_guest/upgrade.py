@@ -524,6 +524,10 @@ class PwshpyHost:
         job holds no process. A child started with CREATE_BREAKAWAY_FROM_JOB escapes that wait
         (pwshpy's documented gap); the node does not rely on the marker alone: its apply gate also
         requires that no SetupHost runs (``setup-alive``).
+
+        pwshpy creates the job with KILL_ON_JOB_CLOSE and polls it every 50 ms. So if this process
+        dies, or the wait raises while setup runs, closing the job ends setup mid-way through its
+        down-level phase, and a raise is logged as "setup.exe could not run" although it ran.
         """
         result = ps.exec(list(argv), wait_tree=True)  # no timeout: the down-level phase runs for hours
         return SetupRun(exit_code=result.exit_code, tree_wait=TreeWait.JOB)

@@ -648,6 +648,10 @@ class TaskReport(Report):
         last_run: Its last run time as local wall-clock ISO text, or None when it never ran.
         last_result: Its last exit code or HRESULT (0 = success), or None when it never ran or a
             run is still in progress (Windows reports no result until the run finishes).
+
+    pwshpy reads ``last_run`` and ``last_result`` softly: a field Task Scheduler refuses to hand
+    over also reads None (logged at debug only), so None there cannot tell "never ran" from
+    "could not ask". No node step reads either field; they are diagnostics.
     """
 
     name: str
