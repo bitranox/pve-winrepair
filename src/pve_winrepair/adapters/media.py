@@ -31,8 +31,15 @@ if TYPE_CHECKING:
 
 __all__ = ["LocalMedia", "NodeMedia"]
 
-#: The node-side check, run as ``sh -c <it> sh <dir>``: 10 = no forwarded agent, 11 = no directory, 12 = empty.
-_CHECK = 'test -n "$SSH_AUTH_SOCK" || exit 10; test -d "$1" || exit 11; test -n "$(ls -A -- "$1")" || exit 12'
+#: The node-side check, run as ``sh -c <it> sh <dir>``: 10 = no forwarded agent, 11 = no directory, 12 = no
+#: entry the copy takes. It asks the same ``*`` glob :data:`_COPY` hands scp, which skips names starting with
+#: ".": an unmatched glob stays the literal word, which neither exists nor is a link (a dangling link the glob
+#: matched still counts). ``ls -A`` would count dot entries, so a directory holding only those would pass
+#: here and reach scp with a literal ``*`` after the snapshot.
+_CHECK = (
+    'test -n "$SSH_AUTH_SOCK" || exit 10; test -d "$1" || exit 11; '
+    'set -- "$1"/*; test -e "$1" || test -L "$1" || exit 12'
+)
 #: The node-side copy, run as ``sh -c <it> sh <dir> <target> <guest host keys> <scp options...>``: every
 #: entry by glob, from inside the dir. Empty host keys mean no check (``[ssh] strict_host_key_checking``
 #: off): no known_hosts is read or written, nor any temporary file made. Otherwise the lines go to a
@@ -69,7 +76,7 @@ _AGENT_REASONS = {
 _CHECK_REASONS = {
     10: "node {target} did not get the forwarded agent (SSH_AUTH_SOCK is empty): allow agent forwarding there",
     11: "media directory missing on node {target}: {directory}",
-    12: "media directory is empty on node {target}: {directory}",
+    12: 'media directory is empty on node {target}: {directory} (names starting with "." are not copied)',
 }
 
 

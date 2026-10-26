@@ -229,6 +229,11 @@ class _ScpSaw(BaseModel):
     tmp: list[str]
 
 
+def _run_on_this_machine(words: list[str], env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    """Run the words a recorded node call hands the node's shell, here, under a real ``sh``."""
+    return subprocess.run(words, env=env, capture_output=True, text=True, encoding="utf-8", check=False)  # noqa: S603
+
+
 def _run_the_node_script(tmp_path: Path, *, strict: bool, scp_exit: int) -> tuple[Path, Path, _ScpSaw]:
     """Run the node-side copy's recorded words under a real ``sh`` with a recording scp first on PATH.
 
@@ -259,7 +264,7 @@ def _run_the_node_script(tmp_path: Path, *, strict: bool, scp_exit: int) -> tupl
         "SCP_RECORD": str(record),
         "SCP_EXIT": str(scp_exit),
     }
-    done = subprocess.run(words, env=env, capture_output=True, text=True, encoding="utf-8", check=False)  # noqa: S603
+    done = _run_on_this_machine(words, env)
     assert (done.returncode, done.stderr) == (scp_exit, "")
     return media, scratch, _ScpSaw.model_validate_json(record.read_text(encoding="utf-8"))
 
@@ -313,3 +318,43 @@ def test_a_node_copy_whose_ssh_cannot_start_is_a_failed_transfer() -> None:
         255,
         "media transfer: could not run ssh: No such file or directory: 'ssh'",
     )
+
+
+@pytest.mark.os_posix
+@pytest.mark.parametrize(
+    ("entries", "agent", "status"),
+    [
+        (["setup.exe", "sources/"], True, 0),
+        (["setup.exe", ".hidden"], True, 0),
+        ([], True, 12),
+        ([".hidden"], True, 12),
+        ([".git/", ".hidden"], True, 12),
+        (None, True, 11),
+        (["setup.exe"], False, 10),
+    ],
+    ids=["entries", "entries-and-dot-entry", "empty", "dot-file-only", "dot-entries-only", "missing", "no-agent"],
+)  # fmt: skip
+def test_the_node_check_passes_only_a_directory_holding_an_entry_the_copy_takes(
+    tmp_path: Path, entries: list[str] | None, agent: bool, status: int
+) -> None:
+    """The copy takes the directory's entries by ``*``, which skips names starting with ".".
+
+    A directory holding only such entries must fail the check (12, "empty"): passed, it would reach
+    scp with a literal ``*`` after the snapshot and the Windows Update hold.
+    """
+    media = tmp_path / "media"
+    if entries is not None:
+        media.mkdir()
+        for name in entries:
+            if name.endswith("/"):
+                (media / name).mkdir()
+            else:
+                (media / name).write_bytes(b"x")
+    runner = FakeRunner().on("ssh-add", Reply(0, "256 k\n")).on("sh", Reply(0))
+    _node_media(runner, directory=str(media)).check()
+    words = shlex.split(runner.calls[-1][-1])
+    env = {key: value for key, value in os.environ.items() if key != "SSH_AUTH_SOCK"}
+    if agent:
+        env["SSH_AUTH_SOCK"] = str(tmp_path / "agent.sock")
+    done = _run_on_this_machine(words, env)
+    assert (done.returncode, done.stderr) == (status, "")

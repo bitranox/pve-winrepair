@@ -139,7 +139,8 @@ the guest key (`[ssh] key`) from THIS machine's ssh-agent, forwarded to the node
 never stored there. Load it first (`ssh-add <[ssh] key>`; on Windows into the `ssh-agent` service),
 and let the node's sshd allow agent forwarding (`AllowAgentForwarding`, on by default). Before any
 VM call the run checks that the agent holds a key (`ssh-add -l`), that the node received the
-forwarded agent, and that `media_dir` exists there and is not empty, and refuses otherwise. It does
+forwarded agent, and that `media_dir` exists there and holds an entry the copy takes (one whose name
+does not start with `.`), and refuses otherwise. It does
 not check that the key in the agent is the guest key: with another one, the copy itself fails, after
 the snapshot. The node copies the entries the shell glob `*` matches in `media_dir`, so a file or
 directory there whose name starts with `.` stays behind; `"local"` copies every entry.

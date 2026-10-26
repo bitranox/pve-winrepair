@@ -25,8 +25,10 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   `[repair] media_dir` on the node, `local` stages `[repair] local_media_dir` from the machine
   running the tool. With a remote node, `node` has the node's own scp copy the media into the
   guest, logging in with the guest key from this machine's ssh-agent, forwarded for that copy
-  only. Before any VM call the run refuses unconfigured, missing or empty media and, for a remote
-  `node`, no reachable ssh-agent, an agent holding no key, or a node that did not receive it.
+  only. Before any VM call the run refuses unconfigured, missing or empty media (for a remote
+  `node`, a directory holding only names starting with `.` counts as empty, since its copy skips
+  them) and, for a remote `node`, no reachable ssh-agent, an agent holding no key, or a node that
+  did not receive it.
   A `media_source` other than `node` or `local` stops the tool when the configuration loads
   (exit 78), even for a run that passes `--media`.
 - `[repair] stage_timeout_minutes` (default 90, a whole number from 1 to 1440): how long the media
