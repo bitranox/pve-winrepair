@@ -584,6 +584,24 @@ def test_prepare_refuses_media_whose_image_names_no_build(
     )
 
 
+@pytest.mark.parametrize("spbuild", ["", "<SPBUILD>8a73</SPBUILD>"])
+@pytest.mark.parametrize("build", [26200, 26300], ids=["same-build", "newer-build"])
+def test_prepare_refuses_media_whose_image_names_no_spbuild(
+    stage: Path, fileless_host: FakeUpgradeHost, spbuild: str, build: int
+) -> None:
+    # pwshpy reads a missing SPBUILD as 0: on a newer build that PASSED into a receipt apply cannot
+    # verify, on the same build it FAILED as "older than running".
+    (stage / "sources" / "install.wim").write_bytes(_with_xml(_image_xml(f"<BUILD>{build}</BUILD>{spbuild}")))
+
+    code, envelope = _run(fileless_host, "prepare", "--stage-root", str(stage))
+
+    assert code == 1
+    assert (_data(envelope)["gate"], _data(envelope)["reason"]) == (
+        "FAIL",
+        "image index 1 names no SPBUILD (WINDOWS/VERSION/SPBUILD missing or not a number)",
+    )
+
+
 def test_prepare_reports_drives_through_the_shared_parser(stage: Path, fileless_host: FakeUpgradeHost) -> None:
     fileless_host.disks = [
         _disk("C:", 50 * 1024**3),

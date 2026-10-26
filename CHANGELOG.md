@@ -92,6 +92,10 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   the VM is shut down or changed. Before, and in 1.0.0, the failed read was taken as a config
   with no TPM: without `--tpm-storage` the run stopped with "cannot determine storage", and with
   `--tpm-storage` it shut the guest down and added a vTPM it may already have had.
+- The WIM gate fails media whose image index 1 names no SPBUILD (missing or not a number), with
+  that as its reason. Before, and in 1.0.0, it read as SPBUILD 0: media of a newer build passed
+  into a receipt naming `<build>.0`, which `apply` then refused to verify after the upgrade, and
+  media of the running build failed as "older than running".
 
 ### Fixed
 

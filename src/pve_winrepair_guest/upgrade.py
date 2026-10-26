@@ -695,6 +695,10 @@ def wim_gate(images: Sequence[WimImage], running: BuildInfo) -> GateResult:
         # pwshpy reads a BUILD that is missing or not a number as 0. The tuple compare below would
         # FAIL it too, but with a reason naming a build "0" the media never carried.
         return _gate_failed("image index 1 names no build (WINDOWS/VERSION/BUILD missing or not a number)", image)
+    if image.spbuild == 0:
+        # The same reading of SPBUILD: on a newer build it would PASS into a receipt naming
+        # <build>.0, which the build the upgrade brings never matches, so apply refuses it.
+        return _gate_failed("image index 1 names no SPBUILD (WINDOWS/VERSION/SPBUILD missing or not a number)", image)
     if not _BUILD_NUMBER.fullmatch(running.current_build):
         return _gate_failed(f"running CurrentBuild {running.current_build!r} is not a number", image)
     if (image.build, image.spbuild) < (int(running.current_build), running.ubr):
