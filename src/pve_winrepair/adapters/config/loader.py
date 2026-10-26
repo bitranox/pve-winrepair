@@ -20,15 +20,17 @@ from pve_winrepair import __init__conf__
 #: ``config`` shows their values: the ``*_max_keys`` limits are plain counts, and the shipped
 #: ``scrub_patterns`` fields hold the regex that says what the log scrubber hides, which a reader
 #: needs to see to check the scrubbing; ``ssh.strict_host_key_checking`` is a yes/no switch whose
-#: name holds ``key``. A field an operator adds to ``scrub_patterns`` is not declared and stays
-#: redacted. Every Config this application builds carries the declaration: the
-#: loader passes it to ``read_config``, and ``--set`` rebuilds pass it on.
+#: name holds ``key``; ``node.ssh_key`` is the PATH of a key file, shown like ``ssh.key`` (whose
+#: name the redaction does not match), never key material. A field an operator adds to
+#: ``scrub_patterns`` is not declared and stays redacted. Every Config this application builds
+#: carries the declaration: the loader passes it to ``read_config``, and ``--set`` rebuilds pass it on.
 NOT_SENSITIVE: Final[tuple[str, ...]] = (
     "lib_log_rich.payload_limits.context_max_keys",
     "lib_log_rich.payload_limits.extra_max_keys",
     "lib_log_rich.scrub_patterns.password",
     "lib_log_rich.scrub_patterns.secret",
     "lib_log_rich.scrub_patterns.token",
+    "node.ssh_key",
     "ssh.strict_host_key_checking",
 )
 

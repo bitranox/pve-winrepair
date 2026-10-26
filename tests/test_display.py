@@ -199,3 +199,14 @@ def test_config_shows_whether_ssh_checks_host_keys(
 
     assert exit_code == 0
     assert _value(shown, "ssh.strict_host_key_checking") is (not options)
+
+
+@pytest.mark.os_agnostic
+def test_config_shows_both_key_paths_alike(isolated_layers: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """``[node] ssh_key`` and ``[ssh] key`` both name a key FILE, never key material: ``config`` shows both."""
+    argv = ["--set", "node.ssh_key=/keys/node.key", "--set", "ssh.key=/keys/guest.key"]
+    exit_code = main([*argv, "config", "--format", "json"], services_factory=build_production)
+    shown = cast("dict[str, Any]", json.loads(capsys.readouterr().out))
+
+    assert exit_code == 0
+    assert (_value(shown, "node.ssh_key"), _value(shown, "ssh.key")) == ("/keys/node.key", "/keys/guest.key")
