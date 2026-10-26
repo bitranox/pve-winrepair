@@ -27,11 +27,14 @@ value stops them with exit 78 and one `Error: <section>.<key>: <reason>` line pe
 example `Error: node.state_dir: must be an absolute path on this machine`. A top-level section
 other than these four, `[lib_log_rich]` and `[lib_layered_config]` is refused the same way, with an
 `Error: <section>: not a section pve-winrepair reads (...)` line, so a misspelt `[repiar]` stops the
-command instead of being skipped. `config` checks them the same way after it has shown them, and
-exits 78 with the same lines. The logging section `[lib_log_rich]` is checked too: an unknown key
-there (also in `[lib_log_rich.payload_limits]`) or a refused value stops every command that reads
-the configuration, `config` included, with exit 78 and one `Error: lib_log_rich.<key>: <reason>`
-line per problem, for example `Error: lib_log_rich.custom_field: Extra inputs are not permitted`.
+command instead of being skipped. Only a section (a table) is checked this way: a top-level key that
+holds a plain value is still loaded and ignored, so a key written above its section's header in a
+TOML file, as in `key = "/k"` before `[ssh]`, sets nothing and stops nothing. `config` checks them the same way after it has shown them, and
+exits 78 with the same lines.
+The logging section `[lib_log_rich]` is checked too: an unknown key there (also in
+`[lib_log_rich.payload_limits]`) or a refused value stops every command that reads the
+configuration, `config` included, with exit 78 and one `Error: lib_log_rich.<key>: <reason>` line
+per problem, for example `Error: lib_log_rich.custom_field: Extra inputs are not permitted`.
 
 ---
 

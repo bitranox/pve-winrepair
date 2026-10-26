@@ -748,14 +748,34 @@ def test_a_prefixed_dotenv_line_exits_78_with_the_hint_and_the_bare_line_sets_th
 
 
 @pytest.mark.os_agnostic
-def test_a_dotenv_line_without_a_section_still_loads(isolated_layers: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_a_dotenv_line_without_a_section_still_loads(
+    isolated_layers: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Logging copies a LOG_* line of the --env-file into the environment unless the variable is
+    # already set; setting it here keeps this in-process run from leaking it into later tests.
+    monkeypatch.setenv("LOG_CONSOLE_LEVEL", "INFO")
     dotenv = isolated_layers / "checkout.env"
-    dotenv.write_text("CODECOV_TOKEN=\nREPAIR__SNAPSHOT_NAME=pre_repair_2\n", encoding="utf-8")
-    # Premise: the line without a separator arrives as a top-level key, beside the sections.
-    assert get_config(dotenv_path=str(dotenv)).as_dict()["codecov_token"] == ""
+    dotenv.write_text("LOG_CONSOLE_LEVEL=DEBUG\nCODECOV_TOKEN=\nREPAIR__SNAPSHOT_NAME=pre_repair_2\n", encoding="utf-8")
+    # Premise: a line without a separator arrives as a top-level key, beside the sections.
+    shown = get_config(dotenv_path=str(dotenv)).as_dict()
+    assert (shown["log_console_level"], shown["codecov_token"]) == ("DEBUG", "")
 
     exit_code = main(["--env-file", str(dotenv), "config", "--section", "repair"], services_factory=build_production)
 
     captured = capsys.readouterr()
     assert exit_code == 0, captured.err
     assert "pre_repair_2" in captured.out
+
+
+@pytest.mark.os_agnostic
+def test_a_dotenv_line_naming_a_section_the_tool_does_not_read_exits_78(
+    isolated_layers: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    dotenv = isolated_layers / "typo.env"
+    dotenv.write_text("REPIAR__SNAPSHOT_NAME=pre_repair_2\n", encoding="utf-8")
+
+    exit_code = main(["--env-file", str(dotenv), "config", "--section", "repair"], services_factory=build_production)
+
+    errors = [line for line in capsys.readouterr().err.splitlines() if line.startswith("Error:")]
+    assert exit_code == 78
+    assert errors == [f"Error: repiar: not a section pve-winrepair reads (it reads {', '.join(_OWNED_SECTIONS)})"]
