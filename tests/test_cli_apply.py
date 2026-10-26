@@ -80,6 +80,20 @@ def test_apply_reads_the_receipt_from_the_file_given(tmp_path: Path) -> None:
 
 
 @NEEDS_A_POSIX_STATE_DIR
+def test_apply_reads_a_relative_receipt_file_from_the_cwd_and_reports_its_absolute_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The process cwd is an external edge: the relative path is resolved against it at parse time.
+    FileReceiptStore(tmp_path / "unused", tmp_path / "r.json").write(RECEIPT)
+    monkeypatch.chdir(tmp_path)
+    run = run_cli([*APPLY, "--receipt", "r.json", "--json"], cli_config(tmp_path), _runner())
+    envelope = json_envelope(run.stdout)
+    assert (run.exit_code, envelope["verdict"]) == (0, "VERIFIED")
+    receipt = next(step for step in envelope_steps(envelope) if step["step"] == "receipt")
+    assert receipt["path"] == str(tmp_path / "r.json")
+
+
+@NEEDS_A_POSIX_STATE_DIR
 def test_apply_refuses_a_receipt_file_below_a_regular_file_before_any_call(tmp_path: Path) -> None:
     blocker = tmp_path / "a-file"
     blocker.write_text("", encoding="utf-8")

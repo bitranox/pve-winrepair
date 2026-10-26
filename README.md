@@ -184,7 +184,7 @@ SECTION.KEY=VALUE` (repeatable), `--env-file PATH`, `--traceback` / `--no-traceb
 | `--stage-only`      | off                      | Stage the media and hold Windows Update, but neither gate the WIM nor launch setup (verdict STAGED) |
 | `--ip IP`           | from the agent           | The guest's IPv4 address, for a guest without the QEMU agent; implies the powered-off snapshot      |
 | `--node HOST`       | `[node] host`            | The PVE node to drive over ssh, the guests reached through it; with neither, this machine           |
-| `--receipt FILE`    | `[node] state_dir`       | The receipt file on this machine, instead of `receipt-<vmid>.json` in `[node] state_dir`            |
+| `--receipt FILE`    | `[node] state_dir`       | The receipt file on this machine, made absolute in the current directory, instead of the per-VM one |
 | `--media M`         | `[repair] media_source`  | `node`: `[repair] media_dir` on the node; `local`: `[repair] local_media_dir` on this machine       |
 | `--stage-root X:`   | measured                 | The drive to stage on; by default a non-system fixed drive with room, else `C:`                     |
 | `--tpm-storage S`   | the guest disk's storage | The PVE storage ID for a new vTPM volume                                                            |
@@ -353,9 +353,13 @@ accepts only that build; for same-build media it also requires a changed Install
 in-place upgrade always rewrites InstallDate is not yet measured on a real upgrade: should it not,
 every same-build repair ends REVERTED_OR_UNCHANGED and its Windows Update hold has to be released by
 hand. A repair removes the VM's previous receipt (with `--receipt`, that file) once it is sure no
-run is live, so a run that stops before the WIM gate, or a `--stage-only` run, leaves none. The file
-is replaced atomically and only its owner can read it (0600, in a 0700 directory when
-`pve-winrepair` creates the directory).
+run is live, so a run that stops before the WIM gate, or a `--stage-only` run, leaves none. A
+relative `--receipt` path is made absolute in the current directory, and the `receipt` step shows
+that path: give `apply` the same file, from the same directory or as the absolute path. A repair
+whose receipt file holds another VM's receipt is refused (exit 1) before any VM call, since
+removing it would leave that VM's apply without a receipt: apply that VM first, or use another
+`--receipt` file or delete the old one. The file is replaced atomically and only its owner can read
+it (0600, in a 0700 directory when `pve-winrepair` creates the directory).
 
 ## Guest tool subcommands
 

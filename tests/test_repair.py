@@ -1335,6 +1335,33 @@ def test_a_repair_refused_by_the_live_run_guard_keeps_the_receipt(tmp_path: Path
     assert store.read(1) == OLD_RECEIPT
 
 
+def test_a_receipt_file_holding_another_vm_refuses_the_repair_before_any_call(tmp_path: Path) -> None:
+    file = tmp_path / "r.json"
+    store = FileReceiptStore(tmp_path / "state", file)
+    store.write(OLD_RECEIPT.model_copy(update={"vmid": 7}))
+    before = file.read_bytes()
+    runner = agent_runner(FakePve())
+    result, steps = _run(runner, _media(tmp_path), receipts=store)
+    assert (result.exit, result.verdict) == (RunExit.REFUSED, "ERROR")
+    assert steps[-1]["message"] == (
+        f"the receipt file {file} holds VM 7's receipt: apply VM 7 first, or use another --receipt file or delete it"
+    )
+    assert runner.calls == []
+    assert file.read_bytes() == before
+
+
+def test_a_receipt_file_that_is_no_valid_receipt_is_replaced_by_the_repair(tmp_path: Path) -> None:
+    # Nothing in it names another VM, so the repair runs as before: the file is removed, then rewritten.
+    file = tmp_path / "r.json"
+    file.write_text("{not json", encoding="utf-8")
+    store = FileReceiptStore(tmp_path / "state", file)
+    result, _steps = _run(agent_runner(FakePve()), _media(tmp_path), receipts=store)
+    assert (result.exit, result.verdict) == (RunExit.OK, "STATE=DONE-OK")
+    written = store.read(1)
+    assert written is not None
+    assert written.vmid == 1
+
+
 def test_a_receipt_that_cannot_be_removed_refuses_the_repair_before_staging(tmp_path: Path) -> None:
     store = FileReceiptStore(tmp_path / "state")
     store.path(1).mkdir(parents=True)  # a directory where the receipt file goes: unlink fails

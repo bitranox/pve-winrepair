@@ -1,7 +1,8 @@
 """Repair receipts as files in the state directory, one per VM: ``<state_dir>/receipt-<vmid>.json``.
 
 ``repair --receipt FILE`` and ``apply --receipt FILE`` name one file instead, used for whichever VM
-the run is for; a receipt read from it is still refused when it names another VM.
+the run is for; a receipt read from it is still refused when it names another VM, and
+:meth:`FileReceiptStore.other_vm` tells a repair which VM's receipt it would remove.
 
 A receipt is written to a temporary file in the same directory and moved over the old one with
 ``os.replace``, so a reader sees the previous receipt or the new one, never a half-written file. The
@@ -68,24 +69,25 @@ class FileReceiptStore:
                 another VM.
         """
         path = self.path(vmid)
-        try:
-            text = path.read_text(encoding="utf-8")
-        except (FileNotFoundError, NotADirectoryError):
-            # NotADirectoryError: a component of the path is a regular file, so no receipt can exist.
-            return None
-        except (OSError, UnicodeDecodeError) as exc:
-            raise ReceiptError(f"cannot read the repair receipt {path}: {_cause(exc)}") from exc
-        try:
-            # model_validate_json, never datetime.fromisoformat: the writer's trailing "Z" is
-            # rejected by fromisoformat before Python 3.11.
-            receipt = RepairReceipt.model_validate_json(text)
-        except ValidationError as exc:
-            problems = describe_validation_error(exc, root="<document>")
-            raise ReceiptError(f"the repair receipt {path} is not valid: {problems}") from exc
-        if receipt.vmid != vmid:
+        receipt = self._load(path)
+        if receipt is not None and receipt.vmid != vmid:
             # A file copied or renamed from another VM's receipt: its build is not this VM's.
             raise ReceiptError(f"the repair receipt {path} is for VM {receipt.vmid}, not VM {vmid}")
         return receipt
+
+    def other_vm(self, vmid: int) -> int | None:
+        """The VM the receipt file of ``vmid`` names when that is another VM, else None.
+
+        None as well when there is no file or it cannot be read or is not a valid receipt: such a
+        file names no VM whose receipt could be lost, and a repair removes it later as before.
+        """
+        try:
+            receipt = self._load(self.path(vmid))
+        except ReceiptError:
+            return None
+        if receipt is None or receipt.vmid == vmid:
+            return None
+        return receipt.vmid
 
     def delete(self, vmid: int) -> None:
         """Remove the receipt of ``vmid``; a receipt that does not exist is fine.
@@ -100,6 +102,28 @@ class FileReceiptStore:
             return
         except OSError as exc:
             raise ReceiptError(f"cannot remove the repair receipt {path}: {_cause(exc)}") from exc
+
+    @staticmethod
+    def _load(path: Path) -> RepairReceipt | None:
+        """The receipt in ``path`` whichever VM it names, or None when there is no file.
+
+        Raises:
+            ReceiptError: The file exists but cannot be read or is not a valid receipt.
+        """
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (FileNotFoundError, NotADirectoryError):
+            # NotADirectoryError: a component of the path is a regular file, so no receipt can exist.
+            return None
+        except (OSError, UnicodeDecodeError) as exc:
+            raise ReceiptError(f"cannot read the repair receipt {path}: {_cause(exc)}") from exc
+        try:
+            # model_validate_json, never datetime.fromisoformat: the writer's trailing "Z" is
+            # rejected by fromisoformat before Python 3.11.
+            return RepairReceipt.model_validate_json(text)
+        except ValidationError as exc:
+            problems = describe_validation_error(exc, root="<document>")
+            raise ReceiptError(f"the repair receipt {path} is not valid: {problems}") from exc
 
     def _ensure_dir(self) -> None:
         """Create the directory that holds the receipts 0700 when it is absent; an existing one keeps its mode.

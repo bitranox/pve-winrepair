@@ -230,6 +230,13 @@ class ReceiptStore(Protocol):
         """The receipt of ``vmid``; None when there is none, ``ReceiptError`` when it is unreadable or invalid."""
         ...
 
+    def other_vm(self, vmid: int) -> int | None:
+        """The VM the receipt at ``path(vmid)`` names when that is not ``vmid``.
+
+        None when there is no receipt there, it names ``vmid``, or it cannot be read or parsed.
+        """
+        ...
+
     def path(self, vmid: int) -> Path:
         """Where the receipt of ``vmid`` is kept."""
         ...

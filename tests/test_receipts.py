@@ -126,6 +126,39 @@ def test_a_receipt_file_of_another_vm_is_still_refused(tmp_path: Path) -> None:
         FileReceiptStore(tmp_path, file).read(8)
 
 
+def test_other_vm_names_the_vm_a_receipt_file_of_another_vm_holds(tmp_path: Path) -> None:
+    file = tmp_path / "r.json"
+    FileReceiptStore(tmp_path, file).write(_receipt(vmid=7))
+    assert FileReceiptStore(tmp_path, file).other_vm(8) == 7
+
+
+def test_other_vm_is_none_without_a_file_and_for_the_same_vm(tmp_path: Path) -> None:
+    store = FileReceiptStore(tmp_path, tmp_path / "r.json")
+    assert store.other_vm(8) is None
+    store.write(_receipt(vmid=8))
+    assert store.other_vm(8) is None
+
+
+@pytest.mark.parametrize("content", [b"{not json", b"\xff\xfe{", b'{"vmid": 7}'], ids=["json", "utf8", "fields"])
+def test_other_vm_is_none_for_a_file_that_is_no_valid_receipt(tmp_path: Path, content: bytes) -> None:
+    # An unreadable or invalid file keeps today's behaviour: the repair removes it later.
+    file = tmp_path / "r.json"
+    file.write_bytes(content)
+    assert FileReceiptStore(tmp_path, file).other_vm(8) is None
+
+
+def test_other_vm_is_none_below_a_regular_file(tmp_path: Path) -> None:
+    blocker = tmp_path / "a-file"
+    blocker.write_text("", encoding="utf-8")
+    assert FileReceiptStore(blocker).other_vm(1) is None
+
+
+def test_other_vm_is_none_for_a_file_that_cannot_be_read(tmp_path: Path) -> None:
+    store = FileReceiptStore(tmp_path)
+    store.path(1).mkdir()  # a directory where the receipt goes: reading it fails
+    assert store.other_vm(1) is None
+
+
 @pytest.mark.os_posix
 def test_the_directory_created_for_a_receipt_file_is_0700(tmp_path: Path) -> None:
     file = tmp_path / "var" / "mine" / "r.json"

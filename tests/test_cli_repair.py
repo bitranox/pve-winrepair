@@ -26,6 +26,7 @@ from guest_fakes import (
     NO_LOG,
     NODE_LINK,
     NODE_LOGGING,
+    RECEIPT,
     CliRun,
     FakePve,
     FakeRunner,
@@ -45,6 +46,7 @@ from lib_layered_config import Config
 
 from pve_winrepair.adapters.cli.commands.runs import PreflightError, check_node, resolve_link, resolve_snapshot_name
 from pve_winrepair.adapters.cli.main import main
+from pve_winrepair.adapters.receipts import FileReceiptStore
 from pve_winrepair.composition import AppServices, build_testing
 from pve_winrepair.domain.envelope import WU_HELD_HINT
 from pve_winrepair.domain.node_link import NodeLink
@@ -92,6 +94,37 @@ def test_repair_writes_the_receipt_to_the_file_given(tmp_path: Path) -> None:
     assert receipt["path"] == str(file)
     assert file.is_file()
     assert not (tmp_path / "state" / "receipt-1.json").exists()
+
+
+@NEEDS_A_POSIX_STATE_DIR
+def test_a_relative_receipt_file_is_written_and_reported_as_its_absolute_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The process cwd is an external edge: the relative path is resolved against it at parse time.
+    monkeypatch.chdir(tmp_path)
+    argv = ["repair", "--vmid", "1", "--receipt", "r.json", "--json"]
+    run = run_cli(argv, cli_config(tmp_path), agent_runner(FakePve()))
+    envelope = json_envelope(run.stdout)
+    assert (run.exit_code, envelope["verdict"]) == (0, "STATE=DONE-OK")
+    receipt = next(step for step in envelope_steps(envelope) if step["step"] == "receipt")
+    assert receipt["path"] == str(tmp_path / "r.json")
+    assert (tmp_path / "r.json").is_file()
+
+
+@NEEDS_A_POSIX_STATE_DIR
+def test_a_receipt_file_holding_another_vm_is_refused_before_any_call(tmp_path: Path) -> None:
+    file = tmp_path / "r.json"
+    FileReceiptStore(tmp_path / "unused", file).write(RECEIPT.model_copy(update={"vmid": 7}))
+    before = file.read_bytes()
+    runner = agent_runner(FakePve())
+    run = run_cli(["repair", "--vmid", "1", "--receipt", str(file), "--json"], cli_config(tmp_path), runner)
+    envelope = json_envelope(run.stdout)
+    assert (run.exit_code, envelope["verdict"]) == (1, "ERROR")
+    assert envelope_steps(envelope)[-1]["message"] == (
+        f"the receipt file {file} holds VM 7's receipt: apply VM 7 first, or use another --receipt file or delete it"
+    )
+    assert runner.calls == []
+    assert file.read_bytes() == before
 
 
 @NEEDS_A_POSIX_STATE_DIR

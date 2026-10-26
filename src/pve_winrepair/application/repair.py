@@ -17,7 +17,9 @@ fields of its JSON envelope.
 Once prepare has measured the staged image, its build is recorded in the VM's receipt
 (:class:`ReceiptStore`) before setup is launched, together with the build and InstallDate the guest
 runs at that moment (``build_before``); apply verifies against it. The previous receipt is removed
-once the last live-run guard passed, so a run that stops before prepare leaves none.
+once the last live-run guard passed, so a run that stops before prepare leaves none. A receipt file
+holding another VM's receipt (one ``--receipt`` file shared by two VMs) refuses the run before any
+VM call (:func:`refuse_another_vms_receipt`): removing it would lose that VM's unapplied receipt.
 
 With ``ip`` (no agent) the guest at that address must be the VM: a MAC of its ``qm config`` network
 devices must be one of the guest's adapters (:func:`check_guest_is_vm`). On a running VM that is
@@ -631,6 +633,21 @@ def build_before(guest: GuestPort, rep: Report) -> GuestBuild:
     return before
 
 
+def refuse_another_vms_receipt(receipts: ReceiptStore, vmid: int) -> None:
+    """Refuse a run whose receipt file holds another VM's receipt, before any VM call.
+
+    The run would remove that receipt (:func:`forget_receipt`), and without it the other VM's apply
+    refuses and its Windows Update hold stays. A file that cannot be read or is no valid receipt
+    names no other VM and is removed later as before.
+    """
+    other = receipts.other_vm(vmid)
+    if other is not None:
+        raise RepairError(
+            f"the receipt file {receipts.path(vmid)} holds VM {other}'s receipt: apply VM {other} first, "
+            "or use another --receipt file or delete it"
+        )
+
+
 def forget_receipt(receipts: ReceiptStore, vmid: int) -> None:
     """Remove the VM's previous receipt: from here on it no longer describes what is staged.
 
@@ -911,9 +928,11 @@ def repair_sequence(
 
     The VM's previous receipt is removed once the live-run guard passed for the last time, so a
     run refused after that, or a stage-only run, leaves none for apply to trust; the new one is
-    written once prepare has measured the image, before setup is launched.
+    written once prepare has measured the image, before setup is launched. A receipt file holding
+    another VM's receipt is refused before any VM call.
     """
     media = media_source(node, repair, request.media)
+    refuse_another_vms_receipt(receipts, request.vmid)
     network = guest.subnet
     if vm_status(node, request.vmid) is VmStatus.RUNNING:
         live = _clear_live_run(node, request, rep, network)

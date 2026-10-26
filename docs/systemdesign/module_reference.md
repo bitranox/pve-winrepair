@@ -25,10 +25,10 @@ moves or removes a module, a CLI option or a public name.
 - `src/pve_winrepair/domain/vm_config.py`  -  `parse_vm_config` reads `qm config` once into a `VmConfig` (its `VmDisk`s with storage and `DiskMedia`, a `tpmstate0`, a launcher `--tpm`, the `netN` MACs); `VmConfigRead` is one such call with its exit code; `parse_snapshot_names` reads `qm listsnapshot`; `parse_snapshot_result` reads a `qm snapshot` call into a `SnapshotResult` (exit code, stderr, whether PVE froze the guest filesystem)
 
 ### Application Layer
-- `src/pve_winrepair/application/ports.py`  -  Protocol definitions the adapters satisfy: the configuration and logging callables, `LoadSettings`, `GuestPort` (`ask` runs one subcommand and returns its typed answer), `NodePort` (`vm_config`, `snapshots` and `snapshot` return the parsed `qm config`, `qm listsnapshot` and `qm snapshot`; `check_link` is why a linked node cannot be used, or None; `media` is a run's media in a directory, on the node or on this machine), `MediaSource` (`check` is why the media cannot be used, or None; `copy_into` copies every media entry into a guest directory), `ReceiptStore`, `MakeNode` (the node from the `[ssh]` settings and an optional `NodeLink`), `MakeReceipts` (the store in `[node] state_dir`, or in the one `--receipt` file)
+- `src/pve_winrepair/application/ports.py`  -  Protocol definitions the adapters satisfy: the configuration and logging callables, `LoadSettings`, `GuestPort` (`ask` runs one subcommand and returns its typed answer), `NodePort` (`vm_config`, `snapshots` and `snapshot` return the parsed `qm config`, `qm listsnapshot` and `qm snapshot`; `check_link` is why a linked node cannot be used, or None; `media` is a run's media in a directory, on the node or on this machine), `MediaSource` (`check` is why the media cannot be used, or None; `copy_into` copies every media entry into a guest directory), `ReceiptStore` (`other_vm` is the VM a receipt file of another VM names, or None), `MakeNode` (the node from the `[ssh]` settings and an optional `NodeLink`), `MakeReceipts` (the store in `[node] state_dir`, or in the one `--receipt` file)
 - `src/pve_winrepair/application/guest_state.py`  -  `read_run_state`, the live-run gate both use cases read before they stop, relaunch or restage a guest; `read_guest_build`, the guest's build and InstallDate
 - `src/pve_winrepair/application/guest_identity.py`  -  `check_guest_is_vm`: with `--ip`, a MAC of the VM's `qm config` must be among the guest's `nic-macs` (membership, both sides normalised); `GuestMismatchError`
-- `src/pve_winrepair/application/repair.py`  -  `run_repair`: live-run check (with `--ip`: the MAC check first), Windows Update hold, vTPM, snapshot, push, MAC check again with `--ip`, stage root, locked staging, media copy, WIM gate, build before, receipt, launch, poll (a `--stage-only` run ends on a `staged` step flagged `wu_held`); `media_source` picks the media (`[repair] media_dir` or `local_media_dir`, by `RepairRequest.media`) and refuses them unconfigured, missing or empty before any VM call; `RepairRequest`, `RepairError`
+- `src/pve_winrepair/application/repair.py`  -  `run_repair`: live-run check (with `--ip`: the MAC check first), Windows Update hold, vTPM, snapshot, push, MAC check again with `--ip`, stage root, locked staging, media copy, WIM gate, build before, receipt, launch, poll (a `--stage-only` run ends on a `staged` step flagged `wu_held`); `media_source` picks the media (`[repair] media_dir` or `local_media_dir`, by `RepairRequest.media`) and refuses them unconfigured, missing or empty before any VM call; `refuse_another_vms_receipt` refuses, next and still before any VM call, a receipt file holding another VM's receipt; `RepairRequest`, `RepairError`
 - `src/pve_winrepair/application/apply.py`  -  `run_apply`: receipt, MAC check, run gate, staged-OS gate, clean stop and start, build check against the receipt (same-build media: InstallDate must change) from a verified profile copy, Windows Update release; `ApplyRequest`, `ApplyError`
 - `src/pve_winrepair/application/vm.py`  -  `vm_status` reads `qm status` into a `VmStatus` (anything else is `UnknownVmStatusError`); the bounded `wait_status` polls through a failed read and ends with `VmStatusTimeoutError`; both errors are `VmStatusError`s
 
@@ -42,7 +42,7 @@ moves or removes a module, a CLI option or a public name.
 - `src/pve_winrepair/adapters/guest_tool/winrepair_guest.ps1`  -  The packed guest tool, a committed artefact (`make custom pack` writes it)
 - `src/pve_winrepair/adapters/node.py`  -  `Node`, the PVE node a run uses: one runner for `qm` and every guest, the clock and sleep, `qm config`, `qm listsnapshot` and `qm snapshot` parsed where they answer; with a `NodeLink` it is a remote node, `qm` runs there over ssh and every guest call is jumped through it, and `check_link` proves it usable in one round trip (`command -v qm`: it answers, accepts the key and host key, has `qm`), else names why in ssh's own words; `media` is a run's media (`NodeMedia` on a linked node when they come from the node, else `LocalMedia`); `run` is the production runner
 - `src/pve_winrepair/adapters/media.py`  -  `LocalMedia`: the media in a directory on this machine, refused missing or empty, every entry copied in name order by the guest's scp (through the node when it is remote); `NodeMedia`: the media in a directory on a remote node, checked with `ssh-add -l` (an agent holding a key) and one `ssh -A` call (the forwarded agent arrived, the directory exists and is not empty), copied node -> guest by the node's own scp with the forwarded key (no `IdentitiesOnly`, the node's own known_hosts)
-- `src/pve_winrepair/adapters/receipts.py`  -  `FileReceiptStore`: one receipt per VM at `<state_dir>/receipt-<vmid>.json`, or in the one file `--receipt` names, replaced atomically, 0600 in a 0700 directory
+- `src/pve_winrepair/adapters/receipts.py`  -  `FileReceiptStore`: one receipt per VM at `<state_dir>/receipt-<vmid>.json`, or in the one file `--receipt` names, replaced atomically, 0600 in a 0700 directory; `other_vm` is the VM such a file names when it is another one
 - `src/pve_winrepair/adapters/logging/setup.py`  -  lib_log_rich initialization; takes only the `LOG_*` lines of a `.env`, and raises `InvalidLoggingConfigError` for a refused `[lib_log_rich]` value or `LOG_*` variable, after starting logging with its defaults (and without the `LOG_*` variables only when one of them is refused); `check_logging_config` refuses another configuration's logging settings through lib_log_rich's `validate_config`, without touching the running runtime
 - `src/pve_winrepair/adapters/cli/`  -  CLI adapter package:
   - `__init__.py`  -  Public facade
@@ -309,7 +309,7 @@ Repair one guest by an in-place repair upgrade (`application/repair.py`).
 | `--stage-only`      | Stage the media and hold Windows Update, but neither gate the WIM nor launch setup (verdict `STAGED`) |
 | `--ip IP`           | Guest IPv4 address for a guest without QEMU agent; implies the offline snapshot; MAC-checked          |
 | `--node HOST`       | PVE node to drive over ssh, guests reached through it (default `[node] host`; empty: this machine)    |
-| `--receipt FILE`    | Receipt file on this machine, instead of `receipt-<vmid>.json` in `[node] state_dir`                  |
+| `--receipt FILE`    | Receipt file on this machine (made absolute), instead of `receipt-<vmid>.json` in `[node] state_dir`  |
 | `--media M`         | Media from `node` (`[repair] media_dir`) or `local` (`local_media_dir` here); default `media_source`  |
 | `--stage-root X:`   | Drive to stage on (default: a non-system fixed drive with room, else `C:`)                            |
 | `--tpm-storage S`   | PVE storage ID for a new vTPM volume (default: the storage of the guest's disk)                       |
@@ -321,14 +321,14 @@ Repair one guest by an in-place repair upgrade (`application/repair.py`).
 
 Apply the upgrade a repair staged and verify the build its receipt recorded (`application/apply.py`).
 
-| Option              | Description                                                                                                 |
-|---------------------|-------------------------------------------------------------------------------------------------------------|
-| `--vmid N`          | The guest's VMID on the node  -  required, at least 1                                                       |
-| `--ip IP`           | The guest's IPv4 address  -  required; MAC-checked against `qm config`                                      |
-| `--node HOST`       | PVE node to drive over ssh (default `[node] host`; empty: this machine)                                     |
-| `--receipt FILE`    | Receipt file to read, as `repair --receipt` wrote it (default: `receipt-<vmid>.json` in `[node] state_dir`) |
-| `--apply-minutes M` | Apply phase limit before overrun, a finite number above 0 (default 90.0)                                    |
-| `--json`            | Print the envelope instead of the verdict line                                                              |
+| Option              | Description                                                                                                                 |
+|---------------------|-----------------------------------------------------------------------------------------------------------------------------|
+| `--vmid N`          | The guest's VMID on the node  -  required, at least 1                                                                       |
+| `--ip IP`           | The guest's IPv4 address  -  required; MAC-checked against `qm config`                                                      |
+| `--node HOST`       | PVE node to drive over ssh (default `[node] host`; empty: this machine)                                                     |
+| `--receipt FILE`    | Receipt file to read (made absolute), as `repair --receipt` wrote it (default: `receipt-<vmid>.json` in `[node] state_dir`) |
+| `--apply-minutes M` | Apply phase limit before overrun, a finite number above 0 (default 90.0)                                                    |
+| `--json`            | Print the envelope instead of the verdict line                                                                              |
 
 **Exit codes:** 0 (`VERIFIED`), 1 (refused: `RUN_LIVE`, `RUN_UNFINISHED`, `RUN_FAILED`, `NO_RUN`, `REVERTED_OR_UNCHANGED`, `ERROR`), 2 (internal error, or a usage error), 78 (configuration not loadable or invalid)
 

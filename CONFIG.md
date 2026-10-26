@@ -127,8 +127,9 @@ anything else, `repair` and `apply` check that it is a directory, or that its ne
 parent is one, so a receipt write cannot fail hours into a run on a path that is a file. A
 directory `pve-winrepair` creates gets mode 0700, each receipt 0600. `repair --receipt FILE` and
 `apply --receipt FILE` keep the receipt in that one file on this machine instead; `state_dir` is then
-neither checked nor used, the file's own directory is checked the same way, and a receipt read from
-the file is still refused when it names another VM.
+neither checked nor used, a relative path is made absolute in the current directory, the file's own
+directory is checked the same way, and a receipt read from the file is still refused when it names
+another VM; `repair` refuses before any VM call to run on a file holding another VM's receipt.
 
 A receipt holds the build of the staged image and, from the same moment, the build and the
 InstallDate the guest ran (`build_before`, `install_date_before`); every field is required, and

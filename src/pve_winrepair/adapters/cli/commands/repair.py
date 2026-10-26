@@ -81,7 +81,7 @@ __all__ = ["cli_repair"]
 )
 @option(
     "--receipt",
-    type=click.Path(dir_okay=False, readable=False, path_type=Path),
+    type=click.Path(dir_okay=False, readable=False, path_type=Path, resolve_path=True),
     default=None,
     help="Receipt file on this machine, instead of receipt-<vmid>.json in [node] state_dir.",
 )
