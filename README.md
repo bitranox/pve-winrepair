@@ -188,7 +188,7 @@ What the workstation needs (the `[node]` settings in detail: [CONFIG.md](CONFIG.
   refusal has been seen to end as `no answer within 30 s` instead of ssh's own message.
 - With `[ssh] strict_host_key_checking = true` (the default), each guest's host key in THIS
   machine's `[ssh] known_hosts_file`: the guest logins start here. Record it as in [Check the login
-  from the node](docs/windows-guest-ssh.md#4-check-the-login-from-the-node), run on the workstation
+  from the node](docs/windows-guest-ssh.md#3-check-the-login-from-the-node), run on the workstation
   with `-o ProxyCommand="ssh -i ~/.ssh/id_pve_node -W %h:%p root@pve1"` added so the login goes
   through the node.
 - A receipt directory it can write, `[node] state_dir`: by default `/var/lib/pve-winrepair` on

@@ -80,7 +80,10 @@ the group itself is called something else. Keep the block as it is.
 
 Add the public key (the `.pub` file next to the private key in `[ssh] key`, one line that
 starts with `ssh-ed25519` or `ssh-rsa`) to `C:\ProgramData\ssh\administrators_authorized_keys`,
-one key per line. Paste the whole line between the single quotes:
+one key per line. If the file already exists, its last line must end with a line break, or the new
+key is glued onto that line and both keys break (a file saved in Notepad often lacks it); read it
+back afterwards with `Get-Content $keys` and look for one key per line. Paste the whole line between
+the single quotes:
 
 ```powershell
 $keys = "$env:ProgramData\ssh\administrators_authorized_keys"
@@ -89,25 +92,37 @@ Add-Content -Path $keys -Value 'ssh-ed25519 AAAA... root@node' -Encoding ascii
 
 Write the file as plain ASCII, as this command does. In Windows PowerShell 5.1, `>`, `>>` and
 `Out-File` write UTF-16 (the file starts with the bytes `FF FE`), and `Set-Content -Encoding utf8`
-puts a byte order mark (`EF BB BF`) in front of the first line. sshd does not match a key in such a
-file, and the login fails with "Permission denied (publickey)". `-Encoding ascii` does not fix a file
-that is already UTF-16: `Add-Content` keeps appending in the encoding the file already has. Check
-the first bytes:
+puts a byte order mark (`EF BB BF`) in front of the first line. sshd may then not match the key,
+and the login fails with "Permission denied (publickey)". `-Encoding ascii` does not fix a file that
+is already UTF-16: `Add-Content` keeps appending in the encoding the file already has. Check the
+first bytes:
 
 ```powershell
 ([IO.File]::ReadAllBytes($keys) | Select-Object -First 3 | ForEach-Object { '{0:X2}' -f $_ }) -join ' '
 ```
 
-`73 73 68` is the text `ssh`, which is what you want. If you see `FF FE` or `EF BB BF`, write the file
-again in ASCII: `Set-Content -Path $keys -Value (Get-Content $keys) -Encoding ascii`.
+Anything but `FF FE` or `EF BB BF` is fine: `73 73 68` is the text `ssh`, and a first line holding
+another key type or a `#` comment starts with other bytes. If you see `FF FE` or `EF BB BF`, write
+the file again in ASCII: `Set-Content -Path $keys -Value (Get-Content $keys) -Encoding ascii`.
+
+The first bytes say nothing about lines appended later with `>>`, which can be UTF-16 in a file
+that starts in ASCII. A UTF-16 line holds zero bytes, so this should print `False`:
+
+```powershell
+[IO.File]::ReadAllBytes($keys) -contains 0
+```
 
 sshd ignores that file unless only SYSTEM and the Administrators group have access to it. Remove
 the inherited entries and grant both full control by SID:
 
 ```powershell
+$keys = "$env:ProgramData\ssh\administrators_authorized_keys"
 icacls.exe $keys /inheritance:r /grant '*S-1-5-18:F' /grant '*S-1-5-32-544:F'
 "icacls exit code: $LASTEXITCODE"
 ```
+
+The first line sets `$keys` again, so the block also works in a new PowerShell window: run with an
+empty `$keys`, icacls would only print its usage and a non-zero exit code.
 
 `S-1-5-18` is SYSTEM and `S-1-5-32-544` is Administrators. Grant by SID, never by group name: on a
 German Windows the group is `Administratoren`, a grant to `Administrators` fails with exit code 1332
@@ -128,28 +143,7 @@ inheritance is off, and the only ACEs are for `SY` (SYSTEM) and `BA` (Administra
 A user who is not an administrator keeps their key in their own `C:\Users\<user>\.ssh\authorized_keys`.
 pve-winrepair cannot use such an account.
 
-## 3. Turn off password logins
-
-Do this only after a key login works (step 4). Then a password guess against sshd gets nowhere. In
-`C:\ProgramData\ssh\sshd_config`, set:
-
-```text
-PasswordAuthentication no
-```
-
-The shipped file has this line commented out as `#PasswordAuthentication yes`. Remove the `#` and
-change the value. The setting has to come before the `Match Group administrators` block, which
-applies to every line after it. Then restart sshd so it reads the file again:
-
-```powershell
-Restart-Service sshd
-```
-
-Do not set a different default shell for sshd (the `DefaultShell` value under
-`HKLM:\SOFTWARE\OpenSSH`). pve-winrepair needs `cmd.exe`, the Windows default; see
-[Troubleshooting](#the-default-shell-must-stay-cmdexe).
-
-## 4. Check the login from the node
+## 3. Check the login from the node
 
 The machine that runs pve-winrepair keeps the guests' host keys in `[ssh] known_hosts_file` and,
 with the default `strict_host_key_checking = true`, refuses a guest whose key is not in that file
@@ -169,14 +163,21 @@ as [From a workstation](../README.md#from-a-workstation) shows:
 ```bash
 ssh -i /root/.ssh/id_guest -o BatchMode=yes -o PreferredAuthentications=publickey \
     -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new \
-    -o UserKnownHostsFile=~/.ssh/known_hosts_guests Administrator@192.0.2.10 whoami
-ssh-keygen -l -F 192.0.2.10 -f ~/.ssh/known_hosts_guests
+    -o UserKnownHostsFile=~/.ssh/known_hosts Administrator@192.0.2.10 whoami
+ssh-keygen -l -F 192.0.2.10 -f ~/.ssh/known_hosts
 ```
 
-Use your own key path, known_hosts file, user and guest address. `whoami` prints the account as
+`~/.ssh/known_hosts` is the default `[ssh] known_hosts_file`. Use your own key path, user and guest
+address, and if you set `known_hosts_file` to another file, use that file in both commands:
+pve-winrepair looks for the key nowhere else. `whoami` prints the account as
 `<computer>\administrator`; a password prompt cannot appear, because `BatchMode=yes` turns it into a
-failure. If the two fingerprints differ, remove the entry (`ssh-keygen -R 192.0.2.10 -f
-~/.ssh/known_hosts_guests`) and find out why before going on.
+failure.
+
+The key is compared after the login that stored it. That login sends the guest nothing secret: a
+key login proves the key without handing it over. So comparing afterwards is safe as long as you do
+it before pve-winrepair, or any other login, relies on the stored key. If the two fingerprints
+differ, remove the entry (`ssh-keygen -R 192.0.2.10 -f ~/.ssh/known_hosts`) and find out why before
+going on.
 
 The settings that have to match what you just did, all in `[ssh]` (details in
 [CONFIG.md](../CONFIG.md#ssh)):
@@ -193,6 +194,31 @@ changing the file:
 PVE_WINREPAIR___SSH__KEY=/root/.ssh/id_other_guest pve-winrepair repair --vmid 100
 ```
 
+## 4. Turn off password logins
+
+Do this only after the key login in step 3 works. Then a password guess against sshd gets nowhere.
+In `C:\ProgramData\ssh\sshd_config`, set:
+
+```text
+PasswordAuthentication no
+```
+
+The shipped file has this line commented out as `#PasswordAuthentication yes`. Remove the `#` and
+change the value. The setting has to come before the `Match Group administrators` block, which
+applies to every line after it. Then restart sshd so it reads the file again:
+
+```powershell
+Restart-Service sshd
+Get-Service sshd
+```
+
+The last line should read `Running`: a typing error in `sshd_config` can keep sshd from starting.
+Then repeat the key login from step 3.
+
+Do not set a different default shell for sshd (the `DefaultShell` value under
+`HKLM:\SOFTWARE\OpenSSH`). pve-winrepair needs `cmd.exe`, the Windows default; see
+[Troubleshooting](#the-default-shell-must-stay-cmdexe).
+
 ## Troubleshooting
 
 ### "Permission denied (publickey)"
@@ -207,22 +233,23 @@ sshd did not accept the key. Usual causes:
   Read it back as in step 2.
 - The user is wrong: `[ssh] user` names an account that is not in the Administrators group, or not
   the one whose key you installed.
-- The key file is UTF-16 or starts with a byte order mark. That happens when it was written with
-  `>`, `>>`, `Out-File` or `Set-Content -Encoding utf8` in Windows PowerShell 5.1. Check its first
-  bytes and write it again in ASCII, as in step 2.
-- The key file holds a broken line: a line wrapped by an editor, or a private key pasted in place of
-  the public one.
+- The key file is UTF-16 or starts with a byte order mark, which sshd may not read. That happens
+  when it was written with `>`, `>>`, `Out-File` or `Set-Content -Encoding utf8` in Windows
+  PowerShell 5.1. Check its bytes and write it again in ASCII, as in step 2.
+- The key file holds a broken line: a line wrapped by an editor, two keys glued onto one line, or a
+  private key pasted in place of the public one.
 
-The guest's sshd logs the reason in the Windows event log under Applications and Services Logs,
-OpenSSH, Operational.
+Microsoft's OpenSSH documentation places sshd's log in the Windows event log under Applications and
+Services Logs, OpenSSH, Operational; the reason for a refused key should be there.
 
 ### The default shell must stay cmd.exe
 
 pve-winrepair sends its guest commands for `cmd.exe` to run. It names PowerShell and certutil by
 `%SystemRoot%\System32\...` paths, which only `cmd.exe` expands, and it deletes its staged copy with
 `del`, a `cmd.exe` built-in. Its argument checks also assume `cmd.exe` quoting. If sshd's
-`DefaultShell` is set to PowerShell or another shell, every guest call fails, typically with a path
-starting `%SystemRoot%` that is not found.
+`DefaultShell` is set to PowerShell or another shell, every guest call fails. From how those
+commands are built, expect an error about a path starting `%SystemRoot%` that is not found, since
+PowerShell does not expand that form.
 
 Check that no default shell is set (no output means `cmd.exe`):
 
@@ -261,8 +288,21 @@ Authenticated Users, `WD` Everyone. To see the same descriptor, log in as the ss
 A healthy profile reads like `O:SYG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;S-1-5-21-...)`,
 with full control for `SY`, `BA` and the user's own SID only. For the built-in Administrator account
 the user's entries read `LA` instead of a SID, and `CO` (CREATOR OWNER) is accepted too. A read-only
-entry such as `(A;;0x100020;;;S-1-15-3-...)` is fine: it carries no write right. Remove the entry the refusal names with `icacls`, and grant by
-SID as in step 2. The full rules are in [README.md](../README.md#how-it-gets-onto-the-guest).
+entry such as `(A;;0x100020;;;S-1-15-3-...)` is fine: it carries no write right.
+
+Remove the entry the refusal names with `icacls`, by SID as in step 2. For `BU` (the Users group,
+`S-1-5-32-545`):
+
+```powershell
+icacls.exe $env:USERPROFILE /remove:g '*S-1-5-32-545'
+"icacls exit code: $LASTEXITCODE"
+```
+
+`/remove` removes only an entry set on the profile itself. One the profile inherits from
+`C:\Users` (marked `(I)` in icacls' listing, `ID` among the entry's flags in the SDDL) stays; run
+`icacls.exe $env:USERPROFILE /inheritance:d` first, which turns the inherited entries into the
+profile's own, and the `/remove` above then takes it out. Read the descriptor back afterwards. The
+full rules are in [README.md](../README.md#how-it-gets-onto-the-guest).
 
 ## Microsoft documentation
 
