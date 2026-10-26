@@ -60,7 +60,10 @@ __all__ = ["cli_apply"]
     "--receipt",
     type=click.Path(dir_okay=False, readable=False, path_type=Path, resolve_path=True),
     default=None,
-    help="Receipt file on this machine, instead of receipt-<vmid>.json in [node] state_dir.",
+    help=(
+        "Receipt file on this machine, as repair --receipt wrote it, instead of receipt-<vmid>.json in "
+        "[node] state_dir; made absolute, symbolic links resolved. Runs at the same time need a file each."
+    ),
 )
 @option(
     "--apply-minutes",

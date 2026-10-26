@@ -34,6 +34,12 @@ Every key below is shipped with its default in `defaultconfig.d/20-winrepair.tom
 documents each key. An empty text value means "not configured": it loads, and the command that needs
 it refuses to run until it is set.
 
+Write a Windows path (on a workstation that runs the tool on Windows) as a TOML literal string in
+single quotes, `ssh_key = 'C:\Users\op\.ssh\id_pve_node'`, or double every backslash,
+`ssh_key = "C:\\Users\\op\\.ssh\\id_pve_node"`. In a double-quoted string a backslash starts an
+escape: `"C:\Users\..."` does not load (`\U` is no valid escape; the file "is not valid TOML", exit
+78), and `"C:\temp\..."` loads with a tab where `\t` stood.
+
 ### `[ssh]`
 
 The guest side of these settings (OpenSSH, the key file and its ACL) is set up as described in
@@ -46,11 +52,13 @@ overriding it for one run: `PVE_WINREPAIR___SSH__KEY=/root/.ssh/id_other_guest p
 **`user`** (default `"Administrator"`): the account the node logs in as. It must be an administrator
 on the guest. Letters, digits, `_`, `.` and `-`, 1 to 64 characters; no `DOMAIN\` part.
 
-**`strict_host_key_checking`** (default `true`): passed to ssh as `StrictHostKeyChecking=yes`, or `no`
-when false. Keep it true. Set it false only for internal guests that are cloned and rebuilt from
-templates, where every rebuild brings a new host key, and only on a network you trust: with `no`, ssh
-accepts any key, a changed one included. `pve-winrepair config` currently shows this value as
-`***REDACTED***`, because its name contains `key`; the value is still used.
+**`strict_host_key_checking`** (default `true`): passed to ssh as `StrictHostKeyChecking=yes`, or
+`no` when false. Keep it true. Set it false only for internal guests that are cloned and rebuilt
+from templates, where every rebuild brings a new host key, and only on a network you trust: with
+`no`, ssh accepts any key, a changed one included. With a remote node it also decides how the node's
+own media copy checks the guest (see `media_source` below). `pve-winrepair config` shows the value
+as it is: `strict_host_key_checking = true` in the default view, `"strict_host_key_checking": true`
+with `--format json`.
 
 **`known_hosts_file`** (default `"~/.ssh/known_hosts"`): the known_hosts file ssh reads and writes for
 the guests, passed to ssh as written (ssh expands a leading `~` against the home of the account that
@@ -60,6 +68,15 @@ on, no guest could ever be reached. A separate file such as `~/.ssh/known_hosts_
 guests' keys apart from the node's own. An empty value, whitespace and `"` are refused at load:
 ssh's option parser splits the value at whitespace into several files. A `%` token such as `%h` is
 ssh's own and stays usable here (`~/.ssh/known_hosts_%h` keeps one file per guest).
+
+ssh files a guest's key under the guest's IP address (`%h` is that address too). A workstation that
+drives nodes of several sites through one file mixes their guests: when a guest uses a private
+address that a guest of another site used before, ssh refuses it as "REMOTE HOST IDENTIFICATION HAS
+CHANGED" with strict checking on (the run fails closed), and with it off connects anyway. Give each
+site a profile with its own file instead: the profile's configuration (for example
+`~/.config/pve-winrepair/profile/site-b/config.toml`) sets
+`known_hosts_file = "~/.ssh/known_hosts_site_b"`, and `pve-winrepair --profile site-b repair ...`
+reads it (see [Profiles](#profiles)).
 
 ### `[guest]`
 
@@ -98,21 +115,30 @@ the tool, so both name a directory on the same machine. `repair --media node|loc
 one run.
 
 With a remote node, `"node"` has the node's own scp copy the media into the guest, logging in with
-the guest key from your ssh-agent (forwarded to the node). The node's own known_hosts files are
-neither read nor written, and its scp runs with `KnownHostsCommand=none`, so a `KnownHostsCommand`
-in the node's ssh config cannot add a key either. With `[ssh] strict_host_key_checking = true` the
-node checks the guest strictly against the guest's host key as THIS machine holds it: right before
-the copy, the tool
-reads the guest's lines from `[ssh] known_hosts_file` with `ssh-keygen -F <guest ip>` (a leading `~`
-expanded as ssh would) and hands them to the node in a temporary file it removes afterwards. The run
-has connected to the guest from here by then, so the line is normally there; when it is not, or
-`ssh-keygen` cannot read the file, the copy is refused, naming the file and the guest. `ssh-keygen`
-expands no `%` token, so with a remote node a `[ssh] known_hosts_file` such as
-`~/.ssh/known_hosts_%h` makes `"node"` refuse; `"local"` uses ssh's own expansion and works. With
-`strict_host_key_checking = false` the node checks no host key either, as this machine does not: the
-tool reads nothing from `[ssh] known_hosts_file` for the copy, and the node's scp runs with
-`StrictHostKeyChecking=no` and `/dev/null` for both known_hosts files, so a rebuilt guest with a new
-key is copied to, and nothing is written on the node.
+the guest key (`[ssh] key`) from THIS machine's ssh-agent, forwarded to the node, so the key is
+never stored there. Load it first (`ssh-add <[ssh] key>`; on Windows into the `ssh-agent` service),
+and let the node's sshd allow agent forwarding (`AllowAgentForwarding`, on by default). Before any
+VM call the run checks that the agent holds a key (`ssh-add -l`), that the node received the
+forwarded agent, and that `media_dir` exists there and is not empty, and refuses otherwise. It does
+not check that the key in the agent is the guest key: with another one, the copy itself fails, after
+the snapshot. The node copies the entries the shell glob `*` matches in `media_dir`, so a file or
+directory there whose name starts with `.` stays behind; `"local"` copies every entry.
+
+The node's own known_hosts files are neither read nor written, and its scp runs with
+`KnownHostsCommand=none`, so a `KnownHostsCommand` in the node's ssh config cannot add a key either.
+With `[ssh] strict_host_key_checking = true` the node checks the guest strictly against the guest's
+host key as THIS machine holds it: right before the copy, the tool reads the guest's lines from
+`[ssh] known_hosts_file` with `ssh-keygen -F <guest ip>` (a leading `~` expanded as ssh would) and
+hands them to the node in a temporary file it removes afterwards. The run has connected to the guest
+from here by then, so the line is normally there; when it is not, or `ssh-keygen` cannot read the
+file, the copy is refused, naming the file and the guest. `ssh-keygen` expands no `%` token, so with
+a remote node a `[ssh] known_hosts_file` such as `~/.ssh/known_hosts_%h` makes `"node"` refuse;
+`"local"` uses ssh's own expansion and works. With `strict_host_key_checking = false` the node checks
+no host key either, as this machine does not: the tool reads nothing from `[ssh] known_hosts_file`
+for the copy, and the node's scp runs with `StrictHostKeyChecking=no` and `/dev/null` for both
+known_hosts files, so a rebuilt guest with a new key is copied to, and nothing is written on the
+node. Both settings were run against a real node from Linux, `true` also from Windows (OpenSSH for
+Windows 10.0p2); with `false` the node's root known_hosts was unchanged afterwards.
 
 **`local_media_dir`** (default `""`): this machine's copy of the installation media, laid out like
 `media_dir` (`setup.exe` and `sources/install.wim` at its top level). Required when `media_source`
@@ -144,11 +170,16 @@ anything else, `repair` and `apply` check that it is a directory, or that its ne
 parent is one, so a receipt write cannot fail hours into a run on a path that is a file. A
 directory `pve-winrepair` creates gets mode 0700, each receipt 0600. `repair --receipt FILE` and
 `apply --receipt FILE` keep the receipt in that one file on this machine instead; `state_dir` is then
-neither checked nor used, a relative path is made absolute in the current directory, the file's own
-directory is checked the same way, and a receipt read from the file is still refused when it names
-another VM; `repair` refuses before any VM call to run on a file holding another VM's receipt, or
-on one that exists but is no valid receipt (that file is left alone; an invalid per-VM file in
-`state_dir` is replaced).
+neither checked nor used, the path is made absolute (a relative one against the current directory)
+with its symbolic links resolved, the file's own directory is checked the same way, and a receipt
+read from the file is still refused when it names another VM; `repair` refuses before any VM call to
+run on a file holding another VM's receipt, or on one that exists but is no valid receipt (that file
+is left alone; an invalid per-VM file in `state_dir` is replaced). On Windows, how that resolving
+treats a mapped network drive (whether `V:\...` comes back as its UNC path) has not been measured.
+
+Give each run that runs at the same time its own `--receipt` file. That check is made once, at the
+start: two repairs started together on one file both pass it, and one of them can then remove or
+replace the receipt the other has just written.
 
 A receipt holds the build of the staged image and, from the same moment, the build and the
 InstallDate the guest ran (`build_before`, `install_date_before`); every field is required, and
@@ -161,11 +192,13 @@ No setting binds `--ip` to a VM: `repair --ip` and `apply` always require one of
 VM's `netN` lines in `qm config` to be among the guest's network adapters, and refuse the run
 otherwise.
 
-**`host`** (default `""`): the PVE node whose `qm` the tool drives over ssh. A host name or an IPv4
-address: a letter or digit first, and no space, `;` or `@`, so ssh can never read it as an option, a
-second word or a user. Empty means the machine running the tool is the node. `repair --node HOST`
-and `apply --node HOST` override it for one run, and `--node ""` runs on this machine although `host`
-names a node; a node named either way needs `ssh_key`, or the run is refused before any call.
+**`host`** (default `""`): the PVE node whose `qm` the tool drives over ssh. A DNS name or an IPv4
+address: letters, digits, `.` and `-`, starting and ending with a letter or digit, up to 253
+characters, so ssh can never read it as an option, a second word or a user. `_` is refused as well,
+since DNS host names have none: name a host such as `pve_1` by its address. Empty means the machine
+running the tool is the node. `repair --node HOST` and `apply --node HOST` override it for one run,
+and `--node ""` runs on this machine although `host` names a node; a node named either way needs
+`ssh_key`, or the run is refused before any call.
 
 **`ssh_user`** (default `"root"`): the account this machine logs in as on the node. Letters, digits,
 `_`, `.` and `-`, 1 to 64 characters, never starting with `-`.
@@ -182,7 +215,18 @@ a node whose key is missing from the file, or has changed, is refused before any
 node's key there first. It is not `[ssh] known_hosts_file`, which holds the guests' keys; the jump
 through the node to a guest checks the node against this file too. An empty value, whitespace, `"`
 and `%` are refused at load: ssh splits the value at whitespace, and expands a `%` token once more
-in the jump, where even `%%` does not give a literal percent.
+in the jump, where even `%%` does not give a literal percent. On Windows a node whose host key is
+refused has been seen to end as `no answer within 30 s` instead of ssh's own host-key message (the
+cause is not established); when a Windows workstation reports that, check the node's line in this
+file first.
+
+With a remote node, a time limit ends only this machine's side of a call. Each node call runs under
+one (900 s for `qm snapshot`, `[repair] stage_timeout_minutes` for the node's own media copy); when
+it runs out, the tool ends its ssh and the run stops, but the command that ssh started can go on on
+the node: `qm snapshot` can still finish, and the node's `scp` can keep writing into the guest's
+stage root. Before you retry such a run, check on the node that nothing of it is still running: the
+VM's tasks in the PVE web UI (`qm listsnapshot <vmid>` lists a snapshot that finished meanwhile),
+and `ps -ef | grep '[s]cp '` for a copy to the guest.
 
 ---
 

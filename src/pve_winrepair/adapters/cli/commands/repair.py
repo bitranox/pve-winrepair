@@ -83,7 +83,10 @@ __all__ = ["cli_repair"]
     "--receipt",
     type=click.Path(dir_okay=False, readable=False, path_type=Path, resolve_path=True),
     default=None,
-    help="Receipt file on this machine, instead of receipt-<vmid>.json in [node] state_dir.",
+    help=(
+        "Receipt file on this machine, instead of receipt-<vmid>.json in [node] state_dir; made absolute, "
+        "symbolic links resolved. Runs at the same time need a file each."
+    ),
 )
 # The choices are the enum VALUES: a click.Choice built from the enum itself matches the member NAME,
 # so the lowercase value the help shows would be refused. case_sensitive=False returns the canonical
@@ -94,8 +97,9 @@ __all__ = ["cli_repair"]
     type=click.Choice([choice.value for choice in MediaChoice], case_sensitive=False),
     default=None,
     help=(
-        "Where the media come from: node ([repair] media_dir, copied by the node) or local "
-        "([repair] local_media_dir here). Default: [repair] media_source."
+        "Where the media come from: node ([repair] media_dir, copied by the node; a remote node logs in to "
+        "the guest with the guest key from this machine's ssh-agent, so ssh-add it and allow agent "
+        "forwarding on the node) or local ([repair] local_media_dir here). Default: [repair] media_source."
     ),
 )
 @option(

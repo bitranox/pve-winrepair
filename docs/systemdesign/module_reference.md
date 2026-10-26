@@ -41,7 +41,7 @@ moves or removes a module, a CLI option or a public name.
 - `src/pve_winrepair/adapters/guest_ssh.py`  -  The guest tool over ssh: `Guest` checks the ssh user's profile, pushes the packed tool to its content address (`push_tool`) or stages a verified profile copy (`stage_tool`), runs one subcommand (`ask`) and hands the answer to `parse_answer`; `ssh_options` turns `SshSettings` into ssh's `-o` options; `TOOL_DIR` is the packed tool shipped in `adapters/guest_tool/`
 - `src/pve_winrepair/adapters/guest_tool/winrepair_guest.ps1`  -  The packed guest tool, a committed artefact (`make custom pack` writes it)
 - `src/pve_winrepair/adapters/node.py`  -  `Node`, the PVE node a run uses: one runner for `qm` and every guest, the clock and sleep, `qm config`, `qm listsnapshot` and `qm snapshot` parsed where they answer; with a `NodeLink` it is a remote node, `qm` runs there over ssh and every guest call is jumped through it, and `check_link` proves it usable in one round trip (`command -v qm`: it answers, accepts the key and host key, has `qm`), else names why in ssh's own words; `media` is a run's media (`NodeMedia` on a linked node when they come from the node, else `LocalMedia`); `run` is the production runner
-- `src/pve_winrepair/adapters/media.py`  -  `LocalMedia`: the media in a directory on this machine, refused missing or empty, every entry copied in name order by the guest's scp (through the node when it is remote); `NodeMedia`: the media in a directory on a remote node, checked with `ssh-add -l` (an agent holding a key) and one `ssh -A` call (the forwarded agent arrived, the directory exists and is not empty), copied node -> guest by the node's own scp with the forwarded key (no `IdentitiesOnly`), never reading or writing the node's own known_hosts and with `KnownHostsCommand=none` (the node's ssh config adds no key): with `[ssh] strict_host_key_checking` on it checks the guest strictly against only the lines `ssh-keygen -F <ip>` finds in this machine's `[ssh] known_hosts_file`, handed to the node in a temporary file its script removes (none found: the copy is refused before the node is called); with it off nothing is read here and the node's scp checks no host key (`StrictHostKeyChecking=no`, both known_hosts files `/dev/null`, no temporary file)
+- `src/pve_winrepair/adapters/media.py`  -  `LocalMedia`: the media in a directory on this machine, refused missing or empty, every entry copied in name order by the guest's scp (through the node when it is remote); `NodeMedia`: the media in a directory on a remote node, checked with `ssh-add -l` (an agent holding a key) and one `ssh -A` call (the forwarded agent arrived, the directory exists and is not empty), copied node -> guest by the node's own scp with the forwarded key (no `IdentitiesOnly`; the entries `*` matches, so dot-files stay behind), never reading or writing the node's own known_hosts and with `KnownHostsCommand=none` (the node's ssh config adds no key): with `[ssh] strict_host_key_checking` on it checks the guest strictly against only the lines `ssh-keygen -F <ip>` finds in this machine's `[ssh] known_hosts_file`, handed to the node in a temporary file its script removes (none found: the copy is refused before the node is called); with it off nothing is read here and the node's scp checks no host key (`StrictHostKeyChecking=no`, both known_hosts files `/dev/null`, no temporary file)
 - `src/pve_winrepair/adapters/receipts.py`  -  `FileReceiptStore`: one receipt per VM at `<state_dir>/receipt-<vmid>.json`, or in the one file `--receipt` names, replaced atomically, 0600 in a 0700 directory; `other_vm` is the VM such a file names when it is another one
 - `src/pve_winrepair/adapters/logging/setup.py`  -  lib_log_rich initialization; takes only the `LOG_*` lines of a `.env`, and raises `InvalidLoggingConfigError` for a refused `[lib_log_rich]` value or `LOG_*` variable, after starting logging with its defaults (and without the `LOG_*` variables only when one of them is refused); `check_logging_config` refuses another configuration's logging settings through lib_log_rich's `validate_config`, without touching the running runtime
 - `src/pve_winrepair/adapters/cli/`  -  CLI adapter package:
@@ -301,19 +301,19 @@ Generate example configuration files.
 
 Repair one guest by an in-place repair upgrade (`application/repair.py`).
 
-| Option              | Description                                                                                           |
-|---------------------|-------------------------------------------------------------------------------------------------------|
-| `--vmid N`          | The guest's VMID on the node  -  required, at least 1                                                 |
-| `--snapshot-name S` | Snapshot to take (default `[repair] snapshot_name`, validated by its rule)                            |
-| `--hours H`         | Polling deadline in hours, a finite number above 0 (default 6.0)                                      |
-| `--stage-only`      | Stage the media and hold Windows Update, but neither gate the WIM nor launch setup (verdict `STAGED`) |
-| `--ip IP`           | Guest IPv4 address for a guest without QEMU agent; implies the offline snapshot; MAC-checked          |
-| `--node HOST`       | PVE node to drive over ssh, guests reached through it (default `[node] host`; empty: this machine)    |
-| `--receipt FILE`    | Receipt file on this machine (made absolute), instead of `receipt-<vmid>.json` in `[node] state_dir`  |
-| `--media M`         | Media from `node` (`[repair] media_dir`) or `local` (`local_media_dir` here); default `media_source`  |
-| `--stage-root X:`   | Drive to stage on (default: a non-system fixed drive with room, else `C:`)                            |
-| `--tpm-storage S`   | PVE storage ID for a new vTPM volume (default: the storage of the guest's disk)                       |
-| `--json`            | Print the envelope `{ok, command, vmid, verdict, steps}` instead of the verdict line                  |
+| Option              | Description                                                                                                                                                      |
+|---------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `--vmid N`          | The guest's VMID on the node  -  required, at least 1                                                                                                            |
+| `--snapshot-name S` | Snapshot to take (default `[repair] snapshot_name`, validated by its rule)                                                                                       |
+| `--hours H`         | Polling deadline in hours, a finite number above 0 (default 6.0)                                                                                                 |
+| `--stage-only`      | Stage the media and hold Windows Update, but neither gate the WIM nor launch setup (verdict `STAGED`)                                                            |
+| `--ip IP`           | Guest IPv4 address for a guest without QEMU agent; implies the offline snapshot; MAC-checked                                                                     |
+| `--node HOST`       | PVE node to drive over ssh, guests reached through it (default `[node] host`; empty: this machine)                                                               |
+| `--receipt FILE`    | Receipt file on this machine (made absolute, symlinks resolved; one per concurrent run), instead of `receipt-<vmid>.json` in `[node] state_dir`                  |
+| `--media M`         | Media from `node` (`[repair] media_dir`; remote: guest key from this machine's ssh-agent, forwarded) or `local` (`local_media_dir` here); default `media_source` |
+| `--stage-root X:`   | Drive to stage on (default: a non-system fixed drive with room, else `C:`)                                                                                       |
+| `--tpm-storage S`   | PVE storage ID for a new vTPM volume (default: the storage of the guest's disk)                                                                                  |
+| `--json`            | Print the envelope `{ok, command, vmid, verdict, steps}` instead of the verdict line                                                                             |
 
 **Exit codes:** 0 (`STATE=DONE-OK`, `STAGED`), 1 (refused; `STATE=DONE-FAIL`, `WORKER_GONE`, `TIMEOUT`, `ERROR`), 2 (internal error, or a usage error), 78 (configuration not loadable or invalid)
 
@@ -321,14 +321,14 @@ Repair one guest by an in-place repair upgrade (`application/repair.py`).
 
 Apply the upgrade a repair staged and verify the build its receipt recorded (`application/apply.py`).
 
-| Option              | Description                                                                                                                 |
-|---------------------|-----------------------------------------------------------------------------------------------------------------------------|
-| `--vmid N`          | The guest's VMID on the node  -  required, at least 1                                                                       |
-| `--ip IP`           | The guest's IPv4 address  -  required; MAC-checked against `qm config`                                                      |
-| `--node HOST`       | PVE node to drive over ssh (default `[node] host`; empty: this machine)                                                     |
-| `--receipt FILE`    | Receipt file to read (made absolute), as `repair --receipt` wrote it (default: `receipt-<vmid>.json` in `[node] state_dir`) |
-| `--apply-minutes M` | Apply phase limit before overrun, a finite number above 0 (default 90.0)                                                    |
-| `--json`            | Print the envelope instead of the verdict line                                                                              |
+| Option              | Description                                                                                                                                                            |
+|---------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `--vmid N`          | The guest's VMID on the node  -  required, at least 1                                                                                                                  |
+| `--ip IP`           | The guest's IPv4 address  -  required; MAC-checked against `qm config`                                                                                                 |
+| `--node HOST`       | PVE node to drive over ssh (default `[node] host`; empty: this machine)                                                                                                |
+| `--receipt FILE`    | Receipt file to read (made absolute, symlinks resolved; one per concurrent run), as `repair --receipt` wrote it (default: `receipt-<vmid>.json` in `[node] state_dir`) |
+| `--apply-minutes M` | Apply phase limit before overrun, a finite number above 0 (default 90.0)                                                                                               |
+| `--json`            | Print the envelope instead of the verdict line                                                                                                                         |
 
 **Exit codes:** 0 (`VERIFIED`), 1 (refused: `RUN_LIVE`, `RUN_UNFINISHED`, `RUN_FAILED`, `NO_RUN`, `REVERTED_OR_UNCHANGED`, `ERROR`), 2 (internal error, or a usage error), 78 (configuration not loadable or invalid)
 
@@ -441,7 +441,7 @@ are `adapters/config/defaultconfig.d/20-winrepair.toml` (the defaults layer, key
 | Field              | Type   | Default                | Rule                                                                                                                                                                                                                                           |
 |--------------------|--------|------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `state_dir`        | `Path` | `default_state_dir()`  | where receipts are kept; absolute on the machine running the tool ("", relative and `~` refused); default per OS (`/var/lib/pve-winrepair` on POSIX, `%LOCALAPPDATA%\pve-winrepair` on Windows); a non-root Linux or macOS workstation sets it |
-| `host`             | `str`  | `""`                   | the PVE node to drive over ssh, a DNS name or IPv4 address (`NODE_HOST_PATTERN`: letter or digit first, no space, `;` or `@`); empty = this machine is the node                                                                                |
+| `host`             | `str`  | `""`                   | the PVE node to drive over ssh, a DNS name or IPv4 address (`NODE_HOST_PATTERN`: letters, digits, `.`, `-`; no `_`); empty = this machine is the node                                                                                          |
 | `ssh_user`         | `str`  | `"root"`               | `[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}` (never a leading `-`)                                                                                                                                                                                       |
 | `ssh_key`          | `str`  | `""`                   | private key this machine logs in to the node with, passed to ssh as written; empty = not configured; `"` and `%` refused (the `ProxyCommand` carries neither)                                                                                  |
 | `known_hosts_file` | `str`  | `"~/.ssh/known_hosts"` | the known_hosts file the node's host key is checked against (strictly), passed to ssh as written; a leading `~` is expanded by ssh; empty, whitespace, `"` and `%` refused                                                                     |
@@ -478,4 +478,4 @@ Use `composition.build_testing()` to wire all in-memory adapters.
 
 ---
 
-**Last Updated:** 2026-10-23 (module list after the node CLI port; repair, apply and guest-tool commands)
+**Last Updated:** 2026-10-26 (remote node: `--media`, `--receipt` and `[node] host` rows)
