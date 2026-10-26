@@ -50,7 +50,7 @@ moves or removes a module, a CLI option or a public name.
   - `safe_console.py`  -  Encode-safe terminal output; use `safe_console.echo` instead of `click.echo`
   - `exit_codes.py`  -  POSIX exit codes (ExitCode IntEnum)
   - `context.py`  -  Click context helpers (`CLIContext`) and the traceback preference state
-  - `config_load.py`  -  Configuration load for the CLI; records a load failure, `require_config` refuses with exit 78, `check_logging` checks the logging settings of a configuration reloaded by `config --profile`, refusing them as the root does
+  - `config_load.py`  -  Configuration load for the CLI; records a load failure, `require_config` refuses with exit 78, `require_settings` refuses a refused `[ssh] [guest] [repair] [node]` value with exit 78 (for `repair`, `apply` and `config`), `check_logging` checks the logging settings of a configuration reloaded by `config --profile`, refusing them as the root does
   - `root.py`  -  Root command group
   - `main.py`  -  Entry point
   - `param_types.py`  -  Click parameter types of the run options: `PositiveFiniteFloat` (`--hours`, `--apply-minutes`), `StorageId` (`--tpm-storage`), `NodeHost` (`--node`, held to `[node] host`'s rule, empty refused), `Ipv4Address` (`--ip`, an `IPv4Address`), `WindowsDrive` (`--stage-root`, a `DriveLetter`)

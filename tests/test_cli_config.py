@@ -896,3 +896,25 @@ def test_when_the_user_config_file_is_unreadable_a_config_reading_command_exits_
     assert str(unreadable_user_config) in result.output
     assert "Permission denied" in result.output
     assert "Traceback" not in result.output
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("extra", [[], ["--format", "json"], ["--section", "node"]])
+def test_config_shows_a_refused_tool_setting_then_names_it_and_exits_78(
+    cli_runner: CliRunner,
+    config_cli_context: Callable[[dict[str, Any]], Callable[[], Any]],
+    extra: list[str],
+) -> None:
+    """``config`` checks the [ssh] [guest] [repair] [node] settings the way ``repair`` loads them.
+
+    The values are still shown, so the operator sees what was read; each refused one then gets
+    an ``Error:`` line and the command exits 78, as ``repair`` and ``apply`` would.
+    """
+    factory = config_cli_context({"node": {"host": "bad_host"}, "guest": {"runner_tasks": ["bad name!"]}})
+
+    result: Result = cli_runner.invoke(cli_mod.cli, ["config", *extra], obj=factory)
+
+    assert result.exit_code == 78
+    assert "bad_host" in result.stdout
+    assert "Error: node.host:" in result.stderr
+    assert "Error: guest.runner_tasks" in result.stderr

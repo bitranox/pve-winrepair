@@ -100,6 +100,10 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   that as its reason. Before, and in 1.0.0, it read as SPBUILD 0: media of a newer build passed
   into a receipt naming `<build>.0`, which `apply` then refused to verify after the upgrade, and
   media of the running build failed as "older than running".
+- `config` checks the `[ssh]`, `[guest]`, `[repair]` and `[node]` settings the way `repair` and
+  `apply` load them: after showing the values it prints one `Error: <section>.<key>: <reason>` line
+  per refused value and exits 78. Before, and in 1.0.0, it showed such a value and exited 0, and
+  only `repair` or `apply` refused it.
 
 ### Fixed
 

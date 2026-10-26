@@ -18,6 +18,8 @@ Contents:
       variable is a load failure.
     * :func:`check_logging` - the same refusal for a configuration loaded after logging started.
     * :func:`require_config` - the configuration, or exit 78 naming the failure.
+    * :func:`require_settings` - its ``[ssh] [guest] [repair] [node]`` settings, or exit 78 naming
+      every refused value.
     * :func:`report_load_failure` - one line per problem, after the traceback on request.
     * :func:`echo_load_traceback` - the loader's traceback alone, for a caller with its own line.
 """
@@ -32,6 +34,7 @@ from lib_layered_config import Config, ConfigError
 
 from pve_winrepair.adapters.config.loader import validate_profile
 from pve_winrepair.adapters.config.overrides import apply_overrides, nest_overrides
+from pve_winrepair.adapters.config.settings import SettingsError
 from pve_winrepair.adapters.logging.setup import InvalidLoggingConfigError
 
 from . import safe_console
@@ -39,6 +42,7 @@ from .exit_codes import ExitCode
 
 if TYPE_CHECKING:
     from pve_winrepair.composition import AppServices
+    from pve_winrepair.domain.settings import Settings
 
     from .context import CLIContext
 
@@ -196,11 +200,35 @@ def require_config(ctx: click.Context, cli_ctx: CLIContext) -> Config:
     return cli_ctx.config
 
 
+def require_settings(ctx: click.Context, cli_ctx: CLIContext, config: Config) -> Settings:
+    """Return the tool's settings from ``config``, or end the command with exit 78.
+
+    Args:
+        ctx: The running command's click context.
+        cli_ctx: The state the root group stored; its services load the settings.
+        config: The loaded configuration.
+
+    Returns:
+        The ``[ssh] [guest] [repair] [node]`` settings.
+
+    Raises:
+        click.exceptions.Exit: A section holds an unknown key or a refused value; one
+            ``Error: <section>.<field>: <reason>`` line per problem goes to stderr first.
+    """
+    try:
+        return cli_ctx.services.load_settings(config)
+    except SettingsError as error:
+        for line in error.lines:
+            safe_console.echo(f"Error: {line}", err=True)
+        ctx.exit(ExitCode.CONFIG_ERROR)
+
+
 __all__ = [
     "check_logging",
     "echo_load_traceback",
     "load_config",
     "report_load_failure",
     "require_config",
+    "require_settings",
     "start_logging",
 ]

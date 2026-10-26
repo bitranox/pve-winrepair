@@ -24,7 +24,8 @@ media_dir = "/var/lib/vz/winmedia/win11"
 `pve-winrepair config` shows the merged result and, for each value, the layer and file it came from.
 `repair` and `apply` validate all four sections before they do anything: an unknown key or a refused
 value stops them with exit 78 and one `Error: <section>.<key>: <reason>` line per problem, for
-example `Error: node.state_dir: must be an absolute path on this machine`.
+example `Error: node.state_dir: must be an absolute path on this machine`. `config` checks them the
+same way after it has shown them, and exits 78 with the same lines.
 
 ---
 
@@ -117,8 +118,8 @@ cases wait for the LAN address, within that bound.
 these. They record, for guests that run CI runners, what an operator passes to the guest tool's
 `verify-runners --task NAME --expected N` after a reboot (one `--task` per entry; `0` means any count
 is fine). They are validated with the same rules that verb applies (task names of letters, digits,
-`_`, `.` and `-`, 1 to 64 characters; a count from 0 to 999999, never `true`/`false`), so
-`pve-winrepair config` shows only values the verb accepts.
+`_`, `.` and `-`, 1 to 64 characters; a count from 0 to 999999, never `true`/`false`), so a value the
+verb would refuse stops `pve-winrepair config`, `repair` and `apply` with exit 78.
 
 ### `[repair]`
 
@@ -361,7 +362,9 @@ vars), each value with the layer and file it came from.
 | `--profile NAME` | No       | Load configuration for a specific profile.  |
 
 An unknown `--section` exits 22 (`Error: Section 'nope' not found`); a configuration that does not
-load exits 78.
+load exits 78, and so does an `[ssh]`, `[guest]`, `[repair]` or `[node]` value that `repair` and
+`apply` would refuse, with one `Error:` line each after the values are shown (whatever `--section`
+shows).
 
 #### Examples
 

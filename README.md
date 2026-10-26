@@ -150,7 +150,8 @@ A persistent install works too (`uv tool install --exclude-newer "7 days" pve-wi
    media_dir = "/var/lib/vz/winmedia/win11"   # holds setup.exe and sources\install.wim
    ```
 
-2. Check what the tool reads: `pve-winrepair config`.
+2. Check what the tool reads: `pve-winrepair config`. A value the tool refuses is named there, and
+   the command exits 78.
 3. Repair the guest and wait for the verdict, which takes an hour or more:
 
    ```bash

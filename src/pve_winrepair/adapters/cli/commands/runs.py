@@ -35,14 +35,12 @@ from typing import TYPE_CHECKING, NoReturn
 
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 
-from pve_winrepair.adapters.config.settings import SettingsError
 from pve_winrepair.domain.node_link import NodeLink
 from pve_winrepair.domain.report import Report, RunExit, RunResult, RunVerdict, Step, StepName
 from pve_winrepair.domain.settings import SnapshotName
 
 from .. import safe_console
-from ..config_load import require_config
-from ..exit_codes import ExitCode
+from ..config_load import require_config, require_settings
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -104,13 +102,7 @@ def load_run_settings(ctx: click.Context, cli_ctx: CLIContext) -> Settings:
 
     A configuration that did not load at all exits 78 the same way, through ``require_config``.
     """
-    config = require_config(ctx, cli_ctx)
-    try:
-        return cli_ctx.services.load_settings(config)
-    except SettingsError as error:
-        for line in error.lines:
-            safe_console.echo(f"Error: {line}", err=True)
-        ctx.exit(ExitCode.CONFIG_ERROR)
+    return require_settings(ctx, cli_ctx, require_config(ctx, cli_ctx))
 
 
 def check_node(settings: Settings, receipt: Path | None = None) -> None:

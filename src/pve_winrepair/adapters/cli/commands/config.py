@@ -32,7 +32,7 @@ from pve_winrepair.adapters.config.overrides import nest_overrides
 from pve_winrepair.domain.enums import DeployTarget, OutputFormat
 
 from .. import safe_console
-from ..config_load import check_logging, load_config, report_load_failure, require_config
+from ..config_load import check_logging, load_config, report_load_failure, require_config, require_settings
 from ..constants import CLICK_CONTEXT_SETTINGS
 from ..context import CLIContext, get_cli_context
 from ..exit_codes import ExitCode
@@ -89,6 +89,9 @@ def cli_config(ctx: click.Context, output_format: OutputFormat, section: str | N
 
     Precedence: defaults -> app -> host -> user -> dotenv -> env
 
+    The [ssh] [guest] [repair] [node] settings are then checked the way repair and
+    apply load them: each refused value gets an Error line and the command exits 78.
+
     \f
     Example:
         >>> from click.testing import CliRunner
@@ -113,6 +116,9 @@ def cli_config(ctx: click.Context, output_format: OutputFormat, section: str | N
         except ValueError as exc:
             safe_console.echo(f"\nError: {exc}", err=True)
             ctx.exit(ExitCode.INVALID_ARGUMENT)
+        # After the display, so the operator still sees what was read: a value repair and apply
+        # would refuse is named here and exits 78 the same way, instead of passing as shown.
+        require_settings(ctx, cli_ctx, effective_config)
 
 
 def _get_effective_profile(cli_ctx: CLIContext, profile_override: str | None) -> str | None:
