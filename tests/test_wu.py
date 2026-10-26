@@ -401,6 +401,51 @@ def test_search_probe_keeps_a_timeout_apart_from_a_failure() -> None:
     assert (died.status, died.error) == (wu.SearchStatus.FAILED, "worker exited without a result (exit code 7)")
 
 
+class _NoUpdates:
+    """A search result holding no update."""
+
+    def to_list(self) -> list[WindowsUpdate]:
+        return []
+
+
+class _RecordingPwshpy:
+    """pwshpy's facade, recording the arguments the adapter hands stop_service and get_windows_update."""
+
+    def __init__(self) -> None:
+        self.stops: list[tuple[str, dict[str, object]]] = []
+        self.searches: list[dict[str, object]] = []
+
+    def stop_service(self, name: str, **kwargs: object) -> ServiceInfo:
+        self.stops.append((name, kwargs))
+        return ServiceInfo(name=name, display_name=name, status=ServiceState.STOP_PENDING)
+
+    def get_windows_update(self, **kwargs: object) -> _NoUpdates:
+        self.searches.append(kwargs)
+        return _NoUpdates()
+
+
+def test_the_adapter_only_issues_the_stop_and_never_waits_for_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    # pwshpy is the third-party edge. Its default stop_service waits for the service to stop, the
+    # unbounded wait on a hung wuauserv that quiesce-wu exists to avoid.
+    facade = _RecordingPwshpy()
+    monkeypatch.setattr(wu, "ps", facade)
+
+    wu.PwshpyHost().stop_service("wuauserv")
+
+    assert facade.stops == [("wuauserv", {"wait": False})]
+
+
+def test_the_adapter_bounds_the_search_by_the_timeout_it_is_given(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The probe reports the timeout it was handed; only the call shows the bound pwshpy enforces.
+    facade = _RecordingPwshpy()
+    monkeypatch.setattr(wu, "ps", facade)
+
+    probe = wu.PwshpyHost().search_updates(wu.SEARCH_TIMEOUT)
+
+    assert facade.searches == [{"criteria": wu.SEARCH_CRITERIA, "timeout": wu.SEARCH_TIMEOUT}]
+    assert (probe.status, probe.pending) == (wu.SearchStatus.OK, 0)
+
+
 @pytest.mark.os_posix  # on Windows this would run a real Windows Update search for up to 180 s
 def test_the_real_search_reaches_pwshpy_and_reports_its_refusal_as_failed() -> None:
     probe = wu.PwshpyHost().search_updates(wu.SEARCH_TIMEOUT)
