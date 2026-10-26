@@ -41,7 +41,8 @@ if TYPE_CHECKING:
 
 __all__ = ["Node", "run"]
 
-#: Seconds the preflight waits for the node; ssh's own ``ConnectTimeout`` (20 s) ends a dead connect first.
+#: Seconds the preflight waits for the node; the shorter ``ConnectTimeout`` among
+#: :class:`~pve_winrepair.domain.node_link.NodeLink`'s ssh options ends a dead connect first.
 _PREFLIGHT_TIMEOUT = 30
 
 
@@ -54,7 +55,7 @@ class Node:
     """
 
     ssh: SshSettings
-    # None: this machine is the node, and every argv is exactly what it was before remote nodes existed.
+    # None: this machine is the node; qm runs here and ssh goes straight to the guest, with no node hop.
     link: NodeLink | None = None
     runner: Runner = run
     clock: Callable[[], float] = time.time
@@ -70,7 +71,8 @@ class Node:
         """Why the linked node cannot be used, or None (also when there is no link).
 
         One round trip proves the node answers, accepts the key, has a known host key, and has
-        ``qm``. Exit codes are not interpreted beyond 0 / 1: ssh's own text says what failed.
+        ``qm``. Only exit 0 is read as usable; on any other exit the last line ssh or the node wrote
+        to stderr says what failed, and with nothing written the refusal reads as no ``qm`` there.
         """
         if self.link is None:
             return None

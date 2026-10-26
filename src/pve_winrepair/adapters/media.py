@@ -133,7 +133,7 @@ class NodeMedia:
         return f"cannot check the media on node {self.link.target}: {lines[-1] if lines else f'exit {node.returncode}'}"
 
     def copy_into(self, guest: GuestPort, dest: str, *, timeout: float) -> subprocess.CompletedProcess[str]:
-        """The node scp's every entry into the guest directory ``dest``; a timeout comes back as a failed process.
+        """The node's scp copies every entry into the guest directory ``dest``; a timeout is a failed process.
 
         With strict host key checking, refused (a failed process, the node never called) when this machine
         holds no host key for the guest.
