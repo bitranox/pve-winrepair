@@ -85,7 +85,7 @@ On the Windows guest (Windows 10 or 11):
 - Internet access the first time the guest tool runs as a given user, SYSTEM included: it installs
   `uv` for that user when the guest has no uv that user can trust, downloads a uv-managed Python
   into that user's own profile (an elevated run uses no other Python), and resolves its own pinned
-  dependencies (`pwshpy==1.6.0`, `pywin32==312`) from PyPI at that moment. Proxy variables are
+  dependencies (`pwshpy==1.8.0`, `pywin32==312`) from PyPI at that moment. Proxy variables are
   ignored in an elevated run, so the guest needs direct access. See [SECURITY.md](SECURITY.md) for
   what that trusts.
 - Free space: by default 15 GiB on the staging drive for the media and 25 GiB on `C:` (`[repair]

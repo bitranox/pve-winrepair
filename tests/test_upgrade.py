@@ -24,7 +24,6 @@ import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
-from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pytest
@@ -39,6 +38,11 @@ from pwshpy import (
     RegistryValue,
     RegistryValueType,
     ScheduledTaskInfo,
+    TaskLogonType,
+    TaskMultipleInstances,
+    TaskPrincipal,
+    TaskRunLevel,
+    TaskSettings,
     TaskState,
     ps,
 )
@@ -743,18 +747,33 @@ def test_mo_setup_reads_only_a_dword_waiver() -> None:
 # --- launch ---------------------------------------------------------------------------------
 
 
+# Every switch written out, the scheduler's defaults included, so a value launch stops setting reads
+# wrong here. The scheduler's own defaults refuse a start on battery and end a run going on battery.
+LAUNCH_SETTINGS = TaskSettings(
+    allow_start_if_on_batteries=True,
+    stop_if_going_on_batteries=False,
+    execution_time_limit=timedelta(hours=72),
+    multiple_instances=TaskMultipleInstances.IGNORE_NEW,
+    allow_hard_terminate=True,
+    allow_demand_start=True,
+)
+
+
 def _spec(host: FakeUpgradeHost) -> upgrade.TaskSpec:
     return upgrade.TaskSpec(
         path="\\OVMRepairUpgrade",
         program=POWERSHELL,
         arguments=TASK_ARGS.format(log=host.state_log),
-        user_id="S-1-5-18",  # SYSTEM by SID: the account name is localised on a German guest
-        logon_type=5,  # TASK_LOGON_SERVICE_ACCOUNT
-        run_level=1,  # TASK_RUNLEVEL_HIGHEST
-        execution_time_limit="PT72H",
-        multiple_instances=2,  # TASK_INSTANCES_IGNORE_NEW
-        disallow_start_on_batteries=False,
-        stop_on_batteries=False,
+        # SYSTEM by SID: the account name is localised on a German guest.
+        principal=TaskPrincipal(user_id="S-1-5-18", run_level=TaskRunLevel.HIGHEST),
+        settings=LAUNCH_SETTINGS,
+    )
+
+
+def test_the_task_principal_logs_on_as_a_service_account() -> None:
+    # SYSTEM takes no password; any other logon type makes the registration fail on the guest.
+    assert upgrade.TaskSpec(path="\\T", program=POWERSHELL, arguments="").principal.effective_logon_type() is (
+        TaskLogonType.SERVICE_ACCOUNT
     )
 
 
@@ -988,128 +1007,67 @@ def test_launch_says_task_left_when_the_task_state_cannot_be_read(host: FakeUpgr
     }  # fmt: skip
 
 
-# --- launch: the task definition handed to the Task Scheduler COM API -------------------------
-# Recording stand-ins for the COM objects; their member names are the COM interfaces' own.
+# --- launch: the task definition handed to pwshpy ---------------------------------------------
 
 
-class _ComTriggers:
+class _RecordingScheduler:
+    """pwshpy's facade, recording each register_scheduled_task call."""
+
     def __init__(self) -> None:
-        self.created: list[int] = []
+        self.registered: list[tuple[str, dict[str, object]]] = []
 
-    @property
-    def Count(self) -> int:  # noqa: N802 - mirrors the pywin32 / COM member name
-        return len(self.created)
-
-    def Create(self, kind: int) -> SimpleNamespace:  # noqa: N802 - mirrors the pywin32 / COM member name
-        self.created.append(kind)
-        return SimpleNamespace()
+    def register_scheduled_task(self, task_path: str, **kwargs: object) -> None:
+        self.registered.append((task_path, kwargs))
 
 
-class _ComActions:
-    def __init__(self) -> None:
-        self.created: list[SimpleNamespace] = []
-
-    def Create(self, kind: int) -> SimpleNamespace:  # noqa: N802 - mirrors the pywin32 / COM member name
-        action = SimpleNamespace(kind=kind, Path=None, Arguments=None)
-        self.created.append(action)
-        return action
-
-
-class _ComDefinition:
-    def __init__(self) -> None:
-        # Sentinels that differ from every value the assertions below expect, so a field the code
-        # forgets to set reads wrong - even where it would equal the scheduler's own default.
-        self.RegistrationInfo = SimpleNamespace(Description="")
-        self.Principal = SimpleNamespace(UserId="", LogonType=3, RunLevel=0)
-        self.Settings = SimpleNamespace(
-            Enabled=False, AllowDemandStart=False, AllowHardTerminate=False, ExecutionTimeLimit="PT0S",
-            MultipleInstances=0, DisallowStartIfOnBatteries=True, StopIfGoingOnBatteries=True,
-        )  # fmt: skip
-        self.Triggers = _ComTriggers()
-        self.Actions = _ComActions()
-
-
-class _ComFolder:
-    def __init__(self, fails: bool) -> None:
-        self.fails = fails
-        self.registered: list[tuple[object, ...]] = []
-
-    def RegisterTaskDefinition(self, *args: object) -> SimpleNamespace:  # noqa: N802 - mirrors the pywin32 / COM member name
-        if self.fails:
-            raise OSError(-2147024891, "Zugriff verweigert")  # what pywintypes.com_error looks like
-        self.registered.append(args)
-        return SimpleNamespace()
-
-
-class _ComService:
-    def __init__(self, *, fails: bool = False) -> None:
-        self.folders: list[str] = []
-        self.definition = _ComDefinition()
-        self.folder = _ComFolder(fails)
-
-    def GetFolder(self, path: str) -> _ComFolder:  # noqa: N802 - mirrors the pywin32 / COM member name
-        self.folders.append(path)
-        return self.folder
-
-    def NewTask(self, flags: int) -> _ComDefinition:  # noqa: N802 - mirrors the pywin32 / COM member name
-        assert flags == 0
-        return self.definition
-
-
-def test_register_on_demand_defines_a_system_task_with_no_trigger(fileless_host: FakeUpgradeHost) -> None:
-    service = _ComService()
-
-    upgrade.register_on_demand(lambda: service, _spec(fileless_host))
-
-    definition = service.definition
-    assert definition.Triggers.created == []  # nothing can start it but an explicit Run
-    assert definition.Triggers.Count == 0
-    assert vars(definition.Principal) == {"UserId": "S-1-5-18", "LogonType": 5, "RunLevel": 1}
-    assert vars(definition.Settings) == {
-        "Enabled": True, "AllowDemandStart": True, "AllowHardTerminate": True,
-        "ExecutionTimeLimit": "PT72H", "MultipleInstances": 2,
-        "DisallowStartIfOnBatteries": False, "StopIfGoingOnBatteries": False,
-    }  # fmt: skip
-    assert [(a.kind, a.Path, a.Arguments) for a in definition.Actions.created] == [(0, POWERSHELL, TASK_ARGS)]
-    assert service.folders == ["\\"]
-    # TASK_CREATE_OR_UPDATE (the old /F), the principal again (the API wants it here too), no password.
-    assert service.folder.registered == [("OVMRepairUpgrade", definition, 6, "S-1-5-18", None, 5)]
-
-
-def test_register_on_demand_raises_a_pwshpy_error_when_the_scheduler_refuses(fileless_host: FakeUpgradeHost) -> None:
-    with pytest.raises(NativeCallError, match="Zugriff verweigert"):
-        upgrade.register_on_demand(lambda: _ComService(fails=True), _spec(fileless_host))
-
-
-def test_register_on_demand_raises_a_pwshpy_error_when_the_scheduler_is_unreachable(
-    fileless_host: FakeUpgradeHost,
+def test_pwshpy_host_registers_the_spec_with_no_trigger(
+    fileless_host: FakeUpgradeHost, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    def connect() -> _ComService:
-        raise OSError("Der RPC-Server ist nicht verfuegbar")
+    # pwshpy is the third-party edge. The exact keyword set proves no triggers reach it: a
+    # definition launch leaves behind must never start setup by itself.
+    scheduler = _RecordingScheduler()
+    monkeypatch.setattr(upgrade, "ps", scheduler)
+    spec = _spec(fileless_host)
 
-    with pytest.raises(NativeCallError, match="RPC-Server"):
-        upgrade.register_on_demand(connect, _spec(fileless_host))
+    upgrade.PwshpyHost().register_task(spec)
+
+    assert scheduler.registered == [
+        (
+            "\\OVMRepairUpgrade",
+            {
+                "program": POWERSHELL,
+                "arguments": spec.arguments,
+                "principal": spec.principal,
+                "settings": LAUNCH_SETTINGS,
+            },
+        )
+    ]
 
 
-class _ComError(Exception):
-    """Stands in for pywintypes.com_error, which derives from Exception and not from OSError."""
-
-
-def test_register_on_demand_wraps_a_com_error(fileless_host: FakeUpgradeHost) -> None:
-    def connect() -> _ComService:
-        raise _ComError(-2147024891, "Zugriff verweigert", None, None)
-
-    with pytest.raises(NativeCallError, match="Zugriff verweigert"):
-        upgrade.register_on_demand(connect, _spec(fileless_host), com_errors=(_ComError,))
-
-
-def test_register_on_demand_lets_a_programming_error_through_as_internal(fileless_host: FakeUpgradeHost) -> None:
-    # A typo in _define must be exit 2 (internal), never a FAILED verdict that reads like a refusal.
-    def connect() -> SimpleNamespace:
-        return SimpleNamespace()  # no NewTask: AttributeError inside _define
-
-    with pytest.raises(AttributeError):
-        upgrade.register_on_demand(connect, _spec(fileless_host), com_errors=(_ComError,))
+@pytest.mark.os_windows
+def test_pwshpy_host_registers_a_task_the_scheduler_reads_back_as_launch_set_it() -> None:
+    # The real scheduler, elevated: what it stored is the proof, not what was handed over. The task
+    # is never started, and is deleted again whatever the assertions say.
+    host = upgrade.PwshpyHost()
+    path = "\\OVMRepairUpgrade-registered-by-test"
+    spec = upgrade.TaskSpec(
+        path=path, program=upgrade.powershell_path(host.system_root()), arguments="-NoProfile -Command exit"
+    )
+    host.register_task(spec)
+    try:
+        task = ps.get_scheduled_task("\\", task_name=path[1:], strict=True).first()
+        assert task is not None
+        assert (task.state, task.enabled, task.user_id, task.run_level) == (
+            TaskState.READY,
+            True,
+            "S-1-5-18",
+            TaskRunLevel.HIGHEST,
+        )
+        assert task.settings == LAUNCH_SETTINGS
+        assert host.task_state(path) is TaskState.READY
+    finally:
+        host.delete_task(path)
+    assert host.task_state(path) is None
 
 
 @pytest.mark.parametrize(
@@ -1345,37 +1303,42 @@ def test_pwshpy_host_reads_this_process_identity_from_pwshpy() -> None:
     assert host.whoami() == upgrade.account_text(me)
 
 
-class _UnlistableScheduler:
-    """pwshpy's facade over a Task Scheduler whose root folder refuses to list its tasks."""
+class _UnreadableScheduler:
+    """pwshpy's facade over a Task Scheduler whose task cannot be read (access denied)."""
 
     def __init__(self) -> None:
-        self.strict: list[bool] = []
+        self.asked: list[tuple[str, str | None, bool]] = []
 
-    def get_scheduled_task(self, folder_path: str = "\\", *, strict: bool = False) -> Pipeline[ScheduledTaskInfo]:
-        self.strict.append(strict)
+    def get_scheduled_task(
+        self, folder_path: str = "\\", *, task_name: str | None = None, strict: bool = False
+    ) -> Pipeline[ScheduledTaskInfo]:
+        self.asked.append((folder_path, task_name, strict))
 
         def walk() -> Iterator[ScheduledTaskInfo]:
-            if strict:  # what pwshpy does with an item it cannot read under strict=True
-                raise NativeCallError(f"cannot list the tasks in folder '{folder_path}': (5, 'Zugriff verweigert')")
-            yield from ()  # lenient: the folder is skipped, which reads exactly like an absent task
+            if strict:  # what pwshpy does with an unreadable task under strict=True
+                raise NativeCallError(
+                    f"cannot read task '{task_name}' in folder '{folder_path}': (5, 'Zugriff verweigert')"
+                )
+            yield from ()  # lenient: the task is skipped, which reads exactly like an absent task
 
         return Pipeline(walk())
 
 
-def test_pwshpy_host_task_state_raises_for_a_folder_it_cannot_list(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_pwshpy_host_task_state_raises_for_a_task_it_cannot_read(monkeypatch: pytest.MonkeyPatch) -> None:
     # The cleanup's read-back: "no such task" must mean the task is gone, never that it could not
     # be read, or a task still defined would be reported deleted. pwshpy is the third-party edge.
-    scheduler = _UnlistableScheduler()
+    scheduler = _UnreadableScheduler()
     monkeypatch.setattr(upgrade, "ps", scheduler)
 
-    with pytest.raises(NativeCallError, match="cannot list the tasks"):
+    with pytest.raises(NativeCallError, match="cannot read task"):
         upgrade.PwshpyHost().task_state(r"\OVMRepairUpgrade")
-    assert scheduler.strict == [True]
+    # One task by name in its folder, not a walk of the tree.
+    assert scheduler.asked == [("\\", "OVMRepairUpgrade", True)]
 
 
 @pytest.mark.os_windows
 def test_pwshpy_host_task_state_reads_an_absent_task_as_none_on_the_real_scheduler() -> None:
-    # A strict walk of the whole tree: any task this elevated account cannot read would raise here.
+    # Strict, by name: a task that does not exist is an empty answer, not an error.
     assert upgrade.PwshpyHost().task_state(r"\OVMRepairUpgrade-absent-by-test") is None
 
 

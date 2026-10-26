@@ -187,8 +187,20 @@ def test_header_pins_pywin32_for_windows_only() -> None:
     block = GUEST.read_text(encoding="utf-8").split("# ///")[1]
     line = next(raw for raw in block.splitlines() if raw.startswith("# dependencies"))
     dependencies = ast.literal_eval(line.split("=", 1)[1].strip())
-    assert "pwshpy==1.6.0" in dependencies
     assert [d for d in dependencies if d.startswith("pywin32")] == ["pywin32==312; sys_platform == 'win32'"]
+
+
+def test_headers_pin_pwshpy_to_the_locked_version() -> None:
+    # The tests and pyright run on the locked pwshpy; the packed tool must run on the same one, and
+    # the pack script must pack with it. Read from uv.lock, so a pin bump changes no test.
+    lock = rtoml.load(GUEST.parents[2] / "uv.lock")
+    locked = [p["version"] for p in lock["package"] if p["name"] == "pwshpy"]
+    assert len(locked) == 1
+    for script in (GUEST, GUEST.parents[2] / "scripts" / "pack_guest.py"):
+        block = script.read_text(encoding="utf-8").split("# ///")[1]
+        line = next(raw for raw in block.splitlines() if raw.startswith("# dependencies"))
+        dependencies = ast.literal_eval(line.split("=", 1)[1].strip())
+        assert [d for d in dependencies if d.startswith("pwshpy")] == [f"pwshpy=={locked[0]}"], script.name
 
 
 def test_header_pins_pydantic_to_the_locked_version() -> None:

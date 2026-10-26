@@ -8,6 +8,15 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ### Changed
 
+- The guest tool runs on `pwshpy==1.8.0` (was 1.6.0). `launch` registers its SYSTEM task through
+  pwshpy's `register_scheduled_task` with task settings (no trigger, start and keep running on
+  battery, 72 h limit, a second start ignored, hard terminate and start on demand allowed)
+  instead of driving the Task Scheduler COM API itself; the task it registers is unchanged. The
+  task cleanup's read-back looks the task up by name in its folder instead of walking every
+  folder, so a task elsewhere that this account cannot read no longer makes the cleanup refuse.
+  An elevated run of the packed tool on Windows now keeps an empty git configuration file at
+  `pwshpy\empty.gitconfig` below the account's data directory, and refuses to start (exit 127)
+  when another account could change it.
 - Every guest tool answer is validated once, strictly, into a typed model per subcommand, closed
   to unknown fields. A malformed answer still ends the run as an internal error (exit 2), but its
   message now reads `guest tool <cmd>: the answer breaks the contract: <field>: <reason>` and no

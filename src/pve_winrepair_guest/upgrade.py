@@ -21,8 +21,8 @@ both run for real in the tests too.
   be a reparse point or be owned or writable by a non-admin - SYSTEM is about to execute both
   files and whatever setup.exe loads. Then a SYSTEM scheduled task runs ``upgrade-run``, because
   Windows OpenSSH kills the process tree when the connection drops and setup runs for hours. The
-  task has NO trigger (registered through the Task Scheduler COM API; ``schtasks /Create`` insists
-  on one): launch starts it on demand, so a definition left behind by a launch that was killed
+  task has NO trigger (pwshpy's ``register_scheduled_task`` with no triggers; ``schtasks /Create``
+  insists on one): launch starts it on demand, so a definition left behind by a launch that was killed
   mid-wait can never start setup again by itself. Then a bounded wait for the run's own
   "launching" line, and only after it the 150 s SetupHost check: both compat aborts seen on test
   guests died inside 90 s, and a first SYSTEM run of the packed tool may spend minutes
@@ -35,8 +35,6 @@ both run for real in the tests too.
 Contents:
     * :func:`commands` - prepare, lock-dirs, launch and upgrade-run for the entry's command table.
     * :class:`UpgradeHost`, :class:`PwshpyHost` - the OS port and its adapter.
-    * :func:`register_on_demand` - the trigger-less SYSTEM task definition, over an injected
-      Task Scheduler COM connection.
     * the pure helpers (:func:`wim_gate`, :func:`wait_for_launch`, :func:`task_spec`, the
       exit-code formatting) and their records.
 """
@@ -50,22 +48,24 @@ import os
 import re
 import stat
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast
+from typing import TYPE_CHECKING, Protocol, TypeVar, cast
 
 from pwshpy import (
     CimInstance,
-    NativeCallError,
     ProcessInfo,
     PwshPyError,
     RegistryValue,
     RegistryValueType,
+    TaskMultipleInstances,
+    TaskPrincipal,
+    TaskSettings,
     TaskState,
     ps,
 )
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from pve_winrepair_guest.envelope import Command, Outcome, Report, Skip
 from pve_winrepair_guest.lockdown import (
@@ -145,7 +145,6 @@ __all__ = [
     "mo_setup",
     "powershell_path",
     "preflight",
-    "register_on_demand",
     "run_lock_dirs",
     "setup_arguments",
     "signed32",
@@ -166,19 +165,10 @@ SETUP_PROCESS = "SetupHost"
 # The task's program, below %SystemRoot%: by absolute path, never resolved through PATH (on a test
 # guest four directories precede System32 in the machine PATH, and a SYSTEM task inherits it).
 POWERSHELL_UNDER_ROOT = r"System32\WindowsPowerShell\v1.0\powershell.exe"
-# SYSTEM by SID: Task Scheduler accepts the SID string as the principal, and unlike an account
-# name it reads the same on every display language.
-SYSTEM_SID = "S-1-5-18"
-# Task Scheduler 2.0 COM constants (taskschd.h).
-TASK_ACTION_EXEC = 0
-TASK_CREATE_OR_UPDATE = 6  # replaces a definition an earlier launch left behind
-TASK_LOGON_SERVICE_ACCOUNT = 5
-TASK_RUNLEVEL_HIGHEST = 1
-TASK_INSTANCES_IGNORE_NEW = 2
 # The Task Scheduler's own default (a schtasks /Create task reads back PT72H on a test guest), set
 # explicitly so it cannot drift: setup's down-level phase runs for hours, far inside it, and a hung
 # run is still ended some day instead of never.
-TASK_TIME_LIMIT = "PT72H"
+TASK_TIME_LIMIT = timedelta(hours=72)
 LAUNCH_WAIT = 600.0
 LAUNCH_POLL = 5.0
 SETUP_SETTLE = 150.0
@@ -240,6 +230,21 @@ class SetupRun(_Internal):
     tree_wait: TreeWait
 
 
+def _task_settings() -> TaskSettings:
+    """Every task setting launch depends on, the scheduler's defaults included, so none can drift."""
+    return TaskSettings(
+        # The scheduler defaults both battery switches to refuse and end (read back on a test guest);
+        # a setup run must neither be refused nor killed by a host that reports a battery (a VM with
+        # an emulated one).
+        allow_start_if_on_batteries=True,
+        stop_if_going_on_batteries=False,
+        execution_time_limit=TASK_TIME_LIMIT,
+        multiple_instances=TaskMultipleInstances.IGNORE_NEW,  # a second start while one runs does nothing
+        allow_hard_terminate=True,  # launch's REMOVE ends it
+        allow_demand_start=True,  # the only way it runs
+    )
+
+
 class TaskSpec(_Internal):
     r"""A scheduled task to register: one exec action, a principal, settings, and NO trigger.
 
@@ -250,27 +255,16 @@ class TaskSpec(_Internal):
         path: ``\Name`` (root folder) or ``\Folder\Name``.
         program: The executable, by absolute path (never looked up through PATH).
         arguments: Its command line after the program.
-        user_id: The principal, here SYSTEM by SID.
-        logon_type: TASK_LOGON_SERVICE_ACCOUNT for SYSTEM (no password).
-        run_level: TASK_RUNLEVEL_HIGHEST (HighestAvailable in the task XML, as ``/RL HIGHEST``).
-        execution_time_limit: ISO 8601 duration after which the scheduler ends the instance.
-        multiple_instances: What a second start does while one runs (IGNORE_NEW: nothing).
-        disallow_start_on_batteries: Whether a host on battery refuses the start.
-        stop_on_batteries: Whether the scheduler ends the instance when the host goes on battery.
+        principal: SYSTEM by SID (unlike an account name it reads the same on every display
+            language), logged on as a service account (no password), at the highest run level.
+        settings: Battery, time-limit, multiple-instances, hard-terminate and demand-start switches.
     """
 
     path: str
     program: str
     arguments: str
-    user_id: str = SYSTEM_SID
-    logon_type: int = TASK_LOGON_SERVICE_ACCOUNT
-    run_level: int = TASK_RUNLEVEL_HIGHEST
-    execution_time_limit: str = TASK_TIME_LIMIT
-    multiple_instances: int = TASK_INSTANCES_IGNORE_NEW
-    # The scheduler defaults both to True (read back on a test guest); a setup run must neither be
-    # refused nor killed by a host that reports a battery (a VM with an emulated one).
-    disallow_start_on_batteries: bool = False
-    stop_on_batteries: bool = False
+    principal: TaskPrincipal = Field(default_factory=TaskPrincipal.system)
+    settings: TaskSettings = Field(default_factory=_task_settings)
 
     @property
     def command_line(self) -> str:
@@ -393,7 +387,7 @@ class UpgradeHost(Protocol):
 
 
 class PwshpyHost:
-    """The real :class:`UpgradeHost`: pwshpy's native bindings plus the Task Scheduler COM API."""
+    """The real :class:`UpgradeHost`: pwshpy's native bindings."""
 
     def registry(self, key: str) -> Iterable[RegistryValue]:
         """See :meth:`UpgradeHost.registry`."""
@@ -414,13 +408,12 @@ class PwshpyHost:
     def register_task(self, spec: TaskSpec) -> None:
         """See :meth:`UpgradeHost.register_task`.
 
-        pwshpy's register_scheduled_task takes the SYSTEM principal, the run level and no trigger,
-        but sets no task settings: DisallowStartIfOnBatteries and StopIfGoingOnBatteries would keep
-        the scheduler's True (a VM with an emulated battery could refuse or end setup), and the time
-        limit and IgnoreNew could not be pinned. So this drives the Task Scheduler COM API directly,
-        as pwshpy itself does, until pwshpy takes settings (its OPEN-WORK [45]).
+        No triggers: the task runs only on demand. Registering over a definition an earlier launch
+        left behind replaces it.
         """
-        register_on_demand(_connect_scheduler, spec)
+        ps.register_scheduled_task(
+            spec.path, program=spec.program, arguments=spec.arguments, principal=spec.principal, settings=spec.settings
+        )
 
     def start_task(self, task_path: str) -> None:
         """See :meth:`UpgradeHost.start_task`."""
@@ -429,17 +422,13 @@ class PwshpyHost:
     def task_state(self, task_path: str) -> TaskState | None:
         """See :meth:`UpgradeHost.task_state`.
 
-        ``strict=True``: a folder or task this account cannot read raises instead of being skipped,
-        so None means the task is gone, never that it could not be read (the cleanup's read-back
-        relies on that). A task under the root is not found before the whole tree is walked, so
-        any unreadable task anywhere raises too; an elevated admin session read every task of a
-        Windows 11 test machine that way (measured).
+        One task, looked up by name in its folder without walking the tree, so an unreadable task
+        elsewhere cannot affect the answer. A task or folder that does not exist is an empty
+        answer; under ``strict=True`` every other failure raises, so None means the task is gone,
+        never that it could not be read (the cleanup's read-back relies on that).
         """
         folder, _, name = task_path.rpartition("\\")
-        folder += "\\"
-        # get_scheduled_task recurses the folder tree, so the folder must match too.
-        tasks = ps.get_scheduled_task(folder, strict=True)
-        task = tasks.first(lambda t: t.task_name == name and t.task_path == folder)
+        task = ps.get_scheduled_task(folder + "\\", task_name=name, strict=True).first()
         return None if task is None else task.state
 
     def stop_task(self, task_path: str) -> None:
@@ -568,15 +557,6 @@ def account_text(identity: CurrentIdentity) -> str:
         For example ``NT AUTHORITY\SYSTEM (S-1-5-18)``.
     """
     return f"{identity.account} ({identity.sid})" if identity.account else identity.sid
-
-
-def _connect_scheduler() -> Any:
-    """A connected Task Scheduler 2.0 service object."""
-    # import_module: pywin32 is a Windows-only pwshpy dependency without stubs on the dev host.
-    client: Any = importlib.import_module("win32com.client")
-    service = client.Dispatch("Schedule.Service")
-    service.Connect()
-    return service
 
 
 # --- prepare --------------------------------------------------------------------------------
@@ -927,69 +907,6 @@ def task_spec(tool: str, stage_root: str, state_log: str, program: str) -> TaskS
         f"-NoProfile -ExecutionPolicy Bypass -File {tool} upgrade-run --stage-root {stage_root} --state-log {state_log}"
     )
     return TaskSpec(path=TASK_PATH, program=program, arguments=arguments)
-
-
-def _apply_settings(settings: Any, spec: TaskSpec) -> None:
-    """Set every ITaskSettings field launch depends on, defaults included, so none can drift."""
-    settings.Enabled = True
-    settings.AllowDemandStart = True  # the only way it runs
-    settings.AllowHardTerminate = True  # launch's REMOVE ends it
-    settings.ExecutionTimeLimit = spec.execution_time_limit
-    settings.MultipleInstances = spec.multiple_instances
-    settings.DisallowStartIfOnBatteries = spec.disallow_start_on_batteries
-    settings.StopIfGoingOnBatteries = spec.stop_on_batteries
-
-
-def _define(service: Any, spec: TaskSpec) -> None:
-    """Fill a fresh COM task definition from ``spec`` and register it; no trigger is ever created."""
-    definition = service.NewTask(0)
-    principal = definition.Principal
-    principal.UserId = spec.user_id
-    principal.LogonType = spec.logon_type
-    principal.RunLevel = spec.run_level
-    _apply_settings(definition.Settings, spec)
-    action = definition.Actions.Create(TASK_ACTION_EXEC)
-    action.Path = spec.program
-    action.Arguments = spec.arguments
-    folder_path, _, name = spec.path.rpartition("\\")
-    folder = service.GetFolder(folder_path or "\\")
-    # The principal goes to RegisterTaskDefinition as well; SYSTEM takes no password.
-    folder.RegisterTaskDefinition(name, definition, TASK_CREATE_OR_UPDATE, spec.user_id, None, spec.logon_type)
-
-
-def _com_errors() -> tuple[type[BaseException], ...]:
-    """pywintypes.com_error, or nothing where pywin32 is absent (then connecting fails with ImportError)."""
-    try:
-        pywintypes = importlib.import_module("pywintypes")
-    except ImportError:
-        return ()
-    return (cast("type[BaseException]", pywintypes.com_error),)
-
-
-def register_on_demand(
-    connect: Callable[[], Any],
-    spec: TaskSpec,
-    *,
-    com_errors: tuple[type[BaseException], ...] | None = None,
-) -> None:
-    """Register ``spec`` as a trigger-less task over a Task Scheduler COM connection.
-
-    Args:
-        connect: Returns a connected ``Schedule.Service`` object (injected: the tests hand in a
-            recording stand-in, the guest a real COM connection).
-        spec: The task.
-        com_errors: The COM error types to wrap; pywintypes.com_error when None.
-
-    Raises:
-        NativeCallError: Connecting or registering failed (a COM error, an OSError, or pywin32
-            missing), wrapped as pwshpy does, so the caller's ``except PwshPyError`` sees it. Any
-            other exception is a bug here and propagates (the entry reports it as exit 2).
-    """
-    errors = (OSError, ImportError, *(_com_errors() if com_errors is None else com_errors))
-    try:
-        _define(connect(), spec)
-    except errors as exc:
-        raise NativeCallError(str(exc) or f"cannot register task {spec.path!r}") from exc
 
 
 class TaskCleanupAction(str, Enum):

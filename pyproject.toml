@@ -73,9 +73,9 @@ dev = [
   "import-linter>=2.15",
   # Exact, not a floor: the guest tool's own PEP 723 header pins this version, and the tests and
   # pyright must see the pwshpy the packed tool runs with.
-  "pwshpy==1.6.0",
+  "pwshpy==1.8.0",
   "rtoml>=0.14.0",
-  "httpx2>=2.13.1",
+  "httpx2>=2.14.0",
   # Transitive CVE pins
   "click>=8.5.0",                # CVE-2026-7246
   "jaraco-context>=6.1.2",       # CVE-2025-23949
@@ -83,9 +83,9 @@ dev = [
   "wheel>=0.48.0",               # CVE-2025-24049
   "pynacl>=1.6.2",               # CVE-2025-69277
   "urllib3>=2.8.0",              # CVE-2025-66471, CVE-2025-66418
-  "virtualenv>=21.14.10",        # CVE-2025-22702, CVE-2026-113722, CVE-2026-113713
+  "virtualenv>=21.14.11",        # CVE-2025-22702, CVE-2026-113722, CVE-2026-113713
   # No fixed filelock supports 3.10 (4.2.x needs >=3.11), so the 3.10 lane keeps 4.1.0.
-  "filelock>=4.2.1; python_version >= '3.11'",  # CVE-2026-112906
+  "filelock>=4.2.4; python_version >= '3.11'",  # CVE-2026-112906
   "certifi>=2026.10.19",         # PYSEC-2026-4320
 ]
 
