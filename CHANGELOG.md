@@ -16,15 +16,21 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   guests through the node with a `ProxyCommand` that logs in with the node key, so the guest key
   is never offered to the node. A node that does not answer, refuses the key or its host key, or
   has no `qm` is refused before any VM call (exit 1), and so is a node named without
-  `[node] ssh_key`. README "From a workstation" walks through it.
+  `[node] ssh_key`. README "From a workstation" walks through it. These `[node]` keys are checked
+  when the configuration loads, even when no node is used, and a refused value stops the tool
+  with exit 78: `host` (letters, digits, `.` and `-`, so `_` is refused), `ssh_user`, `ssh_key`
+  (no `"` or `%`) and `known_hosts_file` (not empty; no whitespace, `"` or `%`).
 - `repair --media node|local` and `[repair] media_source` (default `"node"`): `node` stages
   `[repair] media_dir` on the node, `local` stages `[repair] local_media_dir` from the machine
   running the tool. With a remote node, `node` has the node's own scp copy the media into the
   guest, logging in with the guest key from this machine's ssh-agent, forwarded for that copy
   only. Before any VM call the run refuses unconfigured, missing or empty media and, for a remote
   `node`, no reachable ssh-agent, an agent holding no key, or a node that did not receive it.
+  A `media_source` other than `node` or `local` stops the tool when the configuration loads
+  (exit 78), even for a run that passes `--media`.
 - `[repair] stage_timeout_minutes` (default 90, a whole number from 1 to 1440): how long the media
-  copy to the guest may take; it was a fixed 90 minutes.
+  copy to the guest may take; it was a fixed 90 minutes. A value outside that range stops the tool
+  when the configuration loads (exit 78).
 - `repair --receipt FILE` and `apply --receipt FILE`: one receipt file on this machine instead of
   `receipt-<vmid>.json` in `[node] state_dir`, made absolute against the current directory with
   its symbolic links resolved. `repair` refuses (exit 1), before any VM call, a file that holds
@@ -80,10 +86,6 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
     `state_dir` the setting is refused by name. On POSIX the rule is unchanged (a relative path,
     `""` and a leading `~` were refused before); the message now reads `must be an absolute path on
     this machine`.
-  - The new `[node]` keys are checked even when no node is used: `host` (letters, digits, `.` and
-    `-`, so `_` is refused), `ssh_user`, `ssh_key` (no `"` or `%`) and `known_hosts_file` (not
-    empty; no whitespace, `"` or `%`). An environment override such as
-    `PVE_WINREPAIR___NODE__HOST=pve_1` therefore stops every `repair` and `apply`.
 - `repair` refuses (exit 1), before any VM call, a `receipt-<vmid>.json` in `[node] state_dir`
   that holds another VM's receipt; before, it removed it, and that VM's `apply` then had no
   receipt. A per-VM file that is no valid receipt is still replaced.
