@@ -21,6 +21,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from pve_winrepair.application.ports import TransferTimeoutError
+
 if TYPE_CHECKING:
     from pve_winrepair.application.ports import GuestPort, MediaSource
     from pve_winrepair.domain.envelope import Runner
@@ -135,10 +137,13 @@ class NodeMedia:
         return f"cannot check the media on node {self.link.target}: {lines[-1] if lines else f'exit {node.returncode}'}"
 
     def copy_into(self, guest: GuestPort, dest: str, *, timeout: float) -> subprocess.CompletedProcess[str]:
-        """The node's scp copies every entry into the guest directory ``dest``; a timeout is a failed process.
+        """The node's scp copies every entry into the guest directory ``dest``.
 
         With strict host key checking, refused (a failed process, the node never called) when this machine
         holds no host key for the guest.
+
+        Raises:
+            TransferTimeoutError: The copy did not finish within ``timeout``.
         """
         keys = ""  # no check: what _COPY runs without a host key
         if self.ssh.strict_host_key_checking:
@@ -151,8 +156,8 @@ class NodeMedia:
         argv = self.link.ssh_argv(remote, forward_agent=True)
         try:
             return self.runner(argv, timeout)
-        except subprocess.TimeoutExpired:
-            return subprocess.CompletedProcess(argv, 255, "", f"media transfer: timed out after {timeout:g} s")
+        except subprocess.TimeoutExpired as exc:
+            raise TransferTimeoutError(f"media transfer: timed out after {timeout:g} s") from exc
         except OSError as exc:
             return subprocess.CompletedProcess(argv, 255, "", f"media transfer: could not run ssh: {exc}")
 

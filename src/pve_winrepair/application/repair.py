@@ -47,6 +47,7 @@ from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, TypeAdapter
 
 from pve_winrepair.application.guest_identity import GuestMismatchError, check_guest_is_vm
 from pve_winrepair.application.guest_state import read_guest_build, read_run_state
+from pve_winrepair.application.ports import TransferTimeoutError
 from pve_winrepair.application.vm import VmStatus, VmStatusError, vm_status, wait_status
 from pve_winrepair.domain.addresses import AmbiguousAddressError, lan_address
 from pve_winrepair.domain.enums import DriveLetter, MediaChoice
@@ -517,12 +518,14 @@ def stage_media(guest: GuestPort, rep: Report, drive: DriveLetter, *, media: Med
     """Copy the media into the stage root on ``drive``; :func:`lock_dirs` created and locked it."""
     root = drive.stage_root
     started = time.time()
-    proc = media.copy_into(guest, f"{root}\\", timeout=timeout_minutes * 60)
-    if proc.returncode != 0:
+    try:
+        proc = media.copy_into(guest, f"{root}\\", timeout=timeout_minutes * 60)
+    except TransferTimeoutError as exc:
         raise RepairError(
-            f"media transfer failed rc={proc.returncode}: {proc.stderr.strip()[:400]} "
-            f"(the copy may take [repair] stage_timeout_minutes = {timeout_minutes})"
-        )
+            f"media transfer failed: {exc} (the copy may take [repair] stage_timeout_minutes = {timeout_minutes})"
+        ) from exc
+    if proc.returncode != 0:
+        raise RepairError(f"media transfer failed rc={proc.returncode}: {proc.stderr.strip()[:400]}")
     rep.add(StepName.STAGE_MEDIA, ok=True, seconds=round(time.time() - started), root=root)
 
 

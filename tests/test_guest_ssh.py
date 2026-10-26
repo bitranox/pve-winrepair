@@ -50,6 +50,7 @@ from pve_winrepair.adapters.config.settings import load_settings
 from pve_winrepair.adapters.guest_ssh import Guest, ssh_options
 from pve_winrepair.adapters.node import Node
 from pve_winrepair.application.guest_state import read_run_state
+from pve_winrepair.application.ports import TransferTimeoutError
 from pve_winrepair.domain.envelope import (
     POWERSHELL,
     GuestInternalError,
@@ -640,12 +641,17 @@ def test_run_state_that_cannot_be_read_raises_instead_of_reading_as_idle(reply: 
         read_run_state(_guest(runner), timeout=300)
 
 
-@pytest.mark.parametrize("error", [subprocess.TimeoutExpired(["scp"], 5400), OSError("no scp")])
-def test_copy_to_that_times_out_or_cannot_start_is_a_failed_process(error: BaseException) -> None:
-    runner = FakeRunner().on("scp", error)
+def test_copy_to_that_cannot_start_is_a_failed_process() -> None:
+    runner = FakeRunner().on("scp", OSError("no scp"))
     proc = _guest(runner).copy_to(["/media/setup.exe"], "D:\\upgrade\\", timeout=5400)
-    assert proc.returncode == 255
-    assert "media transfer" in proc.stderr
+    assert (proc.returncode, proc.stderr) == (255, "media transfer: could not run scp: no scp")
+
+
+def test_copy_to_that_times_out_raises_the_typed_timeout() -> None:
+    # The caller names stage_timeout_minutes for a timeout only, so it must not read like any failure.
+    runner = FakeRunner().on("scp", subprocess.TimeoutExpired(["scp"], 5400))
+    with pytest.raises(TransferTimeoutError, match=r"^media transfer: timed out after 5400 s$"):
+        _guest(runner).copy_to(["/media/setup.exe"], "D:\\upgrade\\", timeout=5400)
 
 
 # --- the content address both deploy units agree on ------------------------------------------

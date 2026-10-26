@@ -47,6 +47,7 @@ from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from pve_winrepair.application.ports import TransferTimeoutError
 from pve_winrepair.domain.acl import SddlError, parse_sddl, trusted_writers, write_problems
 from pve_winrepair.domain.envelope import (
     POWERSHELL,
@@ -523,11 +524,16 @@ class Guest:
     def copy_to(self, sources: Sequence[str], dest: str, *, timeout: float) -> subprocess.CompletedProcess[str]:
         """``scp -r`` ``sources`` into the guest directory ``dest``; the caller checks the result.
 
-        Like :meth:`ssh`, a timeout or an scp that cannot start comes back as a failed process
-        (rc 255) naming why, so the caller reports a failed transfer rather than crashing.
+        Like :meth:`ssh`, an scp that cannot start comes back as a failed process (rc 255) naming
+        why, so the caller reports a failed transfer rather than crashing.
+
+        Raises:
+            TransferTimeoutError: scp did not finish within ``timeout``.
         """
         argv = _scp_argv(self.ip, self.ssh_settings, sources, dest, recursive=True)
         try:
-            return _call(self.runner, argv, timeout, "media transfer")
-        except GuestNoAnswerError as exc:
-            return subprocess.CompletedProcess(argv, 255, "", str(exc))
+            return self.runner(argv, timeout)
+        except subprocess.TimeoutExpired as exc:
+            raise TransferTimeoutError(f"media transfer: timed out after {timeout:g} s") from exc
+        except OSError as exc:
+            return subprocess.CompletedProcess(argv, 255, "", f"media transfer: could not run {argv[0]}: {exc}")

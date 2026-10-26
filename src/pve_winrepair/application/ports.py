@@ -37,6 +37,14 @@ if TYPE_CHECKING:
     from ..domain.vm_config import SnapshotResult, VmConfigRead
 
 
+class TransferTimeoutError(RuntimeError):
+    """A copy into the guest did not finish within its timeout.
+
+    Raised rather than returned as a failed process: only a copy that ran out of time is helped by
+    a longer ``[repair] stage_timeout_minutes``, so the caller must tell it from any other failure.
+    """
+
+
 class GetConfig(Protocol):
     """Load layered configuration with application defaults."""
 
@@ -158,7 +166,11 @@ class GuestPort(Protocol):
         ...
 
     def copy_to(self, sources: Sequence[str], dest: str, *, timeout: float) -> CompletedProcess[str]:
-        """Copy ``sources`` recursively into the guest directory ``dest``; the caller checks the result."""
+        """Copy ``sources`` recursively into the guest directory ``dest``; the caller checks the result.
+
+        Raises:
+            TransferTimeoutError: The copy did not finish within ``timeout``.
+        """
         ...
 
 
@@ -170,7 +182,11 @@ class MediaSource(Protocol):
         ...
 
     def copy_into(self, guest: GuestPort, dest: str, *, timeout: float) -> CompletedProcess[str]:
-        """Copy every entry of the media directory into the guest directory ``dest``; the caller checks the result."""
+        """Copy every entry of the media directory into the guest directory ``dest``; the caller checks the result.
+
+        Raises:
+            TransferTimeoutError: The copy did not finish within ``timeout``.
+        """
         ...
 
 
@@ -265,4 +281,5 @@ __all__ = [
     "MediaSource",
     "NodePort",
     "ReceiptStore",
+    "TransferTimeoutError",
 ]

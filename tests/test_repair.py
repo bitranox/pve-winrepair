@@ -58,7 +58,7 @@ from guest_fakes import (
 )
 from pydantic import ValidationError
 
-from pve_winrepair.adapters.media import LocalMedia
+from pve_winrepair.adapters.media import LocalMedia, NodeMedia
 from pve_winrepair.adapters.receipts import FileReceiptStore
 from pve_winrepair.application import repair
 from pve_winrepair.application.repair import RepairError, RepairRequest, run_repair
@@ -667,23 +667,34 @@ def test_stage_media_copies_every_media_entry_into_the_root(tmp_path: Path) -> N
 def test_stage_media_transfer_timeout_refuses_as_a_failed_transfer(tmp_path: Path) -> None:
     (tmp_path / "setup.exe").write_bytes(b"MZ")
     runner = FakeRunner().on("scp", subprocess.TimeoutExpired(["scp"], 5400))
-    with pytest.raises(RepairError, match="media transfer failed rc=255"):
+    with pytest.raises(RepairError, match=r"^media transfer failed: media transfer: timed out after 5400 s"):
         repair.stage_media(
             make_guest(runner), Report(vmid=1), DriveLetter.DRIVE_D, media=LocalMedia(tmp_path), timeout_minutes=90
         )
 
 
-def test_stage_media_failed_copy_refuses(tmp_path: Path) -> None:
+def test_stage_media_failed_copy_refuses_without_the_timeout_hint(tmp_path: Path) -> None:
+    # Only a copy that ran out of time points at stage_timeout_minutes; a full disk is no such case.
     (tmp_path / "setup.exe").write_bytes(b"MZ")
     runner = FakeRunner().on("scp", Reply(1, "", "No space left"))
-    with pytest.raises(RepairError, match="media transfer failed"):
+    with pytest.raises(RepairError, match=r"^media transfer failed rc=1: No space left$"):
         repair.stage_media(
             make_guest(runner), Report(vmid=1), DriveLetter.DRIVE_D, media=LocalMedia(tmp_path), timeout_minutes=90
         )
+
+
+def test_a_node_copy_refused_for_want_of_a_guest_host_key_carries_no_timeout_hint(tmp_path: Path) -> None:
+    runner = FakeRunner().on("ssh-keygen", Reply(1))
+    ssh = SshSettings(key="/keys/guest.key", user=USER, known_hosts_file="/kh")
+    media = NodeMedia("/var/lib/vz/media", NODE_LINK, ssh, runner)
+    with pytest.raises(RepairError) as caught:
+        repair.stage_media(make_guest(runner), Report(vmid=1), DriveLetter.DRIVE_D, media=media, timeout_minutes=90)
+    assert str(caught.value).startswith(f"media transfer failed rc=255: no host key for guest {GUEST_IP} in /kh")
+    assert "stage_timeout_minutes" not in str(caught.value)
 
 
 def test_the_media_copy_times_out_after_the_configured_minutes(tmp_path: Path) -> None:
-    runner = FakeRunner().on("scp", Reply(255, "", "media transfer: timed out after 600 s"))
+    runner = FakeRunner().on("scp", subprocess.TimeoutExpired(["scp"], 600))
     with pytest.raises(RepairError, match=r"\[repair\] stage_timeout_minutes = 10"):
         repair.stage_media(
             make_guest(runner),
