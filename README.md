@@ -344,12 +344,12 @@ Both commands print each step on stderr as it happens. stdout carries only the r
 
 Exit codes of `repair` and `apply`:
 
-| Code | Meaning                                                                                              |
-|------|------------------------------------------------------------------------------------------------------|
-| 0    | `repair`: STATE=DONE-OK or STAGED; `apply`: VERIFIED                                                 |
-| 1    | Refused: a check said no, or the run ended STATE=DONE-FAIL, WORKER_GONE or TIMEOUT                   |
-| 2    | Internal error (the node and the guest tool disagree); also a usage error on the command line        |
-| 78   | The configuration does not load or a setting is invalid; one `Error: <section>.<key>: ...` line each |
+| Code | Meaning                                                                                                                                            |
+|------|----------------------------------------------------------------------------------------------------------------------------------------------------|
+| 0    | `repair`: STATE=DONE-OK or STAGED; `apply`: VERIFIED                                                                                               |
+| 1    | Refused: a check said no, or the run ended STATE=DONE-FAIL, WORKER_GONE or TIMEOUT                                                                 |
+| 2    | Internal error (the node and the guest tool disagree); also a usage error on the command line                                                      |
+| 78   | The configuration does not load, a setting is invalid or a section unknown; one `Error: <section>.<key>: ...` or `Error: <section>: ...` line each |
 
 The `config` commands have their own codes (22 for an unknown `--section`, 13 when `config-deploy`
 may not write); [CONFIG.md](CONFIG.md) has them.

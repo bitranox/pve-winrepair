@@ -37,7 +37,7 @@ moves or removes a module, a CLI option or a public name.
 - `src/pve_winrepair/adapters/config/deploy.py`  -  Configuration deployment: stages the bundled defaults in a temporary directory with `20-winrepair.toml` commented out (`DOCUMENTATION_ONLY`, `commented_settings`) and hands that copy to lib_layered_config's `deploy_config`
 - `src/pve_winrepair/adapters/config/display.py`  -  Configuration display (TOML/JSON output, redaction)
 - `src/pve_winrepair/adapters/config/overrides.py`  -  CLI `--set` override parsing and deep-merge
-- `src/pve_winrepair/adapters/config/settings.py`  -  `load_settings` validates the `[ssh] [guest] [repair] [node]` sections into `Settings`; `SettingsError` carries one `<section>.<field>: <reason>` line per problem
+- `src/pve_winrepair/adapters/config/settings.py`  -  `load_settings` validates the `[ssh] [guest] [repair] [node]` sections into `Settings`; `SettingsError` carries one `<section>.<field>: <reason>` line per refused value and one `<section>: <reason>` line per top-level section (a table or an array of tables) nothing reads
 - `src/pve_winrepair/adapters/guest_ssh.py`  -  The guest tool over ssh: `Guest` checks the ssh user's profile, pushes the packed tool to its content address (`push_tool`) or stages a verified profile copy (`stage_tool`), runs one subcommand (`ask`) and hands the answer to `parse_answer`; `ssh_options` turns `SshSettings` into ssh's `-o` options; `TOOL_DIR` is the packed tool shipped in `adapters/guest_tool/`
 - `src/pve_winrepair/adapters/guest_tool/winrepair_guest.ps1`  -  The packed guest tool, a committed artefact (`make custom pack` writes it)
 - `src/pve_winrepair/adapters/node.py`  -  `Node`, the PVE node a run uses: one runner for `qm` and every guest, the clock and sleep, `qm config`, `qm listsnapshot` and `qm snapshot` parsed where they answer; with a `NodeLink` it is a remote node, `qm` runs there over ssh and every guest call is jumped through it, and `check_link` proves it usable in one round trip (`command -v qm`: it answers, accepts the key and host key, has `qm`), else names why in ssh's own words; `media` is a run's media (`NodeMedia` on a linked node when they come from the node, else `LocalMedia`); `run` is the production runner
@@ -50,7 +50,7 @@ moves or removes a module, a CLI option or a public name.
   - `safe_console.py`  -  Encode-safe terminal output; use `safe_console.echo` instead of `click.echo`
   - `exit_codes.py`  -  POSIX exit codes (ExitCode IntEnum)
   - `context.py`  -  Click context helpers (`CLIContext`) and the traceback preference state
-  - `config_load.py`  -  Configuration load for the CLI; records a load failure, `require_config` refuses with exit 78, `require_settings` refuses a refused `[ssh] [guest] [repair] [node]` value with exit 78 (for `repair`, `apply` and `config`), `check_logging` checks the logging settings of a configuration reloaded by `config --profile`, refusing them as the root does
+  - `config_load.py`  -  Configuration load for the CLI; records a load failure, `require_config` refuses with exit 78, `require_settings` refuses a refused `[ssh] [guest] [repair] [node]` value, or a top-level section nothing reads, with exit 78 (for `repair`, `apply` and `config`), `check_logging` checks the logging settings of a configuration reloaded by `config --profile`, refusing them as the root does
   - `root.py`  -  Root command group
   - `main.py`  -  Entry point
   - `param_types.py`  -  Click parameter types of the run options: `PositiveFiniteFloat` (`--hours`, `--apply-minutes`), `StorageId` (`--tpm-storage`), `NodeHost` (`--node`, held to `[node] host`'s rule, empty refused), `Ipv4Address` (`--ip`, an `IPv4Address`), `WindowsDrive` (`--stage-root`, a `DriveLetter`)
@@ -402,14 +402,15 @@ because lib_layered_config reads an unquoted digit-only `.env` or environment va
 `adapters/config/settings.py` `load_settings(config)` validates the four sections of a loaded
 `Config` (an absent section takes its defaults) and raises `SettingsError(ValueError)` with one
 `<section>.<field>: <reason>` line per problem, never echoing the refused value. A top-level section
-(a table; a top-level scalar, such as a `.env` line without `__`, is left alone) outside those four (`SECTIONS`) and the two the libraries read (`LIBRARY_SECTIONS`: `lib_log_rich`,
-`lib_layered_config`) gets a `<section>: not a section pve-winrepair reads (...)` line in the same
-error, ahead of the field lines; for `pve_winrepair`, the section a `.env` line written with the
-environment prefix lands in, the line adds that `.env` lines take `SECTION__KEY`. The shipped defaults
-are `adapters/config/defaultconfig.d/20-winrepair.toml` (the defaults layer, keys active; the copy
-`config-deploy` writes has them commented out); an empty `ssh.key`, `repair.media_dir` or
-`repair.local_media_dir` loads and means "not configured". Override one key per run with
-`PVE_WINREPAIR___<SECTION>__<KEY>`, e.g. `PVE_WINREPAIR___SSH__KEY=<path>`.
+(a table or an array of tables; a top-level scalar, such as a `.env` line without `__`, is left
+alone) outside those four (`SECTIONS`) and the two the libraries read (`LIBRARY_SECTIONS`:
+`lib_log_rich`, `lib_layered_config`) gets a `<section>: not a section pve-winrepair reads (...)`
+line in the same error, ahead of the field lines; for `pve_winrepair`, the section a `.env` line
+written with the environment prefix lands in, the line adds that `.env` lines take `SECTION__KEY`.
+The shipped defaults are `adapters/config/defaultconfig.d/20-winrepair.toml` (the defaults layer,
+keys active; the copy `config-deploy` writes has them commented out); an empty `ssh.key`,
+`repair.media_dir` or `repair.local_media_dir` loads and means "not configured". Override one key
+per run with `PVE_WINREPAIR___<SECTION>__<KEY>`, e.g. `PVE_WINREPAIR___SSH__KEY=<path>`.
 
 ### `[ssh]`  -  `SshSettings`
 

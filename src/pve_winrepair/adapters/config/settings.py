@@ -5,18 +5,18 @@
 one ``<section>.<field>: <reason>`` line per problem, built from pydantic's structured errors and
 never from ``str(ValidationError)``, which repeats the refused input (a key path may hold a secret).
 
-A top-level section (a table) that neither the settings nor the libraries read is refused too, one
-``<section>: not a section pve-winrepair reads (...)`` line each, in the same error: a misspelt
-section would otherwise be skipped as silently as a misspelt key used to be. The usual source is a
-``.env`` line written with the environment prefix, which lands in a section of that name. A
-top-level key that is not a table is no section and is left alone: a ``.env`` line without a
-``__`` separator, such as lib_log_rich's own ``LOG_CONSOLE_LEVEL``, arrives that way.
+A top-level section (a table, or an array of tables) that neither the settings nor the libraries
+read is refused too, one ``<section>: not a section pve-winrepair reads (...)`` line each, in the
+same error: a misspelt section would otherwise be skipped as silently as a misspelt key used to be.
+The usual source is a ``.env`` line written with the environment prefix, which lands in a section of
+that name. A top-level key that is not a table is no section and is left alone: a ``.env`` line
+without a ``__`` separator, such as lib_log_rich's own ``LOG_CONSOLE_LEVEL``, arrives that way.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, cast
 
 from lib_layered_config import default_env_prefix
 from pydantic import ValidationError
@@ -85,9 +85,7 @@ def load_settings(config: Config) -> Settings:
     """
     data = config.as_dict()
     unknown = tuple(
-        _unknown_section_line(name)
-        for name, value in data.items()
-        if isinstance(value, Mapping) and name not in _READ_SECTIONS
+        _unknown_section_line(name) for name, value in data.items() if _is_table(value) and name not in _READ_SECTIONS
     )
     try:
         settings = Settings.model_validate({name: data.get(name, {}) for name in SECTIONS})
@@ -96,6 +94,25 @@ def load_settings(config: Config) -> Settings:
     if unknown:
         raise SettingsError(unknown)
     return settings
+
+
+def _is_table(value: object) -> bool:
+    """A TOML table (``[name]``) or array of tables (``[[name]]``); a scalar or plain list is no section.
+
+    A misspelt ``[[repiar]]`` arrives as a list of tables, and would otherwise pass as silently as a
+    misspelt ``[repiar]`` used to.
+
+    Example:
+        >>> _is_table({}), _is_table([{"k": 1}]), _is_table(["a"]), _is_table([]), _is_table("x")
+        (True, True, False, False, False)
+    """
+    if isinstance(value, Mapping):
+        return True
+    if not isinstance(value, list):
+        return False
+    # The parsed TOML holds only plain values, so a list's items are objects to inspect, nothing more.
+    items = cast("list[object]", value)
+    return bool(items) and all(isinstance(item, Mapping) for item in items)
 
 
 def _unknown_section_line(name: str) -> str:

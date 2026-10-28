@@ -98,9 +98,11 @@ class PreflightError(Exception):
 
 
 def load_run_settings(ctx: click.Context, cli_ctx: CLIContext) -> Settings:
-    """The node CLI settings, or exit 78 with one ``Error: <section>.<field>: <reason>`` line per problem.
+    """The node CLI settings, or exit 78 with one ``Error:`` line per problem.
 
-    A configuration that did not load at all exits 78 the same way, through ``require_config``.
+    A refused value gets ``Error: <section>.<field>: <reason>``, a top-level section nothing reads
+    ``Error: <section>: <reason>``. A configuration that did not load at all exits 78 the same way,
+    through ``require_config``.
     """
     return require_settings(ctx, cli_ctx, require_config(ctx, cli_ctx))
 

@@ -78,12 +78,12 @@ Match Group administrators
 The group name in that block is written in English and still applies on a localised Windows, where
 the group itself is called something else. Keep the block as it is.
 
-Add the public key (the `.pub` file next to the private key in `[ssh] key`, one line that
-starts with `ssh-ed25519` or `ssh-rsa`) to `C:\ProgramData\ssh\administrators_authorized_keys`,
-one key per line. If the file already exists, its last line must end with a line break, or the new
-key is glued onto that line and both keys break (some editors save a file whose last line has no
-line break); read it back afterwards with `Get-Content $keys` and look for one key per line. Paste the whole line between
-the single quotes:
+Add the public key (the `.pub` file next to the private key in `[ssh] key`, one line that starts
+with `ssh-ed25519` or `ssh-rsa`) to `C:\ProgramData\ssh\administrators_authorized_keys`, one key per
+line. If the file already exists, its last line must end with a line break, or the new key is glued
+onto that line and both keys break (some editors save a file whose last line has no line break);
+read it back afterwards with `Get-Content $keys` and look for one key per line. Paste the whole line
+between the single quotes:
 
 ```powershell
 $keys = "$env:ProgramData\ssh\administrators_authorized_keys"

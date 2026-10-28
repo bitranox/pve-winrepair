@@ -377,8 +377,8 @@ vars), each value with the layer and file it came from.
 
 An unknown `--section` exits 22 (`Error: Section 'nope' not found`); a configuration that does not
 load exits 78, and so does an `[ssh]`, `[guest]`, `[repair]` or `[node]` value that `repair` and
-`apply` would refuse, with one `Error:` line each after the values are shown (whatever `--section`
-shows).
+`apply` would refuse, or a top-level section pve-winrepair does not read, with one `Error:` line each
+after the values are shown (whatever `--section` shows).
 
 #### Examples
 

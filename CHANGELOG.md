@@ -102,7 +102,8 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
     `""` and a leading `~` were refused before); the message now reads `must be an absolute path on
     this machine`.
   - A top-level section other than `[ssh]`, `[guest]`, `[repair]`, `[node]`, `[lib_log_rich]` and
-    `[lib_layered_config]`, from any layer: one `Error: <section>: not a section pve-winrepair reads
+    `[lib_layered_config]`, from any layer and written as a table (`[repiar]`) or an array of tables
+    (`[[repiar]]`): one `Error: <section>: not a section pve-winrepair reads
     (...)` line each, beside the lines for refused values, in `config`, `repair` and `apply`.
     1.0.0 ignored such a section, so a misspelt `[repiar]` was skipped without a word, and a `.env`
     line written with the environment prefix (`PVE_WINREPAIR___SSH__KEY=...`, which the loader

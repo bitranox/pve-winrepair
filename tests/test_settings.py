@@ -183,6 +183,23 @@ def test_an_unknown_section_is_refused_naming_the_sections_read(
 
 
 @pytest.mark.os_agnostic
+def test_an_unknown_section_written_as_an_array_of_tables_is_refused(
+    config_factory: Callable[[dict[str, Any]], Config],
+) -> None:
+    # The shape TOML's [[repiar]] takes: a list of tables, not a table.
+    text = _refusal(config_factory({"repiar": [{"snapshot_name": "x"}]}))
+
+    assert text == f"repiar: not a section pve-winrepair reads (it reads {', '.join(_OWNED_SECTIONS)})"
+
+
+@pytest.mark.os_agnostic
+def test_a_top_level_list_of_plain_values_is_not_a_section_and_loads(
+    config_factory: Callable[[dict[str, Any]], Config],
+) -> None:
+    assert load_settings(config_factory({"extra_hosts": ["a", "b"], "empty": []})) == Settings()
+
+
+@pytest.mark.os_agnostic
 def test_the_section_a_prefixed_dotenv_line_lands_in_is_refused_with_the_dotenv_hint(
     config_factory: Callable[[dict[str, Any]], Config],
 ) -> None:
@@ -775,6 +792,21 @@ def test_a_dotenv_line_naming_a_section_the_tool_does_not_read_exits_78(
     dotenv.write_text("REPIAR__SNAPSHOT_NAME=pre_repair_2\n", encoding="utf-8")
 
     exit_code = main(["--env-file", str(dotenv), "config", "--section", "repair"], services_factory=build_production)
+
+    errors = [line for line in capsys.readouterr().err.splitlines() if line.startswith("Error:")]
+    assert exit_code == 78
+    assert errors == [f"Error: repiar: not a section pve-winrepair reads (it reads {', '.join(_OWNED_SECTIONS)})"]
+
+
+@pytest.mark.os_linux
+def test_a_config_file_array_of_tables_naming_a_section_the_tool_does_not_read_exits_78(
+    isolated_layers: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    app_file = isolated_layers / "etc" / "pve-winrepair" / "config.toml"
+    app_file.parent.mkdir(parents=True)
+    app_file.write_text('[[repiar]]\nsnapshot_name = "pre_repair_2"\n', encoding="utf-8")
+
+    exit_code = main(["config", "--section", "repair"], services_factory=build_production)
 
     errors = [line for line in capsys.readouterr().err.splitlines() if line.startswith("Error:")]
     assert exit_code == 78
