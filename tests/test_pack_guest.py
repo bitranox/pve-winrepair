@@ -146,8 +146,14 @@ def test_a_missing_pwshpy_is_an_error_not_drift() -> None:
     # -S: no site-packages, so pwshpy cannot be imported - the state of a bare interpreter.
     artefact = PROJECT / pack_guest.ARTEFACT
     before = artefact.read_bytes()
-    argv = [sys.executable, "-S", str(PROJECT / "scripts" / "pack_guest.py"), "--check"]
-    proc = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8", check=False)  # noqa: S603 - fixed argv
+    proc = subprocess.run(
+        [sys.executable, "-S", "scripts/pack_guest.py", "--check"],
+        cwd=PROJECT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
     assert proc.returncode == 2, proc.stderr
     assert proc.stderr.startswith("pwshpy ")
     assert "Traceback" not in proc.stderr

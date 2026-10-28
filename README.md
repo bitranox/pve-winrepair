@@ -133,7 +133,19 @@ four packages exempted with `=false` come from the same author and are released 
 one: a new pve-winrepair can need a library release from the same day, which the cooldown would
 hold back.
 
-A persistent install works too (`uv tool install --exclude-newer "7 days" pve-winrepair`);
+A persistent install works too. It needs the same exemptions, or uv refuses a pve-winrepair
+release that is less than a week old:
+
+```bash
+uv tool install \
+    --exclude-newer "7 days" \
+    --exclude-newer-package pve-winrepair=false \
+    --exclude-newer-package lib-layered-config=false \
+    --exclude-newer-package lib-log-rich=false \
+    --exclude-newer-package lib-cli-exit-tools=false \
+    "pve-winrepair==1.0.0"
+```
+
 [INSTALL.md](INSTALL.md) lists the other ways.
 
 ## Quick start

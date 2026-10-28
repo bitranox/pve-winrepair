@@ -172,9 +172,11 @@ def run(cmd: Sequence[str], timeout: float) -> subprocess.CompletedProcess[str]:
     envelope line on stdout. The child's stdin is empty: no command this runner starts reads input,
     and an inherited stdin would let ssh swallow the rest of a list a shell loop feeds the tool.
     """
-    # An argv list, never a shell. Every word bound for the guest either passed check_argument or is
-    # a fixed string of this module (the certutil and powershell paths, the encoded profile probe).
-    return subprocess.run(  # noqa: S603 - argv list, no shell  # nosec B603
+    # An argv list, never a shell. This is the one place the tool starts a process (the node and media
+    # adapters run through it too), so its argv is computed by design and has no literal form. Every
+    # word bound for the guest either passed check_argument or is a fixed string of this module (the
+    # certutil and powershell paths, the encoded profile probe).
+    return subprocess.run(  # noqa: S603 - the tool's one process runner, argv list, no shell  # nosec B603
         list(cmd),
         stdin=subprocess.DEVNULL,
         capture_output=True,

@@ -242,8 +242,10 @@ def test_real_entry_reads_a_state_log_end_to_end(tmp_path: Path, marker: str) ->
 
     src = str(GUEST.parents[1])
     env = {**os.environ, "PYTHONPATH": os.pathsep.join(filter(None, (src, os.environ.get("PYTHONPATH"))))}
-    proc = subprocess.run(  # noqa: S603 - fixed argv: this interpreter running the guest entry on a test log
-        [sys.executable, str(GUEST), "state", "--log", str(log), "--json"],
+    # The entry runs as a module from the log's directory, so every word of the argv is a literal.
+    proc = subprocess.run(
+        [sys.executable, "-m", "pve_winrepair_guest.winrepair_guest", "state", "--log", "upgrade-state.log", "--json"],
+        cwd=tmp_path,
         capture_output=True,
         text=True,
         encoding="utf-8",

@@ -54,6 +54,7 @@ import io
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -384,7 +385,8 @@ def _git_run(project: Path, *args: str, stdin: bytes = b"") -> bytes:
     # another repository or another pathspec rule; LC_ALL=C keeps its output unlocalised.
     env = {k: v for k, v in os.environ.items() if not k.upper().startswith("GIT_")}
     env["LC_ALL"] = "C"
-    return subprocess.run(  # noqa: S603 - fixed argv: git, resolved by shutil.which, run on a given checkout
+    # Every caller names its own git subcommand, so this runner has no single literal argv.
+    return subprocess.run(  # noqa: S603 - git, resolved by shutil.which, with a caller's literal subcommand
         [_git(), "-C", str(project), *args],
         input=stdin,
         capture_output=True,
@@ -1019,10 +1021,11 @@ def _run_probe(repo: Path, tmp_path: Path, case: _LeakCase, options: Sequence[st
         TOKENS_VARIABLE: str(tmp_path / "tokens.json"),
         "PROBE_REPO": str(repo),
         "PROBE_TEXT": str(tmp_path / "packed.ps1"),
+        # What varies per case reaches pytest through PYTEST_ADDOPTS, so the argv stays a literal.
+        "PYTEST_ADDOPTS": shlex.join([*options, f"test_probe.py::{case.probe}"]),
     }
-    argv = [sys.executable, "-m", "pytest", "-c", str(tmp_path / "pytest.ini"), "-p", "no:cacheprovider", *options]
-    run = subprocess.run(  # noqa: S603 - fixed argv: this interpreter running pytest on a generated probe
-        [*argv, f"{tmp_path / 'test_probe.py'}::{case.probe}"],
+    run = subprocess.run(
+        [sys.executable, "-m", "pytest", "-c", "pytest.ini", "-p", "no:cacheprovider"],
         capture_output=True,
         env=env,
         cwd=tmp_path,

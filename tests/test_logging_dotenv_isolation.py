@@ -44,7 +44,9 @@ def _run(cwd: Path, *args: str, env: dict[str, str] | None = None) -> subprocess
     clean = {k: v for k, v in os.environ.items() if not k.startswith((PREFIX, "LOG_", "LIB_LAYERED_CONFIG"))}
     clean.update(dict.fromkeys(_HOMES, str(cwd)))
     clean.update(env or {})
-    return subprocess.run(  # noqa: S603 - fixed argv: this interpreter running this package
+    # Every test passes its own CLI arguments, so this runner has no single literal argv; the
+    # arguments are each caller's literals, and the subprocess keeps the .env loading in a fresh process.
+    return subprocess.run(  # noqa: S603 - this interpreter running this package with a test's own arguments
         [sys.executable, "-m", "pve_winrepair", *args],
         cwd=cwd,
         env=clean,

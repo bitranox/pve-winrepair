@@ -149,6 +149,9 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   `media transfer failed: timed out after 5400 s (...)` and
   `media transfer failed rc=255: could not run scp: <reason>`. Before, and in 1.0.0, the refusal
   named it twice (`media transfer failed rc=255: media transfer: timed out after 5400 s`).
+- The README's persistent install (`uv tool install --exclude-newer "7 days" ...`) carries the
+  same four `--exclude-newer-package ...=false` exemptions as the pinned wrapper. Before, it
+  exempted nothing, so uv refused any pve-winrepair release less than a week old.
 
 
 ## [1.0.0] 2026-10-23 22:06:16

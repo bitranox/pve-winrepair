@@ -229,13 +229,24 @@ class _ScpSaw(BaseModel):
     tmp: list[str]
 
 
-def _run_on_this_machine(words: list[str], env: dict[str, str]) -> subprocess.CompletedProcess[str]:
-    """Run the words a recorded node call hands the node's shell, here, under a real ``sh``."""
-    return subprocess.run(words, env=env, capture_output=True, text=True, encoding="utf-8", check=False)  # noqa: S603
+def _run_on_this_machine(command: str, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    """Run the command string a recorded ssh call hands the node, here, as the node's sshd does.
+
+    sshd runs the string with ``<shell> -c``, so it is parsed by a real shell, not by
+    ``shlex``. It reaches the shell through the environment, which keeps the argv a literal.
+    """
+    return subprocess.run(
+        ["/bin/sh", "-c", 'exec sh -c "$NODE_COMMAND"'],
+        env={**env, "NODE_COMMAND": command},
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
 
 
 def _run_the_node_script(tmp_path: Path, *, strict: bool, scp_exit: int) -> tuple[Path, Path, _ScpSaw]:
-    """Run the node-side copy's recorded words under a real ``sh`` with a recording scp first on PATH.
+    """Run the node-side copy's recorded command under a real ``sh`` with a recording scp first on PATH.
 
     Returns the media directory, the script's temp directory and what the scp saw.
     """
@@ -254,8 +265,6 @@ def _run_the_node_script(tmp_path: Path, *, strict: bool, scp_exit: int) -> tupl
     _node_media(runner, directory=str(media), strict=strict).copy_into(
         make_guest(runner), "D:\\upgrade\\", timeout=5400
     )
-    # Run exactly the words the node's shell would split back out of the recorded ssh call.
-    words = shlex.split(runner.calls[-1][-1])
     record = tmp_path / "record.json"
     env = {
         **os.environ,
@@ -264,7 +273,7 @@ def _run_the_node_script(tmp_path: Path, *, strict: bool, scp_exit: int) -> tupl
         "SCP_RECORD": str(record),
         "SCP_EXIT": str(scp_exit),
     }
-    done = _run_on_this_machine(words, env)
+    done = _run_on_this_machine(runner.calls[-1][-1], env)
     assert (done.returncode, done.stderr) == (scp_exit, "")
     return media, scratch, _ScpSaw.model_validate_json(record.read_text(encoding="utf-8"))
 
@@ -352,9 +361,8 @@ def test_the_node_check_passes_only_a_directory_holding_an_entry_the_copy_takes(
                 (media / name).write_bytes(b"x")
     runner = FakeRunner().on("ssh-add", Reply(0, "256 k\n")).on("sh", Reply(0))
     _node_media(runner, directory=str(media)).check()
-    words = shlex.split(runner.calls[-1][-1])
     env = {key: value for key, value in os.environ.items() if key != "SSH_AUTH_SOCK"}
     if agent:
         env["SSH_AUTH_SOCK"] = str(tmp_path / "agent.sock")
-    done = _run_on_this_machine(words, env)
+    done = _run_on_this_machine(runner.calls[-1][-1], env)
     assert (done.returncode, done.stderr) == (status, "")
