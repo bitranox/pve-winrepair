@@ -12,7 +12,7 @@ dependencies = [
     # At least 7.0.1: settings parse into enums, so an unknown console_theme is refused at load and a section
     # reports every invalid setting; validate_config (config --profile's check) refuses what init() does.
     # From 8.0.0 an unknown key in the section, or in its payload_limits table, is refused too.
-    "lib_log_rich>=8.0.1",
+    "lib_log_rich>=8.0.3",
     "python-dotenv>=1.2.4",
     "lib_layered_config>=7.3.0",
     "pydantic>=2.14.1",
@@ -86,7 +86,7 @@ dev = [
   "wheel>=0.48.0",               # CVE-2025-24049
   "pynacl>=1.6.2",               # CVE-2025-69277
   "urllib3>=2.8.0",              # CVE-2025-66471, CVE-2025-66418
-  "virtualenv>=21.14.11",        # CVE-2025-22702, CVE-2026-113722, CVE-2026-113713
+  "virtualenv>=21.14.12",        # CVE-2025-22702, CVE-2026-113722, CVE-2026-113713
   # No fixed filelock supports 3.10 (4.2.x needs >=3.11), so the 3.10 lane keeps 4.1.0.
   "filelock>=4.2.4; python_version >= '3.11'",  # CVE-2026-112906
   "certifi>=2026.10.19",         # PYSEC-2026-4320
