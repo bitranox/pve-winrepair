@@ -76,7 +76,9 @@ On the Proxmox VE node:
 - [uv](https://docs.astral.sh/uv/). It also fetches a Python 3.10 or newer when the node has none.
 - A directory with the installation media, unpacked as on the ISO: `setup.exe` and
   `sources\install.wim` at its top level. Use media of the guest's edition and language; setup keeps
-  the applications only then. The WIM gate refuses media older than the guest's build.
+  the applications only then. The WIM gate refuses media older than the guest's build. [Getting the
+  right installation media](docs/installation-media.md) shows how to read those from the guest,
+  where Microsoft publishes each edition, and what to do when the ISO is older than the guest.
 
 To drive the node from a workstation instead, see [From a workstation](#from-a-workstation): uv
 and the tool then run on the workstation, and the node needs an ssh login for the tool and, unless
@@ -597,6 +599,7 @@ More in [DEVELOPMENT.md](DEVELOPMENT.md) and the
 - [Configuration](CONFIG.md)
 - [Install guide](INSTALL.md)
 - [Preparing a Windows guest for SSH key access](docs/windows-guest-ssh.md)
+- [Getting the right installation media](docs/installation-media.md)
 - [Development handbook](DEVELOPMENT.md)
 - [Contributor guide](CONTRIBUTING.md)
 - [Changelog](CHANGELOG.md)

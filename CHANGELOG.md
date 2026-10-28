@@ -8,6 +8,10 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ### Added
 
+- `docs/installation-media.md`: how to pick installation media for a repair - reading the guest's
+  edition, install language and build over ssh, which Microsoft page or licensing portal offers
+  which edition, downloading, verifying and unpacking the ISO on the node, checking image 1 with
+  DISM before staging, and adding the current cumulative update to an ISO older than the guest.
 - `repair` and `apply` can run on a workstation (Linux, macOS or Windows) and drive a remote PVE
   node over ssh. `[node] host`, or `--node HOST` for one run, names the node; `--node ""` runs on
   this machine although `[node] host` is set. The tool logs in to the node as `[node] ssh_user`
