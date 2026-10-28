@@ -43,7 +43,7 @@ title = (
     "with an offline in-place repair upgrade driven from the node"
 )
 #: Current release version pulled from ``pyproject.toml`` by automation.
-version = "1.0.0"
+version = "2.0.0"
 #: Repository homepage presented to users.
 homepage = "https://github.com/bitranox/pve-winrepair"
 #: Author attribution surfaced in CLI output.

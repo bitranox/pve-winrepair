@@ -105,7 +105,7 @@ On the Windows guest (Windows 10 or 11):
 Run a fixed version with `uvx`, which installs nothing permanently on the node:
 
 ```bash
-uvx pve-winrepair@1.0.0 --version
+uvx pve-winrepair@2.0.0 --version
 ```
 
 For regular use, put a small wrapper on the node that pins the version and passes a supply-chain
@@ -115,7 +115,7 @@ cooldown, for example as `/usr/local/sbin/pve-winrepair`:
 #!/usr/bin/env bash
 # pve-winrepair, pinned. Upgrade by raising PVE_WINREPAIR_VERSION.
 set -euo pipefail
-readonly PVE_WINREPAIR_VERSION="1.0.0"
+readonly PVE_WINREPAIR_VERSION="2.0.0"
 exec uv tool run \
     --exclude-newer "7 days" \
     --exclude-newer-package pve-winrepair=false \
@@ -143,7 +143,7 @@ uv tool install \
     --exclude-newer-package lib-layered-config=false \
     --exclude-newer-package lib-log-rich=false \
     --exclude-newer-package lib-cli-exit-tools=false \
-    "pve-winrepair==1.0.0"
+    "pve-winrepair==2.0.0"
 ```
 
 [INSTALL.md](INSTALL.md) lists the other ways.

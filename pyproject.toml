@@ -1,6 +1,6 @@
 [project]
 name = "pve-winrepair"
-version = "1.0.0"
+version = "2.0.0"
 description = "Repair Windows guests on Proxmox VE whose cumulative updates fail, with an offline in-place repair upgrade driven from the node"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -12,7 +12,7 @@ dependencies = [
     # At least 7.0.1: settings parse into enums, so an unknown console_theme is refused at load and a section
     # reports every invalid setting; validate_config (config --profile's check) refuses what init() does.
     # From 8.0.0 an unknown key in the section, or in its payload_limits table, is refused too.
-    "lib_log_rich>=8.0.3",
+    "lib_log_rich>=8.1.1",
     "python-dotenv>=1.2.4",
     "lib_layered_config>=7.3.0",
     "pydantic>=2.14.1",
@@ -300,17 +300,6 @@ layers = [
 name = "Guest tool is independent"
 type = "independence"
 modules = ["pve_winrepair", "pve_winrepair_guest"]
-
-[tool.pip-audit]
-# Known vulnerabilities to ignore (environment-level packages, not project dependencies)
-# PYSEC-2022-42969: py library ReDoS - py 1.11.0 is installed in the development
-#   environment but is not a dependency of this project; no fix available.
-ignore-vulns = [
-  "PYSEC-2022-42969",  # py 1.11.0 - ReDoS, env-only, no fix available
-  "CVE-2025-8869",     # pip 24.3.1 - env-only, not a project dependency
-  "CVE-2026-1703",     # pip 24.3.1 - env-only, not a project dependency
-  "CVE-2026-25990",    # pillow 12.0.0 - env-only, fix in 12.1.1
-]
 
 [tool.bashate]
 # bashate style settings for .sh files (E003 excluded: indent handled by shfmt)
