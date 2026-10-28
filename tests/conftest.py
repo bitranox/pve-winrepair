@@ -295,8 +295,8 @@ def isolated_layers(monkeypatch: pytest.MonkeyPatch, user_layer_in_tmp_path: Pat
 def clear_config_cache() -> Iterator[None]:
     """Clear the get_config lru_cache before each test.
 
-    Note: Only clears before, not after, to avoid errors when the function
-    has been monkeypatched during the test (losing cache_clear method).
+    A test that needs a fresh load after it changed a file calls ``get_config.cache_clear()``
+    itself.
 
     Yields:
         None: Test runs with cleared config cache.

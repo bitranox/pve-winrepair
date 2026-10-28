@@ -802,9 +802,7 @@ def test_when_config_generate_examples_creates_multiple_files_it_lists_all(
 @pytest.mark.os_agnostic
 def test_when_config_subcommand_profile_reloads_it_preserves_root_set_overrides(
     cli_runner: CliRunner,
-    config_factory: Callable[[dict[str, Any]], Config],
-    monkeypatch: pytest.MonkeyPatch,
-    clear_config_cache: None,
+    isolated_layers: Path,
     production_factory: Callable[[], Any],
 ) -> None:
     """Root --set overrides must be reapplied when config --profile reloads config.
@@ -812,31 +810,35 @@ def test_when_config_subcommand_profile_reloads_it_preserves_root_set_overrides(
     When a user invokes:
         cli --set section.key=override config --profile test
 
-    The subcommand-level profile triggers a config reload. The root-level
-    --set overrides must be reapplied to the new config.
+    The subcommand-level profile triggers a config reload from the profile's own files. The
+    root-level --set overrides must be reapplied to the new config.
     """
-    base_config = config_factory({"repair": {"snapshot_name": "original"}})
+    deploy: Result = cli_runner.invoke(
+        cli_mod.cli, ["config-deploy", "--target", "user", "--profile", "test", "--force"], obj=production_factory
+    )
+    written = [Path(line.removeprefix("  + ")) for line in deploy.output.splitlines() if line.startswith("  + ")]
+    profile_file = next(path for path in written if path.name == "config.toml")
+    assert profile_file.resolve().is_relative_to(isolated_layers.resolve())
+    profile_file.write_text('[repair]\nsnapshot_name = "original"\n', encoding="utf-8")
+    config_mod.get_config.cache_clear()
 
-    # get_config is called twice: first in root.py, second in config.py (profile reload)
-    call_count = {"value": 0}
+    # Arm A, the control: without --set the profile file decides, so a reload that read nothing
+    # cannot pass arm B.
+    plain: Result = cli_runner.invoke(
+        cli_mod.cli, ["config", "--profile", "test", "--format", "json"], obj=production_factory
+    )
+    assert plain.exit_code == 0, plain.output
+    assert '"original"' in plain.stdout
 
-    def mock_get_config(*, profile: str | None = None, **_kwargs: Any) -> Config:
-        call_count["value"] += 1
-        return base_config
-
-    monkeypatch.setattr(config_mod, "get_config", mock_get_config)
-
-    result: Result = cli_runner.invoke(
+    overridden: Result = cli_runner.invoke(
         cli_mod.cli,
         ["--set", "repair.snapshot_name=overridden", "config", "--profile", "test", "--format", "json"],
         obj=production_factory,
     )
 
-    assert result.exit_code == 0
-    # Override was applied (verify in output)
-    assert "overridden" in result.stdout
-    # Original value should not appear
-    assert '"original"' not in result.stdout
+    assert overridden.exit_code == 0, overridden.output
+    assert "overridden" in overridden.stdout
+    assert '"original"' not in overridden.stdout
 
 
 @pytest.mark.os_agnostic

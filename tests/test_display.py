@@ -8,15 +8,11 @@ in lib_layered_config's test suite.
 from __future__ import annotations
 
 import json
-import os
-import subprocess
-import sys
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 from lib_layered_config import Config
 
-from pve_winrepair import __init__conf__
 from pve_winrepair.adapters.cli.main import main
 from pve_winrepair.adapters.config.display import display_config
 from pve_winrepair.composition import build_production
@@ -134,34 +130,23 @@ def test_display_config_json_displays_section_with_falsey_values(capsys: pytest.
 
 # ======================== config: what is redacted ========================
 
-_PREFIX = __init__conf__.LAYEREDCONF_SLUG.upper().replace("-", "_")
-_HOMES = ("HOME", "USERPROFILE", "XDG_CONFIG_HOME", "APPDATA", "LOCALAPPDATA")
 
-
-def _config_json(tmp_path: Path, *options: str, unknown_section: str | None = None) -> dict[str, Any]:
-    """Run the real ``config --format json`` with every configuration location under ``tmp_path``.
+def _config_json(
+    capsys: pytest.CaptureFixture[str], *options: str, unknown_section: str | None = None
+) -> dict[str, Any]:
+    """Run the real ``config --format json``; the caller's ``isolated_layers`` keeps every layer in ``tmp_path``.
 
     ``unknown_section`` names a section the options add that the tool does not read: ``config``
     still shows it, then exits 78 naming it.
     """
-    env = {k: v for k, v in os.environ.items() if not k.startswith((_PREFIX, "LOG_", "LIB_LAYERED_CONFIG"))}
-    env.update(dict.fromkeys(_HOMES, str(tmp_path)))
-    completed = subprocess.run(  # noqa: S603 - fixed argv: this interpreter running this package
-        [sys.executable, "-m", "pve_winrepair", *options, "config", "--format", "json"],
-        cwd=tmp_path,
-        env=env,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        check=False,
-    )
+    exit_code = main([*options, "config", "--format", "json"], services_factory=build_production)
+    captured = capsys.readouterr()
     if unknown_section is None:
-        assert completed.returncode == 0, completed.stderr
+        assert exit_code == 0, captured.err
     else:
-        assert completed.returncode == 78, completed.stderr
-        assert f"Error: {unknown_section}: not a section pve-winrepair reads (" in completed.stderr
-    return cast("dict[str, Any]", json.loads(completed.stdout))
+        assert exit_code == 78, captured.err
+        assert f"Error: {unknown_section}: not a section pve-winrepair reads (" in captured.err
+    return cast("dict[str, Any]", json.loads(captured.out))
 
 
 def _value(shown: dict[str, Any], dotted: str) -> object:
@@ -176,10 +161,10 @@ def _value(shown: dict[str, Any], dotted: str) -> object:
     "options", [(), ("--set", "lib_log_rich.payload_limits.context_max_keys=30")], ids=["loaded", "with-set"]
 )
 def test_config_shows_the_logging_key_counts_and_still_redacts_the_password(
-    tmp_path: Path, options: tuple[str, ...]
+    isolated_layers: Path, capsys: pytest.CaptureFixture[str], options: tuple[str, ...]
 ) -> None:
     """``*_max_keys`` are counts whose names only look secret; a password stays hidden."""
-    shown = _config_json(tmp_path, "--set", "remote.password=hunter2", *options, unknown_section="remote")
+    shown = _config_json(capsys, "--set", "remote.password=hunter2", *options, unknown_section="remote")
 
     assert _value(shown, "lib_log_rich.payload_limits.context_max_keys") == (30 if options else 20)
     assert _value(shown, "lib_log_rich.payload_limits.extra_max_keys") == 25
@@ -188,9 +173,11 @@ def test_config_shows_the_logging_key_counts_and_still_redacts_the_password(
 
 @pytest.mark.os_agnostic
 @pytest.mark.parametrize("field", ["password", "secret", "token"])
-def test_config_shows_the_shipped_scrub_patterns_but_hides_an_added_one(tmp_path: Path, field: str) -> None:
+def test_config_shows_the_shipped_scrub_patterns_but_hides_an_added_one(
+    isolated_layers: Path, capsys: pytest.CaptureFixture[str], field: str
+) -> None:
     """A scrub pattern is a regex naming what to hide; only an application-added field stays redacted."""
-    shown = _config_json(tmp_path, "--set", "lib_log_rich.scrub_patterns.api_key=.+")
+    shown = _config_json(capsys, "--set", "lib_log_rich.scrub_patterns.api_key=.+")
 
     assert _value(shown, f"lib_log_rich.scrub_patterns.{field}") == ".+"
     assert _value(shown, "lib_log_rich.scrub_patterns.api_key") == "***REDACTED***"
