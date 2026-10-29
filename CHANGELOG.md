@@ -16,7 +16,7 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   for a host substring, which CodeQL flagged as `py/incomplete-url-substring-sanitization` and
   which also passed on a wrong host such as `xhost.test.com:220`.
 
-## [3.0.0] 2026-10-29 14:02:51
+## [3.0.0] - 2026-10-29
 
 A major release because Python 3.10 is no longer supported, and because code that imports the
 package sees a different `str()` for its enums. The command line, the configuration and the
@@ -37,7 +37,7 @@ receipts are unchanged. On 3.10, pip and uv keep installing 2.0.0.
   for 3.10 goes with it, and so does its pinned filelock 4.1.0, which carried open advisories
   that no 3.10-compatible release fixes.
 
-## [2.0.0] 2026-10-28 23:38:06
+## [2.0.0] - 2026-10-28
 
 A major release because a configuration 1.0.0 ran with can now stop with exit 78 before any call:
 an unknown top-level section, and the other new load-time refusals listed under Changed. On
@@ -194,7 +194,7 @@ after upgrading: it names every refused setting and section.
   exempted nothing, so uv refused any pve-winrepair release less than a week old.
 
 
-## [1.0.0] 2026-10-23 22:06:16
+## [1.0.0] - 2026-10-23
 
 The first public release, 1.0.0. The tool was developed in a private repository before it; that
 history is not published, so this changelog starts here.
