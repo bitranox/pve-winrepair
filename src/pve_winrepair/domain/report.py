@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from enum import Enum, IntEnum
+from enum import IntEnum, StrEnum
 from typing import TYPE_CHECKING, Final, TypeAlias
 
 from pydantic import BaseModel, ConfigDict, JsonValue, model_serializer, model_validator
@@ -33,7 +33,7 @@ else:
     StepValue = JsonValue
 
 
-class StepName(str, Enum):
+class StepName(StrEnum):
     """Every step a repair or apply run records; the value is the ``step`` of the envelope."""
 
     BUILD_AFTER = "build_after"
@@ -69,7 +69,7 @@ class StepName(str, Enum):
     WINREPAIR_LOCK = "winrepair_lock"
 
 
-class RunVerdict(str, Enum):
+class RunVerdict(StrEnum):
     """How a repair or apply run ended: the envelope's ``verdict`` and the ``vm <vmid>: <verdict>`` line.
 
     One vocabulary for both commands: ``ERROR`` and ``INTERNAL`` end either, and a refusal before

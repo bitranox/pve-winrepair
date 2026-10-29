@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import shlex
 import subprocess
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from ipaddress import IPv4Address, IPv4Network
 from typing import TYPE_CHECKING, Any
 
@@ -1309,7 +1309,7 @@ OLD_RECEIPT = RepairReceipt(
     image_spbuild=7462,
     build_before=BuildPair(build=26100, ubr=1),
     install_date_before=1,
-    written_at=datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc),
+    written_at=datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC),
 )
 
 
@@ -1352,7 +1352,7 @@ def test_repair_writes_the_receipt_after_prepare_and_before_launch(tmp_path: Pat
     labels = call_labels(runner.calls)
     assert len(store.calls_at_write) == 2  # the seeding write, then the run's own
     assert labels.index("guest prepare") < store.calls_at_write[1] <= labels.index("guest launch")
-    written_at = datetime.fromtimestamp(store.time_at_write[1], tz=timezone.utc)
+    written_at = datetime.fromtimestamp(store.time_at_write[1], tz=UTC)
     assert store.read(1) == RepairReceipt(
         vmid=1,
         image_build=IMAGE.build,

@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Mapping
-from enum import Enum, IntEnum
+from enum import IntEnum, StrEnum
 from typing import TYPE_CHECKING, Protocol
 
 from pwshpy import (
@@ -103,7 +103,7 @@ _WHERE = " OR ".join(f"Name='{name}'" for name in TARGETS)
 # --- port and adapter -----------------------------------------------------------------------
 
 
-class SearchStatus(str, Enum):
+class SearchStatus(StrEnum):
     """How the bounded Windows Update search ended."""
 
     OK = "OK"
@@ -242,7 +242,7 @@ def search_probe(search: Callable[[], Iterable[WindowsUpdate]], *, timeout: floa
 # --- service state and verdicts -------------------------------------------------------------
 
 
-class StartMode(str, Enum):
+class StartMode(StrEnum):
     """Win32_Service.StartMode, English in every locale."""
 
     BOOT = "Boot"
@@ -254,7 +254,7 @@ class StartMode(str, Enum):
     NOT_REPORTED = "None"
 
 
-class WmiServiceState(str, Enum):
+class WmiServiceState(StrEnum):
     """Win32_Service.State, English in every locale (spelt apart, unlike Get-Service's ServiceState)."""
 
     STOPPED = "Stopped"
@@ -277,7 +277,7 @@ class ServiceRow(Report):
     state: WmiServiceState
 
 
-class WriteResult(str, Enum):
+class WriteResult(StrEnum):
     """How one registry Start write ended."""
 
     WRITTEN = "WRITTEN"
@@ -351,7 +351,7 @@ def read_services(host: WuHost) -> tuple[ServiceRow, ...]:
     return tuple(rows[name] for name in TARGETS if name in rows)
 
 
-class QuiesceVerdict(str, Enum):
+class QuiesceVerdict(StrEnum):
     """quiesce-wu's verdict."""
 
     OK = "OK"
@@ -360,7 +360,7 @@ class QuiesceVerdict(str, Enum):
     UNKNOWN = "UNKNOWN"
 
 
-class RestoreVerdict(str, Enum):
+class RestoreVerdict(StrEnum):
     """restore-wu's verdict."""
 
     RESTORED = "RESTORED"

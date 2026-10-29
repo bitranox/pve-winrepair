@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import os
 import stat
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import pytest
@@ -23,7 +23,7 @@ from pve_winrepair.domain.receipt import BuildPair, GuestBuild, RepairReceipt
 if TYPE_CHECKING:
     from pathlib import Path
 
-WRITTEN_AT = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
+WRITTEN_AT = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
 
 
 def _receipt(vmid: int = 1, spbuild: int = 8973) -> RepairReceipt:

@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import json
 import stat
-from enum import Enum
+from enum import StrEnum
 from typing import TYPE_CHECKING, NoReturn
 
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
@@ -74,7 +74,7 @@ _JSON_INDENT = 2
 _SNAPSHOT_NAME: TypeAdapter[str] = TypeAdapter(SnapshotName)
 
 
-class RunCommand(str, Enum):
+class RunCommand(StrEnum):
     """The run command an envelope reports."""
 
     REPAIR = "repair"

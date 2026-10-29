@@ -39,8 +39,8 @@ import json
 import logging
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from enum import Enum
+from datetime import UTC, datetime
+from enum import StrEnum
 from ipaddress import IPv4Address, IPv6Address, ip_address
 from typing import TYPE_CHECKING, Annotated
 
@@ -131,7 +131,7 @@ class RepairRequest:
     media: MediaChoice = MediaChoice.NODE
 
 
-class _AgentAddressType(str, Enum):
+class _AgentAddressType(StrEnum):
     """An address family as the QEMU guest agent names it (its ``GuestIpAddressType``: these two only)."""
 
     IPV4 = "ipv4"
@@ -995,7 +995,7 @@ def repair_sequence(
         image_spbuild=image.spbuild,
         build_before=before.pair,
         install_date_before=before.install_date,
-        written_at=datetime.fromtimestamp(node.clock(), tz=timezone.utc),
+        written_at=datetime.fromtimestamp(node.clock(), tz=UTC),
     )
     record_receipt(receipts, receipt, rep)
     launch(target, rep, drive)

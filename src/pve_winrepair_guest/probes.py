@@ -24,7 +24,7 @@ import os
 import re
 import socket
 from collections.abc import Mapping
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
@@ -348,7 +348,7 @@ def _run_build(host: ProbeHost) -> Outcome:
 # --- detect-lp-defect -----------------------------------------------------------------------
 
 
-class LpVerdict(str, Enum):
+class LpVerdict(StrEnum):
     """detect-lp-defect's verdict."""
 
     AFFECTED = "AFFECTED"
@@ -679,7 +679,7 @@ class Container(Report):
     status: str = Field(default="", validation_alias="Status")
 
 
-class RunnerVerdict(str, Enum):
+class RunnerVerdict(StrEnum):
     """verify-runners' verdict."""
 
     OK = "OK"
@@ -884,7 +884,7 @@ def _run_setup_alive(host: ProbeHost) -> Outcome:
 # --- staged-os ------------------------------------------------------------------------------
 
 
-class StagedVerdict(str, Enum):
+class StagedVerdict(StrEnum):
     """staged-os' verdict: what a failed apply leaves to do."""
 
     # A rollback deleted the staged NewOS: setup must run again.
@@ -917,7 +917,7 @@ def staged_os(path: str | os.PathLike[str]) -> StagedOs:
 # --- state ----------------------------------------------------------------------------------
 
 
-class StateVerdict(str, Enum):
+class StateVerdict(StrEnum):
     """The completion verdict the upgrade run writes into its state log."""
 
     DONE_OK = "DONE-OK"

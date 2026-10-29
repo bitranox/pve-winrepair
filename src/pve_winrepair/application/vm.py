@@ -6,7 +6,7 @@ maps a :class:`VmStatusError` to its refusal.
 
 from __future__ import annotations
 
-from enum import Enum
+from enum import StrEnum
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 __all__ = ["UnknownVmStatusError", "VmStatus", "VmStatusError", "VmStatusTimeoutError", "vm_status", "wait_status"]
 
 
-class VmStatus(str, Enum):
+class VmStatus(StrEnum):
     """The VM's power state, the word ``qm status`` prints after ``status:``.
 
     Without ``--verbose`` PVE reports only whether the VM's QEMU process exists: ``running`` or

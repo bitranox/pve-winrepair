@@ -49,7 +49,7 @@ import re
 import stat
 import time
 from datetime import datetime, timedelta
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, TypeVar, cast
 
@@ -211,7 +211,7 @@ class _Internal(BaseModel):
 # --- port and adapter -----------------------------------------------------------------------
 
 
-class TreeWait(str, Enum):
+class TreeWait(StrEnum):
     """How the wait for setup.exe covered the processes it started."""
 
     # pwshpy's job object: the wait ends once the job holds no process.
@@ -574,7 +574,7 @@ def account_text(identity: CurrentIdentity) -> str:
 # --- prepare --------------------------------------------------------------------------------
 
 
-class PrepareGate(str, Enum):
+class PrepareGate(StrEnum):
     """prepare's WIM gate: the media may be applied, or they must not be."""
 
     PASSED = "PASS"
@@ -843,7 +843,7 @@ def run_prepare(host: UpgradeHost, args: PrepareArgs) -> Outcome:
 # --- launch ---------------------------------------------------------------------------------
 
 
-class LaunchWaitStatus(str, Enum):
+class LaunchWaitStatus(StrEnum):
     """How the bounded wait for the SYSTEM run to start setup ended."""
 
     # Its "launching" line appeared.
@@ -925,7 +925,7 @@ def task_spec(tool: str, stage_root: str, state_log: str, program: str) -> TaskS
     return TaskSpec(path=TASK_PATH, program=program, arguments=arguments)
 
 
-class TaskCleanupAction(str, Enum):
+class TaskCleanupAction(StrEnum):
     """What launch did to the SYSTEM task once it had its verdict (see :class:`TaskCleanup`)."""
 
     DISARM = "DISARM"
@@ -1034,7 +1034,7 @@ def _remove(host: UpgradeHost) -> TaskCleanup:
     )
 
 
-class LaunchVerdict(str, Enum):
+class LaunchVerdict(StrEnum):
     """launch's verdict (see :class:`LaunchReport`)."""
 
     OK = "OK"
@@ -1397,7 +1397,7 @@ def run_launch(host: UpgradeHost, args: LaunchArgs) -> Outcome:
 # --- lock-dirs ------------------------------------------------------------------------------
 
 
-class DirectoryAction(str, Enum):
+class DirectoryAction(StrEnum):
     """What lock-dirs did to one directory (see :class:`DirectoryLock`)."""
 
     CREATED = "CREATED"
@@ -1405,7 +1405,7 @@ class DirectoryAction(str, Enum):
     ABSENT = "ABSENT"
 
 
-class LockDirsVerdict(str, Enum):
+class LockDirsVerdict(StrEnum):
     """lock-dirs' verdict."""
 
     OK = "OK"

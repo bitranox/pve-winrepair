@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 
 __all__ = [
     "TRUSTED_WELL_KNOWN",
@@ -91,7 +91,7 @@ class SddlError(ValueError):
     """The descriptor text is malformed, or uses a form this parser does not support."""
 
 
-class AceKind(str, Enum):
+class AceKind(StrEnum):
     """How an ACE is judged: allow and deny are; every other kind (audit, object, callback) is OTHER."""
 
     ALLOW = "A"
@@ -99,7 +99,7 @@ class AceKind(str, Enum):
     OTHER = "other"
 
 
-class AceFlag(str, Enum):
+class AceFlag(StrEnum):
     """The two-letter ACE flags SDDL writes."""
 
     CONTAINER_INHERIT = "CI"

@@ -23,7 +23,7 @@ Contents:
 from __future__ import annotations
 
 from abc import abstractmethod
-from enum import Enum, IntEnum
+from enum import Enum, IntEnum, StrEnum
 from typing import NamedTuple
 
 from pydantic import BaseModel, ConfigDict, model_validator
@@ -86,7 +86,7 @@ __all__ = [
 ]
 
 
-class GuestCommand(str, Enum):
+class GuestCommand(StrEnum):
     """Every subcommand of the guest tool; the value is the name on its command line and in its envelope."""
 
     DETECT_LP_DEFECT = "detect-lp-defect"
@@ -109,7 +109,7 @@ class GuestCommand(str, Enum):
 # --- verdicts, statuses and actions -----------------------------------------------------------
 
 
-class StateVerdict(str, Enum):
+class StateVerdict(StrEnum):
     """How an upgrade run ended, from the last marker line of its state log.
 
     Example:
@@ -126,7 +126,7 @@ class StateVerdict(str, Enum):
         return f"STATE={self.value}"
 
 
-class LpVerdict(str, Enum):
+class LpVerdict(StrEnum):
     """detect-lp-defect: the orphaned language pack's verdict."""
 
     AFFECTED = "AFFECTED"
@@ -134,7 +134,7 @@ class LpVerdict(str, Enum):
     UNKNOWN = "UNKNOWN"
 
 
-class RunnerVerdict(str, Enum):
+class RunnerVerdict(StrEnum):
     """verify-runners: enough runner containers came back, too few, or the count is unknown."""
 
     OK = "OK"
@@ -142,14 +142,14 @@ class RunnerVerdict(str, Enum):
     UNKNOWN = "UNKNOWN"
 
 
-class StagedOsVerdict(str, Enum):
+class StagedOsVerdict(StrEnum):
     """staged-os: the staged NewOS is still there (REARMABLE) or a rollback deleted it (RERUN)."""
 
     REARMABLE = "REARMABLE"
     RERUN = "RERUN"
 
 
-class QuiesceVerdict(str, Enum):
+class QuiesceVerdict(StrEnum):
     """quiesce-wu: Windows Update held, not held, or no target service could be read."""
 
     OK = "OK"
@@ -157,7 +157,7 @@ class QuiesceVerdict(str, Enum):
     UNKNOWN = "UNKNOWN"
 
 
-class RestoreVerdict(str, Enum):
+class RestoreVerdict(StrEnum):
     """restore-wu: every start mode restored, some still Disabled, or no target service could be read."""
 
     RESTORED = "RESTORED"
@@ -165,7 +165,7 @@ class RestoreVerdict(str, Enum):
     UNKNOWN = "UNKNOWN"
 
 
-class StartMode(str, Enum):
+class StartMode(StrEnum):
     """A service's StartMode as WMI's Win32_Service reports it (English in every locale)."""
 
     BOOT = "Boot"
@@ -177,7 +177,7 @@ class StartMode(str, Enum):
     NOT_REPORTED = "None"
 
 
-class WmiServiceState(str, Enum):
+class WmiServiceState(StrEnum):
     """A service's State as WMI's Win32_Service reports it (English in every locale)."""
 
     STOPPED = "Stopped"
@@ -200,7 +200,7 @@ class ServiceStart(IntEnum):
     DISABLED = 4
 
 
-class StartWriteResult(str, Enum):
+class StartWriteResult(StrEnum):
     """One registry Start write: written, its key absent (nothing written), or refused."""
 
     WRITTEN = "WRITTEN"
@@ -208,7 +208,7 @@ class StartWriteResult(str, Enum):
     FAILED = "FAILED"
 
 
-class SearchStatus(str, Enum):
+class SearchStatus(StrEnum):
     """The bounded Windows Update search: finished, failed, or abandoned (not a verdict either way)."""
 
     OK = "OK"
@@ -216,20 +216,20 @@ class SearchStatus(str, Enum):
     TIMEOUT = "TIMEOUT"
 
 
-class PrepareGate(str, Enum):
+class PrepareGate(StrEnum):
     """prepare: the WIM gate passed or failed."""
 
     PASSED = "PASS"
     FAILED = "FAIL"
 
 
-class TreeWait(str, Enum):
+class TreeWait(StrEnum):
     """upgrade-run: how it waited for setup.exe's whole process tree to end."""
 
     JOB = "job"
 
 
-class LaunchWaitStatus(str, Enum):
+class LaunchWaitStatus(StrEnum):
     """launch: the run started setup, ended before it, or the wait timed out."""
 
     LAUNCHED = "LAUNCHED"
@@ -237,7 +237,7 @@ class LaunchWaitStatus(str, Enum):
     TIMEOUT = "TIMEOUT"
 
 
-class TaskCleanupAction(str, Enum):
+class TaskCleanupAction(StrEnum):
     """launch: what was done to the SYSTEM task once launch had its verdict."""
 
     DISARM = "DISARM"
@@ -245,7 +245,7 @@ class TaskCleanupAction(str, Enum):
     NONE = "NONE"
 
 
-class LaunchVerdict(str, Enum):
+class LaunchVerdict(StrEnum):
     """launch: setup runs, is already gone, never started, failed to start, or its task was left behind."""
 
     OK = "OK"
@@ -255,7 +255,7 @@ class LaunchVerdict(str, Enum):
     TASK_LEFT = "TASK_LEFT"
 
 
-class DirectoryAction(str, Enum):
+class DirectoryAction(StrEnum):
     """lock-dirs: what was done to one directory."""
 
     CREATED = "CREATED"
@@ -263,7 +263,7 @@ class DirectoryAction(str, Enum):
     ABSENT = "ABSENT"
 
 
-class LockDirsVerdict(str, Enum):
+class LockDirsVerdict(StrEnum):
     """lock-dirs: every directory locked (and the tool in place checked), or refused."""
 
     OK = "OK"

@@ -14,7 +14,7 @@ import json
 import os
 import sys
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import pytest
@@ -72,7 +72,7 @@ def _proc(name: str) -> ProcessInfo:
 
 
 # pwshpy reads a Task Scheduler time as the guest's local wall time and hands it over as aware UTC.
-LAST_RUN = datetime(2026, 10, 21, 10, 0, 0).astimezone(timezone.utc)
+LAST_RUN = datetime(2026, 10, 21, 10, 0, 0).astimezone(UTC)
 
 
 def _task(
@@ -182,7 +182,7 @@ def lp_host(**overrides: object) -> FakeHost:
 
 
 def test_lp_defect_matches_language_pack_absent_events_case_insensitively() -> None:
-    old, new = datetime(2026, 8, 1, tzinfo=timezone.utc), datetime(2026, 8, 12, 9, 30, tzinfo=timezone.utc)
+    old, new = datetime(2026, 8, 1, tzinfo=UTC), datetime(2026, 8, 12, 9, 30, tzinfo=UTC)
     host = lp_host(
         events=[
             _event(LP_MESSAGE, old),
@@ -210,7 +210,7 @@ def test_lp_defect_matches_language_pack_absent_events_case_insensitively() -> N
 
 
 def test_lp_defect_reads_only_the_newest_600_setup_events() -> None:
-    now = datetime(2026, 8, 12, tzinfo=timezone.utc)
+    now = datetime(2026, 8, 12, tzinfo=UTC)
     host = lp_host(events=[_event(f"noise {i}", now) for i in range(600)] + [_event(LP_MESSAGE, now)])
 
     _, envelope = _run(host, "detect-lp-defect")
@@ -221,7 +221,7 @@ def test_lp_defect_reads_only_the_newest_600_setup_events() -> None:
 
 
 def test_lp_defect_unreadable_setup_log_is_unknown_not_clean() -> None:
-    host = lp_host(events=[_event(LP_MESSAGE, datetime(2026, 8, 12, tzinfo=timezone.utc))], fail={"events"})
+    host = lp_host(events=[_event(LP_MESSAGE, datetime(2026, 8, 12, tzinfo=UTC))], fail={"events"})
 
     code, envelope = _run(host, "detect-lp-defect")
 
@@ -237,7 +237,7 @@ def test_lp_defect_unreadable_setup_log_is_unknown_not_clean() -> None:
 def test_lp_defect_unrendered_messages_are_unknown_not_clean() -> None:
     # pwshpy 1.5.0's get_win_event handed back None for messages it could not format; a probe
     # counting those as non-matches reported every guest CLEAN.
-    now = datetime(2026, 8, 12, tzinfo=timezone.utc)
+    now = datetime(2026, 8, 12, tzinfo=UTC)
     host = lp_host(events=[_event(None, now), _event("   ", now), _event(None, now)])
 
     code, envelope = _run(host, "detect-lp-defect")
@@ -251,7 +251,7 @@ def test_lp_defect_unrendered_messages_are_unknown_not_clean() -> None:
 
 
 def test_lp_defect_one_unrendered_message_among_non_matches_is_unknown() -> None:
-    now = datetime(2026, 8, 12, tzinfo=timezone.utc)
+    now = datetime(2026, 8, 12, tzinfo=UTC)
     host = lp_host(
         events=[_event("Package KB1 was successfully changed to the Installed state.", now)] * 5 + [_event(None, now)]
     )
@@ -264,7 +264,7 @@ def test_lp_defect_one_unrendered_message_among_non_matches_is_unknown() -> None
 
 
 def test_lp_defect_unrendered_beyond_the_600_window_does_not_count() -> None:
-    now = datetime(2026, 8, 12, tzinfo=timezone.utc)
+    now = datetime(2026, 8, 12, tzinfo=UTC)
     host = lp_host(events=[_event(f"noise {i}", now) for i in range(600)] + [_event(None, now)])
 
     code, envelope = _run(host, "detect-lp-defect")
@@ -290,7 +290,7 @@ def test_lp_defect_missing_nls_key_is_skipped_not_fatal() -> None:
     # One rendered non-matching event: a CLEAN needs evidence, an empty log is UNKNOWN.
     host = lp_host(
         fail={NLS_LANGUAGE},
-        events=[_event("Language Pack installed, state Installed", datetime(2026, 8, 1, tzinfo=timezone.utc))],
+        events=[_event("Language Pack installed, state Installed", datetime(2026, 8, 1, tzinfo=UTC))],
     )
 
     code, envelope = _run(host, "detect-lp-defect")
@@ -380,7 +380,7 @@ def test_build_refusal_names_what_the_registry_held(values: list[RegistryValue],
 
 def test_lp_defect_reports_a_wrong_typed_build_as_unknown_not_refused() -> None:
     host = lp_host(
-        events=[_event("Language Pack installed, state Installed", datetime(2026, 8, 1, tzinfo=timezone.utc))],
+        events=[_event("Language Pack installed, state Installed", datetime(2026, 8, 1, tzinfo=UTC))],
         registry_values={
             CURRENT_VERSION: [_reg("CurrentBuild", "26200"), _reg("UBR", "9711"), _reg("DisplayVersion", 25)],
             NLS_LANGUAGE: [_reg("InstallLanguage", "0407")],
@@ -848,7 +848,7 @@ def test_a_state_log_refuses_a_verdict_the_run_never_writes() -> None:
 
 
 def test_task_time_renders_pwshpys_utc_as_the_guests_local_wall_time() -> None:
-    labelled = datetime(2026, 10, 21, 19, 57, 6, 123000).astimezone(timezone.utc)
+    labelled = datetime(2026, 10, 21, 19, 57, 6, 123000).astimezone(UTC)
 
     # Whole seconds, as the docstring shows; None stays None (never ran).
     assert probes.task_time(labelled) == "2026-10-21T19:57:06"

@@ -17,7 +17,7 @@ import shlex
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -565,7 +565,7 @@ RECEIPT = RepairReceipt(
     image_spbuild=IMAGE.spbuild,
     build_before=BuildPair(build=26200, ubr=7462),
     install_date_before=INSTALL_DATE,
-    written_at=datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc),
+    written_at=datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC),
 )
 
 

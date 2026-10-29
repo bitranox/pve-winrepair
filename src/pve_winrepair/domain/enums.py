@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from enum import Enum
+from enum import StrEnum
 
 
-class OutputFormat(str, Enum):
+class OutputFormat(StrEnum):
     """Output format options for configuration display.
 
     Defines valid output format choices for the config command.
@@ -26,7 +26,7 @@ class OutputFormat(str, Enum):
     JSON = "json"
 
 
-class DeployTarget(str, Enum):
+class DeployTarget(StrEnum):
     """Configuration deployment target layers.
 
     Defines valid target layers for configuration file deployment.
@@ -49,7 +49,7 @@ class DeployTarget(str, Enum):
     USER = "user"
 
 
-class DriveLetter(str, Enum):
+class DriveLetter(StrEnum):
     r"""A Windows drive letter, as the operator names the drive to stage the media on.
 
     :meth:`parse` takes the forms an operator types (``d``, ``D:``, ``D:\``) and refuses anything
@@ -107,7 +107,7 @@ class DriveLetter(str, Enum):
         return f"{self.value}:\\upgrade"
 
 
-class MediaChoice(str, Enum):
+class MediaChoice(StrEnum):
     """Where a repair takes its installation media from.
 
     ``NODE`` is the node's ``[repair] media_dir``, ``LOCAL`` this machine's ``[repair] local_media_dir``.

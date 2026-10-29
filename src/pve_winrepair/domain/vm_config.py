@@ -15,7 +15,7 @@ reads that, with the exit code and the stderr a refusal quotes, into a :class:`S
 from __future__ import annotations
 
 import re
-from enum import Enum
+from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict
 
@@ -50,7 +50,7 @@ _CURRENT = "current"
 _FS_FREEZE = "freeze guest filesystem"
 
 
-class DiskMedia(str, Enum):
+class DiskMedia(StrEnum):
     """What a disk entry holds: a disk image, or an optical medium (``media=cdrom``)."""
 
     DISK = "disk"
