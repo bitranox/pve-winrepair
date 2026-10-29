@@ -73,7 +73,7 @@ setup.exe runs with `/noreboot`, so the guest keeps running the old OS with the 
 On the Proxmox VE node:
 
 - Run as root: the commands call `qm`.
-- [uv](https://docs.astral.sh/uv/). It also fetches a Python 3.10 or newer when the node has none.
+- [uv](https://docs.astral.sh/uv/). It also fetches a Python 3.11 or newer when the node has none.
 - A directory with the installation media, unpacked as on the ISO: `setup.exe` and
   `sources\install.wim` at its top level. Use media of the guest's edition and language; setup keeps
   the applications only then. The WIM gate refuses media older than the guest's build. [Getting the

@@ -6,6 +6,13 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+### Removed
+
+- Python 3.10 support: the package and the guest tool need Python 3.11 or newer. On a node or
+  guest that has only 3.10, uv fetches a 3.11 or newer interpreter on the next run. The CI lane
+  for 3.10 goes with it, and so does its pinned filelock 4.1.0, which carried open advisories
+  that no 3.10-compatible release fixes.
+
 ## [2.0.0] 2026-10-28 23:38:06
 
 A major release because a configuration 1.0.0 ran with can now stop with exit 78 before any call:

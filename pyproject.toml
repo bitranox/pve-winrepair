@@ -3,7 +3,7 @@ name = "pve-winrepair"
 version = "2.0.0"
 description = "Repair Windows guests on Proxmox VE whose cumulative updates fail, with an offline in-place repair upgrade driven from the node"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
     "rich-click>=1.9.9",
     # Imported directly (adapters/cli/main.py, commands/config.py), not only through rich-click.
@@ -12,7 +12,7 @@ dependencies = [
     # At least 7.0.1: settings parse into enums, so an unknown console_theme is refused at load and a section
     # reports every invalid setting; validate_config (config --profile's check) refuses what init() does.
     # From 8.0.0 an unknown key in the section, or in its payload_limits table, is refused too.
-    "lib_log_rich>=8.1.1",
+    "lib_log_rich>=8.1.2",
     "python-dotenv>=1.2.4",
     "lib_layered_config>=7.3.0",
     "pydantic>=2.14.1",
@@ -24,7 +24,6 @@ keywords = ["proxmox", "pve", "windows", "repair", "in-place-upgrade", "windows-
 classifiers = [
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3 :: Only",
-  "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
@@ -55,7 +54,7 @@ dev = [
   "pytest>=9.1.1",
   "pytest-cov>=7.1.0",
   "pytest-xdist>=3.8.0",
-  "hypothesis>=6.168.5",
+  "hypothesis>=6.170.5",
   "ruff>=0.17.1",
   "pyright[nodejs]>=1.1.414",
   "bandit>=1.9.4",
@@ -78,7 +77,7 @@ dev = [
   # pyright must see the pwshpy the packed tool runs with.
   "pwshpy==1.8.0",
   "rtoml>=0.14.0",
-  "httpx2>=2.14.0",
+  "httpx2>=2.16.0",
   # Transitive CVE pins
   "click>=8.5.0",                # CVE-2026-7246
   "jaraco-context>=6.1.2",       # CVE-2025-23949
@@ -87,8 +86,7 @@ dev = [
   "pynacl>=1.6.2",               # CVE-2025-69277
   "urllib3>=2.8.0",              # CVE-2025-66471, CVE-2025-66418
   "virtualenv>=21.14.12",        # CVE-2025-22702, CVE-2026-113722, CVE-2026-113713
-  # No fixed filelock supports 3.10 (4.2.x needs >=3.11), so the 3.10 lane keeps 4.1.0.
-  "filelock>=4.2.4; python_version >= '3.11'",  # CVE-2026-112906
+  "filelock>=4.2.4",             # CVE-2026-112906
   "certifi>=2026.10.19",         # PYSEC-2026-4320
 ]
 

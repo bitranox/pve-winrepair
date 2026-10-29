@@ -1,5 +1,5 @@
 # /// script
-# requires-python = ">=3.10"
+# requires-python = ">=3.11"
 # dependencies = ["pwshpy==1.8.0", "pydantic==2.14.1", "pywin32==312; sys_platform == 'win32'"]
 # ///
 r"""winrepair guest tool: every in-guest step of the repair as one typed command line tool.

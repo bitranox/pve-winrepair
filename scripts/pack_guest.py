@@ -1,6 +1,6 @@
 #!/usr/bin/env -S uv run --script
 # /// script
-# requires-python = ">=3.10"
+# requires-python = ">=3.11"
 # dependencies = ["pwshpy==1.8.0"]
 # ///
 """Pack the guest tool into the node package's committed artefact, or check that it is fresh.
