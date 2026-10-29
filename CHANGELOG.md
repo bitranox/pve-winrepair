@@ -6,6 +6,20 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+## [3.0.0] 2026-10-29 14:02:51
+
+A major release because Python 3.10 is no longer supported, and because code that imports the
+package sees a different `str()` for its enums. The command line, the configuration and the
+receipts are unchanged. On 3.10, pip and uv keep installing 2.0.0.
+
+### Changed
+
+- The 47 string enums of the package and the guest tool (`RunVerdict`, `StepName`, `VmStatus`,
+  the guest-answer verdicts and the rest) are `StrEnum` classes; they were `(str, Enum)` mixins.
+  `str()` and f-strings of a member now give its value (`str(VmStatus.RUNNING)` is `"running"`),
+  where they gave `"VmStatus.RUNNING"` before. Comparisons with strings, `.value`, and the JSON
+  the CLI and the guest tool emit are unchanged.
+
 ### Removed
 
 - Python 3.10 support: the package and the guest tool need Python 3.11 or newer. On a node or
