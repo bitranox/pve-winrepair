@@ -6,6 +6,16 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+### Changed
+
+- The `lib_layered_config` floor is 7.4.1.
+
+### Tests
+
+- Three `config` display tests compare the shown hosts exactly instead of searching the output
+  for a host substring, which CodeQL flagged as `py/incomplete-url-substring-sanitization` and
+  which also passed on a wrong host such as `xhost.test.com:220`.
+
 ## [3.0.0] 2026-10-29 14:02:51
 
 A major release because Python 3.10 is no longer supported, and because code that imports the

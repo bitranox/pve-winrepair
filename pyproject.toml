@@ -14,7 +14,7 @@ dependencies = [
     # From 8.0.0 an unknown key in the section, or in its payload_limits table, is refused too.
     "lib_log_rich>=8.1.2",
     "python-dotenv>=1.2.4",
-    "lib_layered_config>=7.3.0",
+    "lib_layered_config>=7.4.1",
     "pydantic>=2.14.1",
     "orjson>=3.13.0",
 ]
@@ -55,7 +55,7 @@ dev = [
   "pytest-cov>=7.1.0",
   "pytest-xdist>=3.8.0",
   "hypothesis>=6.170.5",
-  "ruff>=0.17.1",
+  "ruff>=0.17.2",
   "pyright[nodejs]>=1.1.414",
   "bandit>=1.9.4",
   "build>=1.6.1",

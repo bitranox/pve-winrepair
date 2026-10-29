@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -121,9 +122,7 @@ def test_when_config_is_invoked_with_json_format_and_section_it_shows_section(
     result: Result = cli_runner.invoke(cli_mod.cli, ["config", "--format", "json", "--section", "remote"], obj=factory)
 
     _assert_shown_then_refused_as_unknown(result, "remote")
-    assert "remote" in result.output
-    assert "hosts" in result.output
-    assert "host.test.com:22" in result.output
+    assert json.loads(result.stdout)["remote"]["hosts"] == ["host.test.com:22"]
 
 
 @pytest.mark.os_agnostic
@@ -169,9 +168,8 @@ def test_when_config_is_invoked_with_section_showing_complex_values(
 
     _assert_shown_then_refused_as_unknown(result, "remote")
     assert "[remote]" in result.output
-    assert "hosts" in result.output
-    assert "host1.test.com:22" in result.output
-    assert "host2.test.com:22" in result.output
+    hosts_line = next(line.strip() for line in result.stdout.splitlines() if line.strip().startswith("hosts"))
+    assert hosts_line == 'hosts = ["host1.test.com:22", "host2.test.com:22"]'
     assert "metadata" in result.output
     assert '"test@example.com"' in result.output
     assert "60.0" in result.output
@@ -569,8 +567,9 @@ def test_when_config_displays_password_in_list_of_dicts_it_redacts(
     _assert_shown_then_refused_as_unknown(result, "connections")
     assert "secret123" not in result.stdout
     assert "secret456" not in result.stdout
-    assert "primary.example.com" in result.stdout
-    assert "REDACTED" in result.stdout
+    servers = json.loads(result.stdout)["connections"]["servers"]
+    assert [server["host"] for server in servers] == ["primary.example.com", "backup.example.com"]
+    assert [server["password"] for server in servers] == ["***REDACTED***", "***REDACTED***"]
 
 
 @pytest.mark.os_agnostic
