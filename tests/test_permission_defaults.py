@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 import rtoml
-from lib_layered_config import Config, deploy_permissions_from_config
+from lib_layered_config import Config, Layer, deploy_permissions_from_config
 
 from pve_winrepair import __init__conf__
 from pve_winrepair.adapters import cli as cli_mod
@@ -307,9 +307,9 @@ def test_the_layer_modes_are_755_644_for_app_and_host_and_700_600_for_user(sourc
 
     modes = {
         layer: (settings.for_layer(layer).directory.value, settings.for_layer(layer).file.value)
-        for layer in ("app", "host", "user")
+        for layer in (Layer.APP, Layer.HOST, Layer.USER)
     }
-    assert modes == {"app": (0o755, 0o644), "host": (0o755, 0o644), "user": (0o700, 0o600)}
+    assert modes == {Layer.APP: (0o755, 0o644), Layer.HOST: (0o755, 0o644), Layer.USER: (0o700, 0o600)}
     assert settings.enabled is True
 
 

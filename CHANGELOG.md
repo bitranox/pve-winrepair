@@ -12,6 +12,10 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ### Tests
 
+- `tests/test_permission_defaults.py` passes `Layer` members to `DeployPermissions.for_layer`
+  instead of the strings `"app"`, `"host"` and `"user"`. lib_layered_config 7.6 types that
+  parameter as `Layer`, so pyright strict refused the strings as soon as the floor reached it; the
+  members also satisfy the `str` parameter of older floors.
 - Three `config` display tests compare the shown hosts exactly instead of searching the output
   for a host substring, which CodeQL flagged as `py/incomplete-url-substring-sanitization` and
   which also passed on a wrong host such as `xhost.test.com:220`.
