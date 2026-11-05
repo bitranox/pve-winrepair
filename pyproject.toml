@@ -75,7 +75,7 @@ dev = [
   "import-linter>=2.15",
   # Exact, not a floor: the guest tool's own PEP 723 header pins this version, and the tests and
   # pyright must see the pwshpy the packed tool runs with.
-  "pwshpy==1.8.0",
+  "pwshpy==1.11.0",
   "rtoml>=0.14.0",
   "httpx2>=2.16.0",
   # Transitive CVE pins
