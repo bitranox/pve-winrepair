@@ -12,7 +12,8 @@ dependencies = [
     # At least 7.0.1: settings parse into enums, so an unknown console_theme is refused at load and a section
     # reports every invalid setting; validate_config (config --profile's check) refuses what init() does.
     # From 8.0.0 an unknown key in the section, or in its payload_limits table, is refused too.
-    "lib_log_rich>=8.1.2",
+    # From 8.2.0 an unreachable Graylog is backed off from instead of stalling the log queue.
+    "lib_log_rich>=8.2.0",
     "python-dotenv>=1.2.4",
     "lib_layered_config>=7.7.0",
     "pydantic>=2.14.3",
