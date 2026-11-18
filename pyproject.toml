@@ -15,7 +15,7 @@ dependencies = [
     # From 8.2.0 an unreachable Graylog is backed off from instead of stalling the log queue.
     "lib_log_rich>=8.2.0",
     "python-dotenv>=1.2.4",
-    "lib_layered_config>=7.7.0",
+    "lib_layered_config>=8.1.0",
     "pydantic>=2.14.3",
     "orjson>=3.13.0",
 ]

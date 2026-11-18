@@ -9,8 +9,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
-from lib_layered_config import deploy_config
-from lib_layered_config.examples.deploy import DeployAction
+from lib_layered_config import DeployAction, deploy_config
 
 from pve_winrepair import __init__conf__
 from pve_winrepair.adapters.config.loader import get_default_config_path, validate_profile
