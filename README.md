@@ -94,7 +94,7 @@ On the Windows guest (Windows 10 or 11):
 - Internet access the first time the guest tool runs as a given user, SYSTEM included: it installs
   `uv` for that user when the guest has no uv that user can trust, downloads a uv-managed Python
   into that user's own profile (an elevated run uses no other Python), and resolves its own pinned
-  dependencies (`pwshpy==1.8.0`, `pywin32==312`) from PyPI at that moment. Proxy variables are
+  dependencies (`pwshpy==1.12.2`, `pywin32==312`) from PyPI at that moment. Proxy variables are
   ignored in an elevated run, so the guest needs direct access. See [SECURITY.md](SECURITY.md) for
   what that trusts.
 - Free space: by default 15 GiB on the staging drive for the media and 25 GiB on `C:` (`[repair]
@@ -105,7 +105,7 @@ On the Windows guest (Windows 10 or 11):
 Run a fixed version with `uvx`, which installs nothing permanently on the node:
 
 ```bash
-uvx pve-winrepair@2.0.0 --version
+uvx pve-winrepair@3.0.2 --version
 ```
 
 For regular use, put a small wrapper on the node that pins the version and passes a supply-chain
@@ -115,7 +115,7 @@ cooldown, for example as `/usr/local/sbin/pve-winrepair`:
 #!/usr/bin/env bash
 # pve-winrepair, pinned. Upgrade by raising PVE_WINREPAIR_VERSION.
 set -euo pipefail
-readonly PVE_WINREPAIR_VERSION="2.0.0"
+readonly PVE_WINREPAIR_VERSION="3.0.2"
 exec uv tool run \
     --exclude-newer "7 days" \
     --exclude-newer-package pve-winrepair=false \
@@ -143,7 +143,7 @@ uv tool install \
     --exclude-newer-package lib-layered-config=false \
     --exclude-newer-package lib-log-rich=false \
     --exclude-newer-package lib-cli-exit-tools=false \
-    "pve-winrepair==2.0.0"
+    "pve-winrepair==3.0.2"
 ```
 
 [INSTALL.md](INSTALL.md) lists the other ways.

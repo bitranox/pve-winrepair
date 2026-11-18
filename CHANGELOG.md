@@ -10,6 +10,11 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 - `lib_layered_config>=8.1.0`: `DeployAction` (and `DeployResult`) are imported from the package
   root instead of the `lib_layered_config.examples` shim, which lib_layered_config 9.0.0 removes.
+- The guest tool runs with `pwshpy==1.12.2` instead of `pwshpy==1.8.0` (PEP 723 header, the pack
+  script and the dev extra), and the packed `winrepair_guest.ps1` is rebuilt with it. pwshpy 1.8.0
+  imports the `lib_layered_config.examples` shim under an uncapped `lib-layered-config>=7.3.0`, so
+  from lib_layered_config 9.0.0 on the old guest tool failed at import on every fresh resolve.
+- README: the pinned install examples name 3.0.2 instead of the stale 2.0.0.
 
 ## [3.0.1] - 2026-11-12
 
